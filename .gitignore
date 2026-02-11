@@ -68,5 +68,6 @@ logs/
 Thumbs.db
 
 # Project specific
+archive/
 *.db
 *.sqlite3

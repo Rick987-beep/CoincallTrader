@@ -1,7 +1,7 @@
 # CoincallTrader Architecture & Development Plan
 
-**Version:** 1.4  
-**Date:** February 14, 2026  
+**Version:** 1.5  
+**Date:** February 13, 2026  
 **Status:** Phase 4 Complete (Strategy Framework)
 
 ---
@@ -12,166 +12,90 @@ This document outlines the transformation of CoincallTrader from a simple option
 
 ---
 
-## Current State Assessment
+## Current State (Phase 4 complete)
 
-### What We Have
-- ✅ Working authentication (`auth.py`) with HMAC-SHA256 signing
-- ✅ Environment switching (testnet ↔ production) via `config.py`
-- ✅ Market data retrieval (`market_data.py`) - options, BTC futures price
-- ✅ Option selection logic (`option_selection.py`) - expiry/strike filtering
-- ✅ Basic order placement/cancellation (`trade_execution.py`)
-- ✅ Simple scheduler-based execution (APScheduler in `main.py`)
-- ✅ Config-driven strategy parameters
+### Implemented
+- ✅ **Authentication** — HMAC-SHA256 signing (`auth.py`), JSON + form-urlencoded
+- ✅ **Configuration** — Environment switching via `.env`, strategy params in code (`config.py`)
+- ✅ **Market data** — Option chains, orderbooks, BTC price, option details (`market_data.py`)
+- ✅ **Option selection** — Expiry/strike/delta filtering + `LegSpec` declarative resolution (`option_selection.py`)
+- ✅ **Order execution** — Limit orders, get/cancel/status queries (`trade_execution.py`)
+- ✅ **RFQ execution** — Block trades for $50k+ notional multi-leg structures (`rfq.py`)
+- ✅ **Smart orderbook execution** — Chunked quoting with aggressive fallback (`multileg_orderbook.py`)
+- ✅ **Trade lifecycle** — State machine (PENDING_OPEN → … → CLOSED), exit conditions, multi-leg native (`trade_lifecycle.py`)
+- ✅ **Position monitoring** — Background polling, `AccountSnapshot`/`PositionSnapshot`, live Greeks (`account_manager.py`)
+- ✅ **Strategy framework** — `TradingContext` DI, `StrategyConfig`, `StrategyRunner`, 7 entry condition factories, dry-run mode (`strategy.py`)
+- ✅ **Scheduling** — `time_window()`, `weekday_filter()` as entry conditions
+- ✅ **Account info** — Equity, available margin, IM/MM amounts, margin utilisation, aggregated Greeks
+- ✅ **Logging** — File + console logging to `logs/trading.log` (audit trail)
 
-### What's Missing
-- ✅ Complete position lifecycle management
-- ✅ **Smart orderbook execution for multi-leg trades** - Completed Feb 13, 2026
-- ✅ **Strategy framework with entry/exit conditions** - Completed Feb 14, 2026
-- ⚠️ Portfolio hierarchy (positions → portfolios → accounts)
-- ⚠️ Multi-instrument support (futures, spot)
-- ✅ **RFQ (Request for Quote) execution** - Completed Feb 9, 2026
-- ✅ **Time-based trading conditions (scheduling)** - Included in strategy framework
-- ⚠️ Web dashboard for monitoring
-- ⚠️ Persistence and recovery
+### Not yet implemented
+- ⬜ Multi-instrument support (futures, spot)
+- ⬜ Web dashboard for monitoring
+- ⬜ Persistent state storage (DB) and crash recovery
+- ⬜ Margin alerts (email/webhook)
+- ⬜ Historical P&L tracking
+- ⬜ Expiry-aware rolling
 
 ---
 
-## Coincall API Capabilities (from official docs)
+## Coincall API Reference
 
-### Instruments Supported
-| Instrument | Order Types | API Endpoints |
-|------------|-------------|---------------|
-| **Options** | LIMIT, POST_ONLY, BLOCK_TRADE | `/open/option/order/*` |
-| **Futures** | LIMIT, MARKET, POST_ONLY, STOP_LIMIT, STOP_MARKET | `/open/futures/order/*` |
-| **Spot** | LIMIT, MARKET, POST_ONLY | `/open/spot/trade/*` |
+See [API_REFERENCE.md](API_REFERENCE.md) for full endpoint documentation, response formats, and code examples.
 
-### RFQ System (Block Trades)
-The Coincall RFQ system enables multi-leg block trades with the following workflow:
-
-**As Taker (We request a quote):**
-1. `POST /open/option/blocktrade/request/create/v1` - Create RFQ with legs
-2. `GET /open/option/blocktrade/request/getQuotesReceived/v1` - Poll for quotes
-3. `POST /open/option/blocktrade/request/accept/v1` - Execute a received quote
-
-**As Maker (We provide quotes):**
-1. Subscribe to RFQ stream via WebSocket (`dataType: "rfqMaker"`)
-2. `POST /open/option/blocktrade/quote/create/v1` - Submit quote
-3. Quote gets filled or expires
-
-**RFQ Request Structure:**
-```json
-{
-  "legs": [
-    {"instrumentName": "BTCUSD-29OCT25-109000-C", "side": "BUY", "qty": "0.2"},
-    {"instrumentName": "BTCUSD-29OCT25-109000-P", "side": "SELL", "qty": "0.2"}
-  ]
-}
-```
-
-**RFQ States:** `ACTIVE`, `CANCELLED`, `FILLED`, `EXPIRED`, `TRADED_AWAY`
-
-### WebSocket Channels
-| Channel | Data Type | Use Case |
-|---------|-----------|----------|
-| `order` | Private | Order status updates |
-| `position` | Private | Position changes |
-| `positionEvent` | Private | Position events (new) |
-| `trade` | Private | Trade confirmations |
-| `orderBook` | Public | Market depth |
-| `lastTrade` | Public | Recent trades |
-| `rfqMaker` / `rfqTaker` | Private | RFQ notifications |
-| `quoteReceived` | Private | Incoming quotes (taker) |
-| `blockTradeDetail` | Private | Block trade confirmations |
-
-### Account Endpoints
-| Endpoint | Purpose |
-|----------|---------|
-| `GET /open/account/summary/v1` | Account balance, equity, margin |
-| `GET /open/account/wallet/v1` | Wallet holdings |
-| `GET /open/futures/position/get/v1` | Futures positions |
-| `GET /open/option/position/get/v1` | Options positions |
-
-### Rate Limits
-- Order placement: 60/s
-- General API: Varies by endpoint
-
-### Market Maker Features
-- MMP (Market Maker Protection) flag on orders
-- Countdown/cancel-all functionality
-- Batch order operations (up to 40 orders)
+Key facts:
+- Official docs: https://docs.coincall.com/
+- Options, Futures, Spot instruments supported
+- Order rate limit: 60/s
+- RFQ minimum notional: $50,000
+- Order states: 0=NEW, 1=FILLED, 2=PARTIAL, 3=CANCELED, 6=INVALID
+- Order status endpoint: `GET /open/option/order/singleQuery/v1?orderId={id}` (not path-based)
 
 ---
 
 ## Target Architecture
 
 ### Design Principles
-1. **Composition over inheritance** - Use protocols and mixins
-2. **Dataclasses everywhere** - Simple, typed data containers
-3. **Single responsibility** - Each module does one thing well
-4. **Configuration-driven** - Strategies defined in config, not hardcoded
-5. **Event-driven core** - Cleaner than pure polling
-6. **Fail-safe defaults** - Conservative behavior when uncertain
+1. **Composition over inheritance** — Callable conditions, not class hierarchies
+2. **Dataclasses everywhere** — Simple, typed data containers
+3. **Single responsibility** — Each module does one thing well
+4. **Configuration-driven** — Strategies defined as data (`StrategyConfig`), not hardcoded
+5. **Tick-driven core** — `PositionMonitor` drives `StrategyRunner.tick()` — no event queues or extra threads
+6. **Fail-safe defaults** — Conservative behavior when uncertain
+7. **Flat file structure** — One module per concern; add packages only when complexity demands it
 
-### Proposed Directory Structure
+### Current Directory Structure
 ```
 CoincallTrader/
-├── main.py                    # Event loop + scheduler entry point
-├── config.py                  # Environment & strategy configuration
-├── auth.py                    # Authentication (unchanged)
-│
-├── core/                      # Core abstractions
-│   ├── __init__.py
-│   ├── events.py              # Event types (MarketEvent, SignalEvent, etc.)
-│   ├── event_queue.py         # Central event queue
-│   └── scheduler.py           # Time-based triggers
-│
-├── portfolio/                 # Position & portfolio management
-│   ├── __init__.py
-│   ├── position.py            # Single instrument position
-│   ├── portfolio.py           # Collection of positions
-│   └── account.py             # Account-level view, margin checks
-│
-├── execution/                 # Order execution layer
-│   ├── __init__.py
-│   ├── order.py               # Order types, states, lifecycle
-│   ├── executor.py            # Order routing & management
-│   ├── rfq.py                 # RFQ-specific logic
-│   └── algos.py               # Execution algorithms (TWAP, etc.)
-│
-├── data/                      # Market data layer
-│   ├── __init__.py
-│   ├── market_data.py         # Unified interface
-│   ├── options.py             # Options-specific data
-│   ├── futures.py             # Futures-specific data
-│   ├── spot.py                # Spot-specific data
-│   └── websocket.py           # WebSocket connections
-│
-├── strategies/                # Trading strategies
-│   ├── __init__.py
-│   ├── base.py                # Strategy ABC
-│   ├── short_strangle.py      # Example: short strangle
-│   └── delta_hedger.py        # Example: delta hedging
-│
-├── dashboard/                 # Web monitoring interface
-│   ├── __init__.py
-│   ├── app.py                 # FastAPI/Flask app
-│   └── templates/             # HTML templates
-│
-├── persistence/               # State persistence
-│   ├── __init__.py
-│   └── database.py            # SQLite or JSON storage
-│
-├── docs/                      # Documentation
-│   ├── ARCHITECTURE_PLAN.md   # This file
-│   ├── API_REFERENCE.md       # Coincall API notes
-│   └── STRATEGY_GUIDE.md      # How to write strategies
-│
-├── tests/                     # Test suite
-├── logs/                      # Log files
-└── archive/                   # Legacy code
+├── main.py                 # Entry point — wires TradingContext, registers runners
+├── strategy.py             # Strategy framework (TradingContext, StrategyConfig, StrategyRunner)
+├── config.py               # Environment config (.env loading)
+├── auth.py                 # HMAC-SHA256 API authentication
+├── market_data.py          # Option chains, orderbooks, BTC price
+├── option_selection.py     # LegSpec, resolve_legs(), select_option()
+├── trade_execution.py      # Order placement, cancellation, status queries
+├── trade_lifecycle.py      # TradeState machine, TradeLeg, LifecycleManager, exit conditions
+├── multileg_orderbook.py   # Smart chunked multi-leg execution
+├── rfq.py                  # RFQ block-trade execution ($50k+ notional)
+├── account_manager.py      # AccountSnapshot, PositionMonitor, margin/equity queries
+├── requirements.txt
+├── .env                    # API keys (gitignored)
+├── docs/
+│   ├── ARCHITECTURE_PLAN.md
+│   └── API_REFERENCE.md
+├── tests/
+│   ├── test_strategy_framework.py   # 72/72 unit assertions
+│   └── test_live_dry_run.py         # 27/27 integration assertions
+├── logs/                   # Runtime logs (gitignored)
+└── archive/                # Legacy code (gitignored)
 ```
 
-**Estimated size:** ~15-20 Python files, ~2500-3500 lines total
+**Current size:** 11 Python modules, ~5,000 lines total
+
+### Future additions (when needed)
+- `dashboard/` — Web monitoring interface (FastAPI)
+- `persistence/` — SQLite state storage and crash recovery
+- Futures/spot modules may extend `market_data.py` and `trade_execution.py` directly rather than adding a package hierarchy
 
 ---
 
@@ -181,8 +105,8 @@ CoincallTrader/
 
 | Requirement | Priority | Description |
 |-------------|----------|-------------|
-| REQ-TL-01 | High | Dynamic instrument selection based on criteria (expiry, strike, delta) |
-| REQ-TL-02 | High | Order placement with execution mode selection (limit, RFQ, aggressive) |
+| REQ-TL-01 | ✅ **Done** | Dynamic instrument selection based on criteria (expiry, strike, delta) — `LegSpec` + `resolve_legs()` |
+| REQ-TL-02 | ✅ **Done** | Order placement with execution mode selection (limit, RFQ, smart) — 3 modes in `LifecycleManager` |
 | REQ-TL-03 | ✅ **Done** | RFQ execution for multi-leg options trades |
 | REQ-TL-04 | ✅ **Done** | Position tracking: link orders → fills → positions |
 | REQ-TL-05 | ✅ **Done** | Conditional exit logic (profit targets, stop losses, time decay) |
@@ -224,8 +148,8 @@ CoincallTrader/
 
 | Requirement | Priority | Description |
 |-------------|----------|-------------|
-| REQ-AI-01 | High | Balance & equity queries |
-| REQ-AI-02 | High | Margin monitoring with alerts |
+| REQ-AI-01 | ✅ **Done** | Balance & equity queries — `AccountSnapshot` (equity, available_margin, IM, MM, utilisation) |
+| REQ-AI-02 | ✅ **Partial** | Margin monitoring — entry conditions (`min_available_margin_pct`, `max_margin_utilization`); alerts (email/webhook) not yet implemented |
 | REQ-AI-03 | Medium | Wallet holdings per asset |
 | REQ-AI-04 | Low | Historical P&L tracking |
 
@@ -243,31 +167,19 @@ CoincallTrader/
 
 | Requirement | Priority | Description |
 |-------------|----------|-------------|
-| REQ-PR-01 | Medium | Persist open positions to database |
-| REQ-PR-02 | Medium | Persist order history |
-| REQ-PR-03 | Medium | Persist strategy state |
+| REQ-PR-01 | ✅ **Partial** | Position persistence — file logging to `logs/trading.log` provides audit trail; no DB storage yet |
+| REQ-PR-02 | ✅ **Partial** | Order history — logged to file; no queryable DB |
+| REQ-PR-03 | Medium | Persist strategy state to database |
 | REQ-PR-04 | Medium | Restart recovery: reload state on startup |
 
 ---
 
 ## Implementation Phases
 
-### Phase 0: Foundation Cleanup (1-2 days)
-**Goal:** Introduce event-driven architecture without breaking existing functionality.
+### Phase 0: Foundation Cleanup — SUPERSEDED
 
-**Tasks:**
-1. Create `core/events.py` with event types:
-   - `MarketEvent` - New market data available
-   - `SignalEvent` - Strategy wants to trade
-   - `OrderEvent` - Order to be placed
-   - `FillEvent` - Order was filled
-2. Create `core/event_queue.py` with simple Queue wrapper
-3. Refactor `main.py` to use event loop pattern alongside scheduler
-
-**Deliverables:**
-- [ ] `core/events.py`
-- [ ] `core/event_queue.py`
-- [ ] Updated `main.py`
+Originally planned an event-queue architecture (`core/events.py`, `core/event_queue.py`).  
+This was replaced by the simpler **tick model**: `PositionMonitor.on_update()` drives `StrategyRunner.tick()` — no event queue, no extra threads, no scheduler dependency. Design principles 1–4 and 6 are followed; principle 5 (event-driven) was intentionally swapped for the tick-driven approach.
 
 ---
 
@@ -284,7 +196,7 @@ Created `rfq.py` module (~800 lines) with complete RFQ lifecycle management.
 - `RFQExecutor` - Main executor with `execute(legs, action='buy'|'sell')`
 
 **Key Learnings:**
-1. RFQs must always be submitted with legs as `side: "BUY"` to Coincall
+1. Legs specify their own `side` ("BUY" or "SELL") — spreads have both; the API does not require all legs to be BUY
 2. Market makers respond with two-way quotes (both BUY and SELL)
 3. Quote `side` indicates MM's action: `MM SELL` = we buy, `MM BUY` = we sell
 4. Accept/Cancel endpoints require `application/x-www-form-urlencoded` content type
@@ -512,48 +424,45 @@ smart_config = SmartExecConfig(
 ### Phase 5: Multi-Instrument Support (2-3 days)
 **Goal:** Extend trading to futures and spot markets.
 
+**Approach:** Extend existing flat modules rather than creating a `data/` package.
+
 **Tasks:**
-1. Create `data/futures.py`:
-   - `get_futures_instruments()`
-   - `get_futures_orderbook(symbol)`
-   - `get_futures_position()`
+1. Add futures methods to `market_data.py` and `trade_execution.py`:
+   - `get_futures_instruments()`, `get_futures_orderbook(symbol)`
+   - `place_futures_order()`, `get_futures_positions()`
+2. Add spot methods similarly
+3. Extend `LegSpec` to support non-option instruments
 
-2. Create `data/spot.py`:
-   - `get_spot_instruments()`
-   - `get_spot_orderbook(symbol)`
-
-3. Extend `execution/executor.py`:
-   - `place_futures_order()`
-   - `place_spot_order()`
-
-4. Create unified `Instrument` base class
-
-**API Endpoints Used:**
+**API Endpoints:**
 - `GET /open/futures/market/instruments/v1`
 - `POST /open/futures/order/create/v1`
 - `GET /open/spot/market/instruments`
 - `POST /open/spot/trade/order/v1`
 
 **Deliverables:**
-- [ ] `data/futures.py`
-- [ ] `data/spot.py`
-- [ ] Extended executor
+- [ ] Futures support in `market_data.py` + `trade_execution.py`
+- [ ] Spot support in `market_data.py` + `trade_execution.py`
+- [ ] Extended `LegSpec` for non-option instruments
 - [ ] Integration tests
 
 ---
 
-### Phase 6: Account Information (1 day)
-**Goal:** Consolidate and enhance account-level information.
+### Phase 6: Account Alerts & Monitoring (1 day)
+**Goal:** Add proactive alerting on top of the existing `AccountSnapshot` infrastructure.
 
-**Tasks:**
-1. Consolidate `account_manager.py` into `portfolio/account.py`
-2. Add margin monitoring with configurable alerts
-3. Implement account health checks before trading
+**Already done:**
+- `AccountSnapshot` with equity, available_margin, IM, MM, margin_utilisation, aggregated Greeks
+- Entry conditions: `min_available_margin_pct()`, `max_margin_utilization()`, `min_equity()`
+
+**Remaining tasks:**
+1. Margin alert system (email, webhook, or Telegram notifications)
+2. Wallet holdings per asset (`GET /open/account/wallet/v1`)
+3. Historical P&L tracking
 
 **Deliverables:**
-- [ ] Enhanced `portfolio/account.py`
-- [ ] Margin alert system
-- [ ] Pre-trade account checks
+- [ ] Alert notification system
+- [ ] Wallet holdings integration
+- [ ] P&L history logging
 
 ---
 
@@ -561,43 +470,45 @@ smart_config = SmartExecConfig(
 **Goal:** Create a simple web interface for monitoring.
 
 **Tasks:**
-1. Create FastAPI app in `dashboard/app.py`:
+1. Create FastAPI app (`dashboard.py` or `dashboard/` package):
    - `GET /` - Dashboard home
    - `GET /api/strategies` - Running strategies
    - `GET /api/positions` - Current positions
    - `GET /api/account` - Account info
    - `GET /api/logs` - Recent log entries
 
-2. Create simple HTML template with auto-refresh
+2. Simple HTML template with auto-refresh
 
 3. Optional: Add authentication for remote access
 
 **Deliverables:**
-- [ ] `dashboard/app.py`
+- [ ] Dashboard app
 - [ ] HTML templates
 - [ ] Basic CSS styling
 
 ---
 
 ### Phase 8: Persistence & Recovery (1-2 days)
-**Goal:** Enable state persistence and crash recovery.
+**Goal:** Enable queryable state persistence and crash recovery beyond current file logging.
 
-**Tasks:**
-1. Create `persistence/database.py` with SQLite backend:
-   - `save_position(position)`
-   - `load_positions() -> List[Position]`
-   - `save_order(order)`
-   - `save_strategy_state(strategy_id, state)`
+**Already done:**
+- All trades, orders, and state transitions logged to `logs/trading.log`
+- `LifecycleManager` tracks all trades in memory during runtime
 
-2. Implement startup recovery:
-   - Load persisted positions
-   - Reconcile with exchange state
-   - Resume strategies
+**Remaining tasks:**
+1. Create SQLite backend for structured persistence:
+   - Trade lifecycles (state, legs, timestamps)
+   - Order history (order_id, fill_price, fill_qty)
+   - Strategy state (last run, cooldown, active trades)
+2. Startup recovery:
+   - Load persisted trades on restart
+   - Reconcile with exchange position state
+   - Resume StrategyRunners
 
 **Deliverables:**
-- [ ] `persistence/database.py`
+- [ ] `persistence.py` — SQLite read/write
 - [ ] Database schema
-- [ ] Startup recovery logic
+- [ ] Startup recovery logic in `main.py`
 
 ---
 
@@ -610,7 +521,7 @@ smart_config = SmartExecConfig(
 | 3 | **Phase 3: Smart Orderbook Execution** | ✅ Done | Chunked orderbook execution for trades below RFQ minimum |
 | 4 | **Phase 4: Strategy Framework** | ✅ Done | Declarative strategies, entry/exit conditions, DI, dry-run |
 | 5 | Phase 5: Multi-Instrument | 2-3 days | Futures and spot support |
-| 6 | Phase 6: Account Info | 1 day | Margin alerts, pre-trade checks |
+| 6 | Phase 6: Account Alerts | 1 day | Margin alerts, wallet, P&L history |
 | 7 | Phase 7: Dashboard | 2-3 days | Web monitoring interface |
 | 8 | Phase 8: Persistence | 1-2 days | State persistence and crash recovery |
 
@@ -625,36 +536,6 @@ smart_config = SmartExecConfig(
 3. **Concurrent strategies:** Expected to run 2-3 or 10+?
 4. **Deployment target:** VPS, local machine, cloud?
 5. **Backtesting:** Is this a future requirement?
-
----
-
-## Appendix: Coincall API Quick Reference
-
-### Common Response Codes
-- `0` - Success
-- `10534` - Order size exceeds limit
-- `10540` - Order expired
-- `10558` - Less than min amount
-
-### Order States
-- `0` - NEW
-- `1` - FILLED
-- `2` - PARTIALLY_FILLED
-- `3` - CANCELED
-- `6` - INVALID
-- `10` - CANCEL_BY_EXERCISE
-
-### Trade Types
-- `1` - LIMIT
-- `2` - MARKET
-- `3` - POST_ONLY
-- `4` - STOP_LIMIT
-- `5` - STOP_MARKET
-- `14` - BLOCK_TRADE (RFQ)
-
-### Trade Sides
-- `1` - BUY
-- `2` - SELL
 
 ---
 

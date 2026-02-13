@@ -10,7 +10,7 @@ As a Taker, this module:
   4. Accepts the best quote or cancels if no suitable offer
 
 Key Concepts:
-  - RFQs must always be submitted with legs as "BUY" side to Coincall
+  - Each leg specifies its own side ("BUY" or "SELL"); spreads use both
   - Market makers respond with two-way quotes (both BUY and SELL sides)
   - Quote 'side' field indicates the MARKET MAKER's action, not ours:
       MM "SELL" = they sell to us = WE BUY = positive cost (we pay)
@@ -499,7 +499,7 @@ class RFQExecutor:
             RFQResult with execution details
             
         Note:
-            - RFQs are always submitted with legs as "BUY" to Coincall API
+            - Each leg's side is passed to the API as-is (BUY or SELL)
             - Market makers respond with two-way quotes
             - The 'action' parameter determines which quote direction we accept
         """

@@ -11,9 +11,10 @@ Each TradeLifecycle groups one or more legs (e.g. an Iron Condor has 4 legs).
 The LifecycleManager advances every active trade through the state machine on
 each tick(), which is driven by the PositionMonitor callback.
 
-Supports two execution modes:
+Supports three execution modes:
   - "limit"  : per-leg limit orders via TradeExecutor (parallel, with requoting)
   - "rfq"    : atomic multi-leg RFQ via RFQExecutor
+  - "smart"  : multi-leg smart orderbook with chunking & continuous quoting
 
 Exit conditions are callables with signature:
     (AccountSnapshot, TradeLifecycle) -> bool
@@ -30,6 +31,8 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from account_manager import AccountSnapshot, PositionMonitor, PositionSnapshot
 from trade_execution import TradeExecutor
 from rfq import RFQExecutor, OptionLeg, RFQResult
+from multileg_orderbook import SmartOrderbookExecutor, SmartExecConfig
+from market_data import get_option_orderbook
 
 logger = logging.getLogger(__name__)
 
@@ -103,8 +106,9 @@ class TradeLifecycle:
         open_legs:        Legs for opening the position
         close_legs:       Legs for closing (auto-generated as reverse of open)
         exit_conditions:  List of callables; if ANY returns True, trigger close
-        execution_mode:   "limit" or "rfq"
+        execution_mode:   "limit", "rfq", "smart", or None (auto-route)
         rfq_action:       "buy" or "sell" — passed to RFQExecutor.execute()
+        smart_config:     SmartExecConfig for "smart" mode execution
         created_at:       Unix timestamp of creation
         opened_at:        Unix timestamp when all open legs filled
         closed_at:        Unix timestamp when all close legs filled
@@ -118,8 +122,9 @@ class TradeLifecycle:
     open_legs: List[TradeLeg] = field(default_factory=list)
     close_legs: List[TradeLeg] = field(default_factory=list)
     exit_conditions: List[ExitCondition] = field(default_factory=list)
-    execution_mode: str = "limit"       # "limit" or "rfq"
+    execution_mode: Optional[str] = None  # "limit", "rfq", "smart", or None (auto-route)
     rfq_action: str = "buy"             # "buy" or "sell" — for the open
+    smart_config: Optional[SmartExecConfig] = None  # Config for "smart" mode
     created_at: float = field(default_factory=time.time)
     opened_at: Optional[float] = None
     closed_at: Optional[float] = None
@@ -369,10 +374,27 @@ class LifecycleManager:
         # - Detects close fills  → moves to CLOSED
     """
 
-    def __init__(self):
+    def __init__(
+        self,
+        rfq_notional_threshold: float = 50000.0,
+        smart_notional_threshold: float = 10000.0,
+    ):
+        """
+        Initialize LifecycleManager with execution routing parameters.
+        
+        Args:
+            rfq_notional_threshold: Use RFQ for multi-leg orders >= this notional (USD)
+            smart_notional_threshold: Use smart dealing for multi-leg orders >= this notional
+                and < rfq_notional_threshold. Below this, falls back to limit orders per leg.
+        """
         self._trades: Dict[str, TradeLifecycle] = {}
         self._executor = TradeExecutor()
         self._rfq_executor = RFQExecutor()
+        self._smart_executor = SmartOrderbookExecutor()
+        
+        # Execution routing thresholds
+        self.rfq_notional_threshold = rfq_notional_threshold
+        self.smart_notional_threshold = smart_notional_threshold
 
     @property
     def active_trades(self) -> List[TradeLifecycle]:
@@ -397,8 +419,9 @@ class LifecycleManager:
         self,
         legs: List[TradeLeg],
         exit_conditions: Optional[List[ExitCondition]] = None,
-        execution_mode: str = "limit",
+        execution_mode: Optional[str] = None,
         rfq_action: str = "buy",
+        smart_config: Optional[SmartExecConfig] = None,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> TradeLifecycle:
         """
@@ -407,8 +430,13 @@ class LifecycleManager:
         Args:
             legs: TradeLeg objects defining the structure to open
             exit_conditions: Callables that trigger a close when True
-            execution_mode: "limit" or "rfq"
+            execution_mode: "limit", "rfq", "smart", or None (auto-route).
+                If None, execution mode will be auto-selected based on:
+                - Single leg → "limit"
+                - Multi-leg with notional >= rfq_threshold → "rfq"
+                - Multi-leg with notional < rfq_threshold → "smart"
             rfq_action: "buy" or "sell" — passed to RFQExecutor
+            smart_config: SmartExecConfig — optional, can be provided for "smart" mode
             metadata: Arbitrary context (strategy name, notes, etc.)
 
         Returns:
@@ -419,11 +447,91 @@ class LifecycleManager:
             exit_conditions=exit_conditions or [],
             execution_mode=execution_mode,
             rfq_action=rfq_action,
+            smart_config=smart_config,
             metadata=metadata or {},
         )
         self._trades[trade.id] = trade
-        logger.info(f"Trade {trade.id} created: {len(legs)} legs, mode={execution_mode}")
+        logger.info(f"Trade {trade.id} created: {len(legs)} legs, mode={execution_mode or 'auto-route'}")
         return trade
+
+    # -------------------------------------------------------------------------
+    # Execution Mode Routing
+    # -------------------------------------------------------------------------
+
+    def _determine_execution_mode(self, trade: TradeLifecycle) -> str:
+        """
+        Auto-determine execution mode based on trade characteristics.
+        
+        Called only if trade.execution_mode is None (auto-routing enabled).
+        
+        Logic:
+          - Single leg → "limit"
+          - Multi-leg, notional >= rfq_threshold → "rfq"
+          - Multi-leg, smart_threshold <= notional < rfq_threshold → "smart"
+          - Multi-leg, notional < smart_threshold → "limit" (fallback)
+        
+        Args:
+            trade: TradeLifecycle to analyze
+            
+        Returns:
+            Determined execution mode: "limit", "rfq", or "smart"
+        """
+        # Single leg always uses limit orders
+        if len(trade.open_legs) == 1:
+            logger.info(f"[{trade.id}] Single leg detected, using 'limit' mode")
+            return "limit"
+        
+        # Multi-leg: calculate notional value
+        notional = self._calculate_notional(trade.open_legs)
+        logger.info(f"[{trade.id}] Multi-leg notional: ${notional:,.2f}")
+        
+        # Route based on notional thresholds
+        if notional >= self.rfq_notional_threshold:
+            logger.info(f"[{trade.id}] Notional >= ${self.rfq_notional_threshold:,.0f}, using 'rfq' mode")
+            return "rfq"
+        elif notional >= self.smart_notional_threshold:
+            logger.info(f"[{trade.id}] ${self.smart_notional_threshold:,.0f} <= notional < ${self.rfq_notional_threshold:,.0f}, using 'smart' mode")
+            return "smart"
+        else:
+            logger.info(f"[{trade.id}] Notional < ${self.smart_notional_threshold:,.0f}, using 'limit' mode (fallback)")
+            return "limit"
+
+    def _calculate_notional(self, legs: List[TradeLeg]) -> float:
+        """
+        Calculate total notional value of a multi-leg order.
+        
+        Notional = sum of (mark_price * qty) for each leg.
+        Uses current orderbook mark prices.
+        
+        Args:
+            legs: List of TradeLeg objects
+            
+        Returns:
+            Total notional in USD
+        """
+        total_notional = 0.0
+        
+        for leg in legs:
+            try:
+                orderbook = get_option_orderbook(leg.symbol)
+                if not orderbook:
+                    logger.warning(f"Could not fetch orderbook for {leg.symbol}, using 0 notional")
+                    continue
+                
+                mark_price = float(orderbook.get('mark', 0))
+                if mark_price <= 0:
+                    logger.warning(f"Invalid mark price for {leg.symbol}, skipping")
+                    continue
+                
+                leg_notional = mark_price * leg.qty
+                total_notional += leg_notional
+                logger.debug(f"  {leg.symbol}: {leg.qty} @ ${mark_price} = ${leg_notional:,.2f}")
+                
+            except Exception as e:
+                logger.warning(f"Error calculating notional for {leg.symbol}: {e}")
+                continue
+        
+        return total_notional
 
     # -------------------------------------------------------------------------
     # Open
@@ -433,8 +541,16 @@ class LifecycleManager:
         """
         Place orders to open a trade.
 
-        For "limit" mode: places individual limit orders per leg via TradeExecutor.
-        For "rfq" mode: submits a single RFQ for all legs via RFQExecutor.
+        If execution_mode is None, auto-determines best mode:
+          - Single leg → "limit"
+          - Multi-leg with large notional → "rfq"
+          - Multi-leg with medium notional → "smart"
+          - Multi-leg with small notional → "limit" (fallback)
+
+        Then routes to the appropriate executor:
+          - "limit": Individual limit orders via TradeExecutor
+          - "rfq": Atomic multi-leg RFQ via RFQExecutor
+          - "smart": Multi-leg smart orderbook with chunking via SmartOrderbookExecutor
 
         Returns True if orders were placed (not necessarily filled yet).
         """
@@ -446,11 +562,17 @@ class LifecycleManager:
             logger.error(f"Trade {trade_id} not in PENDING_OPEN (is {trade.state.value})")
             return False
 
+        # Auto-determine execution mode if not explicitly set
+        if trade.execution_mode is None:
+            trade.execution_mode = self._determine_execution_mode(trade)
+
         logger.info(f"Opening trade {trade_id} via {trade.execution_mode}")
 
         if trade.execution_mode == "rfq":
             return self._open_rfq(trade)
-        else:
+        elif trade.execution_mode == "smart":
+            return self._open_smart(trade)
+        else:  # Default to "limit"
             return self._open_limit(trade)
 
     def _open_rfq(self, trade: TradeLifecycle) -> bool:
@@ -515,6 +637,46 @@ class LifecycleManager:
 
         logger.info(f"Trade {trade.id}: all {len(trade.open_legs)} open orders placed, awaiting fills")
         return True
+
+    def _open_smart(self, trade: TradeLifecycle) -> bool:
+        """Open via smart multi-leg orderbook execution with chunking."""
+        if not trade.smart_config:
+            trade.state = TradeState.FAILED
+            trade.error = "smart_config required for 'smart' execution mode"
+            logger.error(f"Trade {trade.id}: {trade.error}")
+            return False
+
+        trade.state = TradeState.OPENING
+        
+        try:
+            logger.info(f"Trade {trade.id}: starting smart execution with {trade.smart_config.chunk_count} chunks")
+            
+            result = self._smart_executor.execute_smart_multi_leg(
+                legs=trade.open_legs,
+                config=trade.smart_config
+            )
+            
+            if result.success:
+                # Update legs with execution results
+                for leg in trade.open_legs:
+                    if leg.symbol in result.total_filled_qty:
+                        leg.filled_qty = result.total_filled_qty[leg.symbol]
+                
+                trade.state = TradeState.OPEN
+                trade.opened_at = time.time()
+                logger.info(f"Trade {trade.id}: smart execution completed successfully")
+                return True
+            else:
+                trade.state = TradeState.FAILED
+                trade.error = result.message
+                logger.error(f"Trade {trade.id}: smart execution failed: {result.message}")
+                return False
+                
+        except Exception as e:
+            trade.state = TradeState.FAILED
+            trade.error = str(e)
+            logger.error(f"Trade {trade.id}: exception in smart execution: {e}")
+            return False
 
     # -------------------------------------------------------------------------
     # Close

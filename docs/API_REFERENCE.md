@@ -1,9 +1,9 @@
 # Coincall API Reference
 
 **Official Documentation:** https://docs.coincall.com/  
-**Last Updated:** February 10, 2026
+**Last Updated:** February 13, 2026
 
-This document summarizes the key Coincall API endpoints relevant to our trading system.
+This document summarizes the key Coincall API endpoints and internal modules relevant to our trading system.
 
 ---
 
@@ -161,6 +161,151 @@ if result.success:
 | `create_strangle_legs()` | Create call+put legs for strangle |
 | `create_spread_legs()` | Create vertical spread legs |
 | `execute_rfq()` | Convenience function for quick execution |
+
+---
+
+## Internal Module: Smart Orderbook Execution
+
+See [multileg_orderbook.py](../multileg_orderbook.py) for smart chunked execution implementation.
+
+### Quick Start
+```python
+from multileg_orderbook import SmartOrderbookExecutor, SmartExecConfig
+from trade_lifecycle import TradeLeg
+
+# Configure execution parameters
+smart_config = SmartExecConfig(
+    chunk_count=2,                  # Split into 2 chunks
+    time_per_chunk=20.0,            # 20 seconds per chunk
+    quoting_strategy="mid",         # Quote at mid-price
+    reprice_interval=10.0,          # Reprice every 10s
+    reprice_price_threshold=0.1,    # Reprice if price moves >0.1
+    aggressive_attempts=10,         # Max fallback attempts
+    aggressive_wait_seconds=5.0     # Wait 5s per attempt
+)
+
+# Define multi-leg structure
+legs = [
+    TradeLeg(symbol="BTCUSD-27FEB26-80000-C", qty=0.2, side=1),  # BUY
+    TradeLeg(symbol="BTCUSD-27FEB26-82000-C", qty=0.4, side=2),  # SELL
+    TradeLeg(symbol="BTCUSD-27FEB26-84000-C", qty=0.2, side=1),  # BUY
+]
+
+# Execute with smart chunking
+executor = SmartOrderbookExecutor()
+result = executor.execute_smart_multi_leg(legs, smart_config)
+
+if result.success:
+    print(f"Executed {result.chunks_completed}/{result.chunks_total} chunks")
+    print(f"Total time: {result.execution_time:.1f}s")
+    print(f"Fallbacks: {result.fallback_count}")
+```
+
+### Algorithm Overview
+
+**Phase 1: Chunk Calculation**
+- Splits total order into N proportional chunks
+- Each chunk maintains leg quantity ratios
+- Example: 0.4 contracts → 2 chunks of 0.2 each
+
+**Phase 2: Per-Chunk Execution**
+1. **Quoting Phase** (config.time_per_chunk seconds)
+   - Place limit orders for all legs at calculated prices
+   - Monitor fills continuously (0.5s polling)
+   - Reprice when market moves beyond threshold
+   - Stop quoting individual legs as they fill
+2. **Aggressive Fallback** (if not fully filled)
+   - Place limit orders crossing the spread
+   - Multiple retry attempts with configurable waits
+   - Exit early when all legs filled
+
+**Phase 3: Early Termination**
+- Between chunks, check if target already reached
+- Stop processing remaining chunks if filled
+
+### Key Concepts
+
+**Position-Aware Tracking:**
+- Tracks delta from starting position: `abs(current - starting)`
+- Works for both opens (0.0 → 0.2) and closes (0.2 → 0.0)
+- Critical for close detection - without abs(), closes fail
+
+**Quoting Strategies:**
+| Strategy | Description |
+|----------|-------------|
+| `"top_of_book"` | Use orderbook bid/ask directly |
+| `"top_of_book_offset_pct"` | Offset from top by spread_pct |
+| `"mid"` | Use (bid + ask) / 2 (recommended) |
+| `"mark"` | Use mark price (fallback to mid if unavailable) |
+
+**Aggressive Fallback:**
+- BUY orders: Quote at ASK (lift the offer)
+- SELL orders: Quote at BID (hit the bid)
+- Ensures execution while minimizing market impact vs market orders
+
+### Key Classes
+
+| Class | Purpose |
+|-------|---------|
+| `SmartExecConfig` | Configuration with 12+ parameters (chunk_count, time_per_chunk, quoting_strategy, etc.) |
+| `LegChunkState` | Per-leg state within a chunk (filled_qty, remaining_qty, is_filled) |
+| `ChunkState` | State machine for chunk execution (QUOTING → FALLBACK → COMPLETED) |
+| `SmartExecResult` | Execution summary (success, chunks_completed, fills, costs, fallback_count) |
+| `SmartOrderbookExecutor` | Main executor integrating with TradeExecutor and AccountManager |
+| `ChunkPhase` | Enum: QUOTING, FALLBACK, COMPLETED |
+
+### Configuration Parameters
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `chunk_count` | 5 | Number of chunks to split order into |
+| `time_per_chunk` | 600.0 | Time allowed per chunk in seconds |
+| `quoting_strategy` | "top_of_book" | Pricing strategy |
+| `spread_pct` | 0.5 | Spread offset as % for offset strategy |
+| `reprice_interval` | 10.0 | How often to reprice (minimum 10s) |
+| `reprice_price_threshold` | 0.1 | Minimum price change to trigger repricing |
+| `min_order_qty` | 0.01 | Minimum order size to submit |
+| `aggressive_attempts` | 10 | Number of aggressive fill attempts |
+| `aggressive_wait_seconds` | 5.0 | Max wait per aggressive attempt |
+| `aggressive_retry_pause` | 1.0 | Pause between aggressive attempts |
+
+### Integration with LifecycleManager
+
+**Opening trades:**
+```python
+from trade_lifecycle import LifecycleManager
+
+manager = LifecycleManager()
+trade = manager.create(
+    legs=legs,
+    execution_mode="smart",
+    smart_config=smart_config
+)
+manager.open(trade.id)
+```
+
+**Closing trades:**
+Currently requires direct SmartOrderbookExecutor call (LifecycleManager smart close mode coming soon).
+
+### Use Cases
+
+✅ **Good for:**
+- Trades below RFQ minimum ($50k notional)
+- Multi-leg structures requiring price improvement
+- Minimizing market impact
+- Strategies where execution speed is not critical
+
+❌ **Not ideal for:**
+- Urgent execution (use aggressive market orders)
+- Very large trades (use RFQ for better pricing)
+- Extremely illiquid options
+
+### Performance
+
+Tested with 3-leg butterfly (0.2/0.4/0.2 contracts):
+- **Opening**: 57.1s, 100% fills, 2 chunks
+- **Closing**: 65.4s, 100% fills, complete position closure
+- **Slippage**: Minimal due to mid-price quoting
 
 ---
 

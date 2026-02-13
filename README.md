@@ -12,13 +12,15 @@ See [docs/ARCHITECTURE_PLAN.md](docs/ARCHITECTURE_PLAN.md) for the complete road
 
 - **Trade lifecycle management**: Full open → manage → close cycle with state machine ✅
 - **Position monitoring**: Live Greeks, PnL, and account snapshots with background polling ✅
+- **Smart orderbook execution**: Chunked multi-leg execution with continuous quoting and aggressive fallback ✅
 - **RFQ execution**: Block trades for multi-leg options strategies with best-quote selection ✅
+- **Dual execution modes**: RFQ for large trades ($50k+), smart orderbook for smaller sizes ✅
 - **Exit conditions**: Composable callables — profit target, max loss, time, Greeks limits ✅
-- **Multi-leg native**: Strangles, Iron Condors, spreads — any structure as one lifecycle ✅
-- **Environment switching**: Seamless testnet ↔ production
-- **HMAC-SHA256 authentication**: Secure API access via `auth.py`
-- **Config-driven strategies**: Parameters defined in `config.py`
-- **Modular architecture**: Clean separation of concerns
+- **Multi-leg native**: Strangles, Iron Condors, Butterflies — any structure as one lifecycle ✅
+- **Environment switching**: Seamless testnet ↔ production ✅
+- **HMAC-SHA256 authentication**: Secure API access via `auth.py` ✅
+- **Config-driven strategies**: Parameters defined in `config.py` ✅
+- **Modular architecture**: Clean separation of concerns ✅
 
 ## Quick Start
 
@@ -50,21 +52,24 @@ python main.py
 
 ```
 CoincallTrader/
-├── main.py              # Entry point with scheduler
-├── config.py            # Environment & strategy config
-├── auth.py              # API authentication
-├── market_data.py       # Market data retrieval
-├── option_selection.py  # Option filtering logic
-├── trade_execution.py   # Order management
-├── rfq.py               # RFQ block-trade execution (multi-leg)
-├── trade_lifecycle.py   # Trade lifecycle state machine
-├── account_manager.py   # Account info, position monitoring, snapshots
-├── docs/                # Documentation
-│   ├── ARCHITECTURE_PLAN.md  # Development roadmap
+├── main.py                # Entry point with scheduler
+├── config.py              # Environment & strategy config
+├── auth.py                # API authentication (HMAC-SHA256)
+├── market_data.py         # Market data retrieval (options, orderbooks)
+├── option_selection.py    # Option filtering logic
+├── trade_execution.py     # Order management (limit, market orders)
+├── rfq.py                 # RFQ block-trade execution (multi-leg $50k+ trades)
+├── multileg_orderbook.py  # Smart orderbook execution (chunking, quoting, fallback)
+├── trade_lifecycle.py     # Trade lifecycle state machine
+├── account_manager.py     # Account info, position monitoring, snapshots
+├── docs/                  # Documentation
+│   ├── ARCHITECTURE_PLAN.md  # Development roadmap & phases
 │   └── API_REFERENCE.md      # Coincall API notes
-├── tests/               # Unit tests
-├── logs/                # Trading logs
-└── archive/             # Legacy code & integration tests
+├── tests/                 # Unit & integration tests
+│   ├── test_smart_butterfly.py  # Smart execution test
+│   └── close_butterfly_now.py   # Emergency position closer
+├── logs/                  # Trading logs
+└── archive/               # Legacy code & historical tests
 ```
 
 ## Configuration
@@ -90,10 +95,11 @@ Edit `config.py` to adjust:
 2. ✅ RFQ execution (block trades with best-quote selection)
 3. ✅ Position monitoring (live Greeks, PnL, account snapshots)
 4. ✅ Trade lifecycle management (open → manage → close state machine)
-5. ⬜ Scheduling & time-based conditions
-6. ⬜ Multi-instrument (futures, spot)
-7. ⬜ Web dashboard
-8. ⬜ Persistence & recovery
+5. ✅ Smart orderbook execution (chunking, quoting, aggressive fallback)
+6. ⬜ Scheduling & time-based conditions
+7. ⬜ Multi-instrument (futures, spot)
+8. ⬜ Web dashboard
+9. ⬜ Persistence & recovery
 
 ## API Documentation
 

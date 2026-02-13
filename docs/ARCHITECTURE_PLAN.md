@@ -1,8 +1,8 @@
 # CoincallTrader Architecture & Development Plan
 
-**Version:** 1.2  
-**Date:** February 10, 2026  
-**Status:** Phase 2 Complete (Position Monitoring & Trade Lifecycle)
+**Version:** 1.3  
+**Date:** February 13, 2026  
+**Status:** Phase 3 Complete (Smart Orderbook Execution)
 
 ---
 
@@ -25,6 +25,7 @@ This document outlines the transformation of CoincallTrader from a simple option
 
 ### What's Missing
 - ✅ Complete position lifecycle management
+- ✅ **Smart orderbook execution for multi-leg trades** - Completed Feb 13, 2026
 - ⚠️ Portfolio hierarchy (positions → portfolios → accounts)
 - ⚠️ Multi-instrument support (futures, spot)
 - ✅ **RFQ (Request for Quote) execution** - Completed Feb 9, 2026
@@ -349,6 +350,90 @@ Factory functions provided for common patterns:
 
 ---
 
+### Phase 3: Smart Orderbook Execution ✅ COMPLETE (Feb 13, 2026)
+**Goal:** Enable smart multi-leg orderbook execution with chunking, continuous quoting, and aggressive fallback for trades below RFQ minimum ($50k notional).
+
+**Implementation Summary:**
+
+**Module:** `multileg_orderbook.py` (~1000 lines)
+
+**Core Algorithm:**
+1. **Chunk Calculation** — Split total order into N proportional chunks (e.g., 0.4 contracts → 2 chunks of 0.2 each, maintaining leg ratios)
+2. **Position-Aware Tracking** — Track delta from starting position using `abs(current - starting)` to handle:
+   - Opens: Starting=0.0, Target=0.2 → fill delta 0.2
+   - Closes: Starting=0.2, Target=0.2 → fill delta 0.2 (position goes to 0)
+3. **Per-Chunk Execution:**
+   - **Phase A (Quoting):** Place limit orders at calculated prices for `time_per_chunk` seconds
+     - Continuous repricing every `reprice_interval` seconds (min 10s)
+     - Cancel and reprice when market moves beyond `reprice_price_threshold`
+     - Stop quoting legs individually as they fill (others continue)
+   - **Phase B (Aggressive Fallback):** If not filled, use aggressive limit orders crossing the spread
+     - Multiple retry attempts with configurable wait times
+     - Exits early when all legs filled
+4. **Early Termination** — Between chunks, check if target already reached and stop processing remaining chunks
+
+**Key Classes:**
+- `SmartExecConfig` — Configuration with 12+ parameters (chunk_count, time_per_chunk, quoting_strategy, etc.)
+- `LegChunkState` — Per-leg state within a chunk (filled_qty, starting_position, remaining_qty, is_filled)
+- `ChunkState` — State machine for chunk execution (QUOTING → FALLBACK → COMPLETED)
+- `SmartExecResult` — Execution summary (success, chunks_completed, fills, costs, fallback_count)
+- `SmartOrderbookExecutor` — Main executor class integrating with TradeExecutor and AccountManager
+
+**Quoting Strategies:**
+- `"top_of_book"` — Use orderbook bid/ask directly
+- `"top_of_book_offset_pct"` — Offset from top by spread_pct (e.g., ±0.5%)
+- `"mid"` — Use (bid + ask) / 2
+- `"mark"` — Use mark price (fallbacks to mid if unavailable)
+
+**Critical Fixes During Development:**
+1. **Close Detection Bug** — Changed fill tracking from `max(0.0, current - starting)` to `abs(current - starting)` 
+   - Without this, closes would return negative deltas clamped to 0
+   - Algorithm would think nothing filled and loop indefinitely
+   - Fix enabled both opens (0→0.1) and closes (0.2→0.1) to be tracked correctly
+
+**Integration with LifecycleManager:**
+- Opening trades: Uses `LifecycleManager.create()` with `execution_mode="smart"` and `smart_config`
+- Closing trades: Currently direct call to `SmartOrderbookExecutor.execute_smart_multi_leg()` 
+  - LifecycleManager doesn't yet support smart close mode (future enhancement)
+
+**Testing Results:**
+- ✅ Butterfly spread (3 legs, different quantities: 0.2/0.4/0.2)
+  - Opening: 57.1s execution, 100% fills, 2 chunks
+  - Closing: 65.4s execution, 100% fills, 2 chunks, positions fully closed
+- ✅ Proportional chunking maintains leg ratios
+- ✅ Mid-price quoting reduces slippage vs aggressive orders
+- ✅ Early termination when fills complete
+- ✅ Handles both increasing positions (opens) and decreasing positions (closes)
+
+**Configuration Example:**
+```python
+smart_config = SmartExecConfig(
+    chunk_count=2,              # Split into 2 chunks
+    time_per_chunk=20.0,        # 20 seconds per chunk
+    quoting_strategy="mid",     # Quote at mid-price
+    reprice_interval=10.0,      # Reprice every 10s
+    reprice_price_threshold=0.1,# Reprice if price moves >0.1
+    min_order_qty=0.01,         # Minimum order size
+    aggressive_attempts=10,     # Max fallback attempts
+    aggressive_wait_seconds=5.0,# Wait 5s per attempt
+    aggressive_retry_pause=1.0  # 1s between attempts
+)
+```
+
+**API Integration:**
+- Uses TradeExecutor for order placement/cancellation (limit orders)
+- Uses AccountManager for position polling (fill detection)
+- Uses market_data.get_option_orderbook() for pricing
+
+**Deliverables:**
+- [x] `multileg_orderbook.py` — Complete smart execution module
+- [x] `tests/test_smart_butterfly.py` — Full lifecycle test (open + close)
+- [x] `tests/close_butterfly_now.py` — Emergency close utility
+- [x] Position-aware fill tracking for opens and closes
+- [x] Comprehensive logging and execution reporting
+
+---
+
 ### Phase 4: Scheduling & Time Conditions (1-2 days)
 **Goal:** Enable sophisticated time-based trading logic.
 
@@ -485,13 +570,14 @@ Factory functions provided for common patterns:
 |----------|-------|--------|----------------|
 | 1 | **Phase 1: RFQ** | ✅ Done | Block trade execution for multi-leg options |
 | 2 | **Phase 2: Position Monitoring & Lifecycle** | ✅ Done | Live monitoring, trade state machine, exit conditions |
-| 3 | Phase 4: Scheduling | 1-2 days | Time-based trading conditions |
-| 4 | Phase 5: Multi-Instrument | 2-3 days | Futures and spot support |
-| 5 | Phase 6: Account Info | 1 day | Margin alerts, pre-trade checks |
-| 6 | Phase 7: Dashboard | 2-3 days | Web monitoring interface |
-| 7 | Phase 8: Persistence | 1-2 days | State persistence and crash recovery |
+| 3 | **Phase 3: Smart Orderbook Execution** | ✅ Done | Chunked orderbook execution for trades below RFQ minimum |
+| 4 | Phase 4: Scheduling | 1-2 days | Time-based trading conditions |
+| 5 | Phase 5: Multi-Instrument | 2-3 days | Futures and spot support |
+| 6 | Phase 6: Account Info | 1 day | Margin alerts, pre-trade checks |
+| 7 | Phase 7: Dashboard | 2-3 days | Web monitoring interface |
+| 8 | Phase 8: Persistence | 1-2 days | State persistence and crash recovery |
 
-**Total estimated effort:** 15-22 days of focused development
+**Total estimated effort:** 15-22 days of focused development (9-10 days completed)
 
 ---
 

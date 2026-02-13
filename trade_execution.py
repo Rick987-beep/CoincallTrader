@@ -74,7 +74,7 @@ class TradeExecutor:
             True if cancelled successfully
         """
         try:
-            response = self.auth.post('/open/option/order/cancel/v1', {'orderId': order_id})
+            response = self.auth.post('/open/option/order/cancel/v1', {'orderId': int(order_id)})
             
             if self.auth.is_successful(response):
                 logger.info(f"Order cancelled: {order_id}")
@@ -89,23 +89,33 @@ class TradeExecutor:
 
     def get_order_status(self, order_id: str) -> Optional[Dict[str, Any]]:
         """
-        Get order status by ID
-        
+        Get order status by ID.
+
+        Uses the singleQuery endpoint:
+            GET /open/option/order/singleQuery/v1?orderId={id}
+
+        Returns fields like orderId, symbol, qty, fillQty, remainQty,
+        price, avgPrice, state, tradeSide, etc.
+
+        State enum (options):
+            0=NEW, 1=FILLED, 2=PARTIALLY_FILLED, 3=CANCELED,
+            4=PRE_CANCEL, 5=CANCELING, 6=INVALID, 10=CANCEL_BY_EXERCISE
+
         Args:
             order_id: Order ID
-            
+
         Returns:
             Order information dict or None on error
         """
         try:
-            response = self.auth.get(f'/open/option/order/{order_id}/v1')
-            
+            response = self.auth.get(f'/open/option/order/singleQuery/v1?orderId={order_id}')
+
             if self.auth.is_successful(response):
                 return response.get('data', {})
             else:
                 logger.error(f"Failed to get order status for {order_id}: {response.get('msg')}")
                 return None
-        
+
         except Exception as e:
             logger.error(f"Exception getting order status for {order_id}: {e}")
             return None
@@ -142,25 +152,25 @@ class TradeExecutor:
                 # Get current orderbook
                 try:
                     depth = get_option_orderbook(symbol)
-                    if not depth or 'data' not in depth:
+                    if not depth:
                         logger.error(f"Could not get orderbook for {symbol}")
                         time.sleep(requote_interval)
                         continue
 
-                    orderbook_data = depth['data']
-
+                    # Orderbook response has top-level bids/asks arrays:
+                    #   {"bids": [{"price": "50", "size": "18.18"}], "asks": [...]}
                     if side == 1:  # buy
-                        if not orderbook_data.get('asks') or len(orderbook_data['asks']) == 0:
+                        if not depth.get('asks') or len(depth['asks']) == 0:
                             logger.error(f"No asks available in orderbook for {symbol}")
                             time.sleep(requote_interval)
                             continue
-                        price = float(orderbook_data['asks'][0]['price'])
+                        price = float(depth['asks'][0]['price'])
                     else:  # sell
-                        if not orderbook_data.get('bids') or len(orderbook_data['bids']) == 0:
+                        if not depth.get('bids') or len(depth['bids']) == 0:
                             logger.error(f"No bids available in orderbook for {symbol}")
                             time.sleep(requote_interval)
                             continue
-                        price = float(orderbook_data['bids'][0]['price'])
+                        price = float(depth['bids'][0]['price'])
 
                 except Exception as e:
                     logger.error(f"Error getting orderbook for {symbol}: {e}")

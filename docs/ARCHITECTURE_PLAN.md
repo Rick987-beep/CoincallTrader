@@ -1,8 +1,8 @@
 # CoincallTrader Architecture & Development Plan
 
-**Version:** 1.3  
-**Date:** February 13, 2026  
-**Status:** Phase 3 Complete (Smart Orderbook Execution)
+**Version:** 1.4  
+**Date:** February 14, 2026  
+**Status:** Phase 4 Complete (Strategy Framework)
 
 ---
 
@@ -26,10 +26,11 @@ This document outlines the transformation of CoincallTrader from a simple option
 ### What's Missing
 - ✅ Complete position lifecycle management
 - ✅ **Smart orderbook execution for multi-leg trades** - Completed Feb 13, 2026
+- ✅ **Strategy framework with entry/exit conditions** - Completed Feb 14, 2026
 - ⚠️ Portfolio hierarchy (positions → portfolios → accounts)
 - ⚠️ Multi-instrument support (futures, spot)
 - ✅ **RFQ (Request for Quote) execution** - Completed Feb 9, 2026
-- ⚠️ Time-based trading conditions (scheduling)
+- ✅ **Time-based trading conditions (scheduling)** - Included in strategy framework
 - ⚠️ Web dashboard for monitoring
 - ⚠️ Persistence and recovery
 
@@ -192,8 +193,8 @@ CoincallTrader/
 
 | Requirement | Priority | Description |
 |-------------|----------|-------------|
-| REQ-SC-01 | High | Time-of-day triggers (e.g., "open position at 08:00 UTC") |
-| REQ-SC-02 | High | Weekday filters (e.g., "no new positions on Friday") |
+| REQ-SC-01 | ✅ **Done** | Time-of-day triggers (e.g., "open position at 08:00 UTC") |
+| REQ-SC-02 | ✅ **Done** | Weekday filters (e.g., "no new positions on Friday") |
 | REQ-SC-03 | High | Expiry awareness (close before expiry, roll positions) |
 | REQ-SC-04 | Medium | Month-end logic (e.g., rebalancing triggers) |
 | REQ-SC-05 | Medium | Calendar awareness (exchange holidays) |
@@ -206,7 +207,7 @@ CoincallTrader/
 | REQ-PH-01 | ✅ **Done** | Position abstraction: PositionSnapshot in account_manager.py |
 | REQ-PH-02 | ✅ **Done** | Structure grouping: TradeLifecycle groups legs (e.g., strangle = 1 lifecycle, 2 legs) |
 | REQ-PH-03 | ✅ **Done** | Account abstraction: AccountSnapshot with equity, margins, aggregated Greeks |
-| REQ-PH-04 | High | Strategy abstraction: algorithm that manages portfolio lifecycle |
+| REQ-PH-04 | ✅ **Done** | Strategy abstraction: StrategyConfig + StrategyRunner in strategy.py |
 | REQ-PH-05 | Medium | Event-driven core with typed events |
 | REQ-PH-06 | ✅ **Done** | Structure-level and account-level Greeks aggregation |
 
@@ -434,41 +435,77 @@ smart_config = SmartExecConfig(
 
 ---
 
-### Phase 4: Scheduling & Time Conditions (1-2 days)
-**Goal:** Enable sophisticated time-based trading logic.
+### Phase 4: Strategy Framework ✅ COMPLETE (Feb 14, 2026)
+**Goal:** Enable declarative, config-driven strategy definitions with composable entry/exit conditions, dependency injection, and dry-run mode.
 
-**Tasks:**
-1. Enhance `core/scheduler.py`:
-   - Weekday filters
-   - Time window definitions
-   - Expiry date awareness (parse from symbol)
-   - Custom trigger callbacks
+**Implementation Summary:**
 
-2. Create schedule configuration format:
-   ```python
-   STRATEGY_SCHEDULE = {
-       "check_open": {
-           "trigger": "interval",
-           "minutes": 5,
-           "weekdays": ["mon", "tue", "wed", "thu"],
-           "hours": (8, 20),  # 08:00-20:00 UTC only
-       },
-       "check_close": {
-           "trigger": "interval",
-           "minutes": 1,
-       },
-       "end_of_day": {
-           "trigger": "cron",
-           "hour": 19,
-           "minute": 55,
-       }
-   }
-   ```
+**New Module:** `strategy.py` (~578 lines)
+
+**Core Classes:**
+- `TradingContext` — Dependency injection container holding every service (auth, market data, executor, RFQ, smart executor, account manager, position monitor, lifecycle manager). Strategies and tests receive this instead of importing globals.
+- `StrategyConfig` — Declarative strategy definition: legs (`LegSpec` list), entry conditions, exit conditions, execution mode, concurrency limits, cooldown, and dry-run flag.
+- `StrategyRunner` — Tick-driven executor: checks entry conditions, resolves `LegSpec`s to concrete symbols via `resolve_legs()`, creates trade lifecycles, delegates to `LifecycleManager`.
+- `build_context()` — Factory function that wires all services from `config.py` settings.
+
+**Entry Condition Factories:**
+| Factory | Description |
+|---------|-------------|
+| `time_window(start, end)` | UTC hour window (e.g., 8–20) |
+| `weekday_filter(days)` | Day-of-week filter (e.g., Mon–Thu) |
+| `min_available_margin_pct(pct)` | Minimum free margin % |
+| `min_equity(usd)` | Minimum account equity |
+| `max_account_delta(limit)` | Account delta threshold |
+| `max_margin_utilization(pct)` | IM/equity ceiling |
+| `no_existing_position_in(symbols)` | Block if already positioned |
+
+**Modified Module:** `option_selection.py` — Added:
+- `LegSpec` dataclass — declares option_type, side, qty, strike_criteria, expiry_criteria, underlying
+- `resolve_legs()` — converts `list[LegSpec]` to `list[TradeLeg]` by querying market data
+
+**Modified Module:** `trade_lifecycle.py` — Added:
+- `strategy_id` field on `TradeLifecycle` for per-strategy tracking
+- `_get_orderbook_price()` helper for live pricing
+- `get_trades_for_strategy()` and `active_trades_for_strategy()` on `LifecycleManager`
+
+**Modified Module:** `trade_execution.py` — Fixed:
+- `get_order_status()` endpoint: `/open/option/order/singleQuery/v1?orderId={id}`
+- `cancel_order()` sends orderId as `int()` per API spec
+- Fill field: `fillQty` (was `executedQty`), state 3 = CANCELED (was 4)
+
+**Modified Module:** `main.py` — Rewritten:
+- Uses `build_context()` for service wiring
+- Registers `StrategyRunner` instances on `PositionMonitor.on_update()`
+- Signal handling (SIGINT/SIGTERM) for graceful shutdown
+
+**Dry-Run Mode:**
+- `StrategyConfig(dry_run=True)` enables simulated execution
+- Uses `get_option_details()` for live pricing without placing orders
+- Logs entry/exit prices, estimated PnL, and position details
+- Full lifecycle reporting with `_execute_dry_run()`
+
+**Key Design Decisions:**
+1. No Strategy ABC — strategies are `StrategyConfig` data, not class hierarchies
+2. Entry conditions mirror exit conditions — both `Callable[[AccountSnapshot, ...], bool]`
+3. `resolve_legs()` decouples leg specification from symbol resolution
+4. DI container enables testing with mock services
+5. `StrategyRunner.tick()` is registered on PositionMonitor — no extra threads
+
+**Testing Results:**
+- Tests 1–7 (unit): 72/72 assertions passed
+  - Config validation, context building, entry condition logic, LegSpec/resolve_legs, runner lifecycle, dry-run mode, edge cases
+- Test 8a (integration dry-run): 11/11 passed — live pricing, no orders
+- Test 8b (integration micro-trade): 16/16 passed — full lifecycle: opening → open → pending_close → closing → closed in 11.3s
 
 **Deliverables:**
-- [ ] Enhanced `core/scheduler.py`
-- [ ] Schedule configuration in `config.py`
-- [ ] Expiry date utilities
+- [x] `strategy.py` — TradingContext, StrategyConfig, StrategyRunner, entry conditions, build_context()
+- [x] `option_selection.py` updates — LegSpec dataclass, resolve_legs()
+- [x] `trade_lifecycle.py` updates — strategy_id, _get_orderbook_price(), per-strategy queries
+- [x] `trade_execution.py` fixes — correct endpoint, field names, state codes
+- [x] `main.py` rewrite — DI wiring, strategy registration, signal handling
+- [x] `tests/test_strategy_framework.py` — 72/72 unit test assertions
+- [x] `tests/test_live_dry_run.py` — 27/27 integration test assertions
+- [x] Workspace cleanup — 6 legacy files moved to archive/
 
 ---
 
@@ -571,13 +608,13 @@ smart_config = SmartExecConfig(
 | 1 | **Phase 1: RFQ** | ✅ Done | Block trade execution for multi-leg options |
 | 2 | **Phase 2: Position Monitoring & Lifecycle** | ✅ Done | Live monitoring, trade state machine, exit conditions |
 | 3 | **Phase 3: Smart Orderbook Execution** | ✅ Done | Chunked orderbook execution for trades below RFQ minimum |
-| 4 | Phase 4: Scheduling | 1-2 days | Time-based trading conditions |
+| 4 | **Phase 4: Strategy Framework** | ✅ Done | Declarative strategies, entry/exit conditions, DI, dry-run |
 | 5 | Phase 5: Multi-Instrument | 2-3 days | Futures and spot support |
 | 6 | Phase 6: Account Info | 1 day | Margin alerts, pre-trade checks |
 | 7 | Phase 7: Dashboard | 2-3 days | Web monitoring interface |
 | 8 | Phase 8: Persistence | 1-2 days | State persistence and crash recovery |
 
-**Total estimated effort:** 15-22 days of focused development (9-10 days completed)
+**Total estimated effort:** 15-22 days of focused development (12-14 days completed)
 
 ---
 

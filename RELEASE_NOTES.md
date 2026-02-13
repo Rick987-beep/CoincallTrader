@@ -1,282 +1,212 @@
-# Release Notes - Version 0.3.0
+# Release Notes — v0.4.0 "Strategy Framework"
 
-**Release Date:** February 13, 2026  
-**Codename:** Smart Execution
-
----
-
-## 🎯 Overview
-
-Version 0.3.0 introduces **smart multi-leg orderbook execution**, enabling sophisticated chunked execution with continuous quoting and aggressive fallback for trades below the RFQ minimum ($50,000 notional). This completes Phase 3 of the CoincallTrader development roadmap.
+**Release Date:** February 14, 2026  
+**Previous Version:** v0.3.0 (Smart Orderbook Execution)
 
 ---
 
-## ✨ Key Features
+## Overview
 
-### Smart Orderbook Execution
+v0.4.0 introduces the **Strategy Framework** — a declarative, config-driven approach to defining and running trading strategies. Instead of subclassing strategy ABCs, you compose a `StrategyConfig` that declares _what_ to trade, _when_ to enter, _when_ to exit, and _how_ to execute. The `StrategyRunner` handles the mechanics.
 
-Execute multi-leg option structures through the orderbook with:
+This release also includes critical API endpoint fixes, dependency injection via `TradingContext`, dry-run simulation mode, and comprehensive test coverage (72/72 unit + 27/27 integration assertions).
 
-- **Proportional Chunking** - Split large orders into smaller chunks while maintaining leg ratios
-- **Continuous Quoting** - Active limit orders with automatic repricing based on market movements
-- **Multiple Quoting Strategies** - Choose from top-of-book, mid-price, or mark-based pricing
-- **Aggressive Fallback** - Cross the spread with limit orders when passive quoting doesn't fill
-- **Position-Aware Tracking** - Works for both opening new positions and closing existing ones
-- **Early Termination** - Stops processing when fills complete before all chunks execute
+---
 
-### Configuration Flexibility
+## Key Features
 
-12+ parameters allow fine-tuning for different market conditions:
+### 1. Declarative Strategy Definitions
+
+Strategies are data, not class hierarchies:
 
 ```python
-SmartExecConfig(
-    chunk_count=2,                  # Number of chunks
-    time_per_chunk=20.0,            # Seconds per chunk
-    quoting_strategy="mid",         # Pricing strategy
-    reprice_interval=10.0,          # Repricing frequency
-    reprice_price_threshold=0.1,    # Price move trigger
-    min_order_qty=0.01,             # Minimum order size
-    aggressive_attempts=10,         # Fallback attempts
-    aggressive_wait_seconds=5.0,    # Wait per attempt
-    aggressive_retry_pause=1.0      # Pause between attempts
+from strategy import StrategyConfig, time_window, weekday_filter, min_available_margin_pct
+from option_selection import LegSpec
+from trade_lifecycle import profit_target, max_loss, max_hold_hours
+
+config = StrategyConfig(
+    name="short_strangle_daily",
+    legs=[
+        LegSpec("C", side=2, qty=0.1,
+                strike_criteria={"type": "delta", "value": 0.25},
+                expiry_criteria={"symbol": "28MAR26"}),
+        LegSpec("P", side=2, qty=0.1,
+                strike_criteria={"type": "delta", "value": -0.25},
+                expiry_criteria={"symbol": "28MAR26"}),
+    ],
+    entry_conditions=[
+        time_window(8, 20),
+        weekday_filter(["mon", "tue", "wed", "thu"]),
+        min_available_margin_pct(50),
+    ],
+    exit_conditions=[profit_target(50), max_loss(100), max_hold_hours(24)],
+    max_concurrent_trades=1,
+    cooldown_seconds=3600,
+    check_interval_seconds=60,
 )
 ```
 
-### Real-World Performance
+### 2. Dependency Injection with TradingContext
 
-Tested with 3-leg butterfly spread (0.2/0.4/0.2 contracts):
-- **Opening**: 57.1 seconds, 100% fills, 2 chunks executed
-- **Closing**: 65.4 seconds, 100% fills, complete position closure
-- **Total slippage**: Minimal due to mid-price quoting vs aggressive market orders
+All services live in a single container — no module-level globals:
 
----
-
-## 🔧 Technical Improvements
-
-### Critical Bug Fix: Close Detection
-
-**Problem**: Original fill tracking used `max(0, current_position - starting_position)`, which worked for opens but failed for closes:
-- Opens (0.0 → 0.1): `max(0, 0.1 - 0.0) = 0.1` ✅
-- Closes (0.2 → 0.1): `max(0, 0.1 - 0.2) = 0` ❌
-
-The algorithm thought nothing filled and looped indefinitely.
-
-**Solution**: Changed to `abs(current_position - starting_position)`:
-- Opens (0.0 → 0.1): abs(0.1 - 0.0) = 0.1 ✅
-- Closes (0.2 → 0.1): abs(0.1 - 0.2) = 0.1 ✅
-
-This single-line change enabled both increasing and decreasing position tracking.
-
-### Architecture
-
-- **SmartOrderbookExecutor** - Main execution engine (~1000 lines)
-- **ChunkState** - State machine for chunk execution (QUOTING → FALLBACK → COMPLETED)
-- **LegChunkState** - Per-leg state tracking within chunks
-- **SmartExecResult** - Comprehensive execution reporting
-
-### Integration
-
-Integrates with existing infrastructure:
-- **LifecycleManager** - Use `execution_mode="smart"` for opening trades
-- **TradeExecutor** - Handles individual limit order placement/cancellation
-- **AccountManager** - Provides position polling for fill detection
-- **market_data** - Supplies orderbook data for pricing
-
----
-
-## 📊 Use Cases
-
-### When to Use Smart Execution
-
-✅ **Good for:**
-- Trades below RFQ minimum ($50k notional)
-- Strategies requiring price improvement over mid-price
-- Situations where you want to minimize market impact
-- Multi-leg structures (butterflies, condors, spreads)
-
-❌ **Not ideal for:**
-- Urgent execution requirements (use aggressive market orders)
-- Very large trades (use RFQ for better pricing)
-- Extremely illiquid options (may not get fills)
-
-### Execution Mode Decision Tree
-
-```
-Trade Notional Value
-    │
-    ├─ >$50,000 ───────► Use RFQ Execution (rfq.py)
-    │                     Best quotes from multiple MMs
-    │
-    └─ <$50,000 ───────► Use Smart Execution (multileg_orderbook.py)
-                          Chunked orderbook with quoting + fallback
-```
-
----
-
-## 🧪 Testing
-
-### New Test Files
-
-Located in `tests/`:
-
-1. **test_smart_butterfly.py** - Full lifecycle test
-   - Opens 3-leg butterfly (0.2/0.4/0.2)
-   - Waits 20 seconds
-   - Closes butterfly with smart execution
-   - Verifies 100% fills on all legs
-
-2. **close_butterfly_now.py** - Emergency position closer
-   - Reads current positions
-   - Uses trade_side field to determine close direction
-   - Places aggressive limit orders crossing the spread
-   - Useful for manual intervention
-
-### Test Results
-
-```
-Opening Butterfly:
-✓ Execution time: 57.1s
-✓ Chunks executed: 2/2
-✓ Fill rate: 100% on all 3 legs
-✓ Proportional chunking maintained
-
-Closing Butterfly:
-✓ Execution time: 65.4s
-✓ Chunks executed: 2/2
-✓ Fill rate: 100% on all 3 legs
-✓ Final positions: ZERO (complete closure)'
-✓ Aggressive attempts: 2 (algorithm stopped when fills complete)
-```
-
----
-
-## 📚 Documentation Updates
-
-### docs/ARCHITECTURE_PLAN.md
-- Added Phase 3: Smart Orderbook Execution section
-- Updated priority order summary (Phases 1-3 complete)
-- Updated "What's Missing" checklist
-
-### README.md
-- Added smart execution to highlights
-- Updated project structure with multileg_orderbook.py
-- Updated roadmap (Phase 3 complete)
-- Added dual execution modes description
-
-### Code Documentation
-- Comprehensive module docstring in multileg_orderbook.py
-- Inline comments explaining critical algorithm sections
-- Docstrings for all classes and methods
-
----
-
-## 🔄 Migration Guide
-
-### For Existing Users
-
-**No breaking changes** - This is a purely additive release.
-
-### Using Smart Execution
-
-**Opening trades:**
 ```python
-from trade_lifecycle import LifecycleManager, TradeLeg
-from multileg_orderbook import SmartExecConfig
+from strategy import build_context
 
-# Create config
-smart_config = SmartExecConfig(
-    chunk_count=2,
-    time_per_chunk=20.0,
-    quoting_strategy="mid"
-)
-
-# Create legs
-legs = [
-    TradeLeg(symbol="BTCUSD-27FEB26-80000-C", qty=0.2, side=1),
-    TradeLeg(symbol="BTCUSD-27FEB26-82000-C", qty=0.4, side=2),
-    TradeLeg(symbol="BTCUSD-27FEB26-84000-C", qty=0.2, side=1),
-]
-
-# Create and open trade
-manager = LifecycleManager()
-trade = manager.create(
-    legs=legs,
-    execution_mode="smart",
-    smart_config=smart_config
-)
-manager.open(trade.id)
+ctx = build_context()
+# ctx.auth, ctx.market_data, ctx.executor, ctx.rfq_executor,
+# ctx.smart_executor, ctx.account_manager, ctx.position_monitor,
+# ctx.lifecycle_manager
 ```
 
-**Closing trades:**
+For tests, individual services can be replaced with mocks.
+
+### 3. Entry Condition Factories
+
+Seven composable entry conditions, mirroring the existing exit condition pattern:
+
+| Factory | Description |
+|---------|-------------|
+| `time_window(start, end)` | UTC hour window |
+| `weekday_filter(days)` | Day-of-week filter |
+| `min_available_margin_pct(pct)` | Minimum free margin % |
+| `min_equity(usd)` | Minimum account equity |
+| `max_account_delta(limit)` | Account delta ceiling |
+| `max_margin_utilization(pct)` | IM/equity ceiling |
+| `no_existing_position_in(symbols)` | Block if positioned |
+
+All conditions must return `True` before a strategy opens a trade.
+
+### 4. LegSpec and resolve_legs()
+
+Legs are specified declaratively and resolved to concrete symbols at runtime:
+
 ```python
-from multileg_orderbook import SmartOrderbookExecutor
+from option_selection import LegSpec, resolve_legs
 
-# Create close legs (reverse sides)
-close_legs = [
-    TradeLeg(symbol="BTCUSD-27FEB26-80000-C", qty=0.2, side=2),
-    TradeLeg(symbol="BTCUSD-27FEB26-82000-C", qty=0.4, side=1),
-    TradeLeg(symbol="BTCUSD-27FEB26-84000-C", qty=0.2, side=2),
-]
+leg = LegSpec("C", side=2, qty=0.1,
+              strike_criteria={"type": "delta", "value": 0.25},
+              expiry_criteria={"symbol": "28MAR26"})
 
-# Execute close
-executor = SmartOrderbookExecutor()
-result = executor.execute_smart_multi_leg(close_legs, smart_config)
+# resolve_legs() queries market data and returns TradeLeg objects
+# with actual symbols like "BTCUSD-28MAR26-105000-C"
 ```
 
+Supported strike criteria: `delta`, `closestStrike`, `spotdistance%`, `strike` (exact).
+
+### 5. Dry-Run Mode
+
+```python
+config = StrategyConfig(
+    name="test_strategy",
+    legs=[...],
+    dry_run=True,  # no real orders placed
+)
+```
+
+- Fetches live prices from the exchange via `get_option_details()`
+- Simulates full lifecycle (entry, position, exit evaluation)
+- Logs estimated fill prices, PnL, and structure details
+- Use for strategy validation before committing capital
+
+### 6. Tick-Driven Execution
+
+`StrategyRunner.tick()` is registered on `PositionMonitor.on_update()`:
+1. Position monitor polls the exchange (configurable interval)
+2. Calls all registered `runner.tick(snapshot)` callbacks
+3. Runner checks entry conditions, creates trades, advances lifecycle
+4. No extra threads, timers, or event queues
+
 ---
 
-## 🐛 Known Issues
+## Bug Fixes
 
-1. **LifecycleManager Smart Close** - Currently requires direct SmartOrderbookExecutor call
-   - Workaround: Use SmartOrderbookExecutor directly for closes
-   - Future: Integrate smart mode into LifecycleManager.close()
+### get_order_status 404 Error (Critical)
+- **Problem:** `get_order_status()` used path-based URL `/open/option/order/{id}/v1` → 404
+- **Fix:** Changed to `GET /open/option/order/singleQuery/v1?orderId={id}`
 
-2. **Order Cancellation Failures** - Sometimes orders already filled before cancellation attempted
-   - Expected behavior: Logs error but continues execution
-   - No user action required
+### Wrong Fill Field Name
+- **Problem:** Code checked `executedQty` — field does not exist in API response
+- **Fix:** Changed to `fillQty`
+
+### Wrong Cancel State Code
+- **Problem:** Code treated state 4 as CANCELED
+- **Fix:** State 3 = CANCELED per API docs (state 4 = PRE_CANCEL)
+
+### cancel_order Type Error
+- **Problem:** `orderId` sent as string; API requires integer
+- **Fix:** Added `int()` cast in `cancel_order()`
 
 ---
 
-## 🚀 What's Next
+## File Changes
 
-**Phase 4: Scheduling & Time Conditions** (1-2 days)
-- Weekday filters for trading windows
-- Time-based strategy execution
-- Expiry date awareness
-- Custom trigger callbacks
+| File | Change |
+|------|--------|
+| `strategy.py` | **NEW** — 578 lines |
+| `option_selection.py` | **Modified** — Added LegSpec, resolve_legs() |
+| `trade_lifecycle.py` | **Modified** — strategy_id, _get_orderbook_price(), fixed fillQty/state codes |
+| `trade_execution.py` | **Modified** — Fixed get_order_status endpoint, cancel_order int cast |
+| `main.py` | **Rewritten** — DI wiring, strategy registration, signal handling |
+| `tests/test_strategy_framework.py` | **NEW** — 72/72 assertions |
+| `tests/test_live_dry_run.py` | **NEW** — 27/27 assertions |
+
+---
+
+## Testing Results
+
+### Unit Tests (72/72)
+| Test | Assertions | Description |
+|------|-----------|-------------|
+| 1. Config validation | 10 | StrategyConfig defaults, field types |
+| 2. TradingContext | 9 | DI container wiring, build_context() |
+| 3. Entry conditions | 16 | All 7 entry condition factories |
+| 4. LegSpec & resolve_legs | 10 | Dataclass fields, resolution logic |
+| 5. StrategyRunner | 12 | Tick lifecycle, cooldown, concurrency |
+| 6. Dry-run mode | 8 | Simulated execution, no real orders |
+| 7. Edge cases | 7 | Empty legs, no conditions, boundary values |
+
+### Integration Tests (27/27)
+| Test | Assertions | Description |
+|------|-----------|-------------|
+| 8a. Live dry-run | 11 | Real API, live pricing, no orders |
+| 8b. Micro-trade | 16 | Full lifecycle in 11.3s, entry $95 exit $70 |
+
+---
+
+## Migration Guide
+
+**main.py** has been rewritten. If you customised the old scheduler-based main.py:
+1. Review the new `build_context()` + `StrategyRunner` pattern
+2. Convert strategy parameters to `StrategyConfig` + `LegSpec`
+3. Register runners on `PositionMonitor.on_update()`
+
+---
+
+## What's Next
+
+- **Phase 5:** Multi-instrument support (futures, spot)
+- **Phase 6:** Account alerts and pre-trade checks
+- **Phase 7:** Web dashboard
+- **Phase 8:** Persistence and crash recovery
 
 See [docs/ARCHITECTURE_PLAN.md](docs/ARCHITECTURE_PLAN.md) for the complete roadmap.
 
 ---
 
-## 📊 Project Statistics
+## Project Statistics
 
 | Metric | Value |
 |--------|-------|
-| Version | 0.3.0 |
-| Release Date | February 13, 2026 |
-| Total Lines of Code | ~3,500 |
-| New Module Size | ~1,000 lines (multileg_orderbook.py) |
-| Test Coverage | Full lifecycle test included |
-| API Endpoints Used | OrderBook, Positions, Orders |
-| Compatible Python | 3.9+ |
+| Version | 0.4.0 |
+| Release Date | February 14, 2026 |
+| New Module | strategy.py (~578 lines) |
+| Total Core Modules | 11 |
+| Unit Tests | 72/72 |
+| Integration Tests | 27/27 |
+| API Fixes | 3 |
+| Python | 3.9+ |
 
 ---
-
-## 🙏 Acknowledgments
-
-Special thanks to the Coincall API team for comprehensive documentation and responsive support.
-
----
-
-## 📞 Support
-
-- **Documentation**: See [docs/](docs/) folder
-- **Issues**: Check CHANGELOG.md for known issues
-- **Testing**: Always test on testnet before production
-
----
-
-**Happy Trading! 🎯**
 
 *CoincallTrader Development Team*

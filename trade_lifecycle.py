@@ -21,7 +21,9 @@ Exit conditions are callables with signature:
 Factory functions are provided for common patterns (profit target, max loss, etc.).
 """
 
+import json
 import logging
+import os
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -118,6 +120,7 @@ class TradeLifecycle:
         metadata:         Arbitrary strategy-provided context
     """
     id: str = field(default_factory=lambda: str(uuid.uuid4())[:12])
+    strategy_id: Optional[str] = None
     state: TradeState = TradeState.PENDING_OPEN
     open_legs: List[TradeLeg] = field(default_factory=list)
     close_legs: List[TradeLeg] = field(default_factory=list)
@@ -207,7 +210,10 @@ class TradeLifecycle:
         legs_str = ", ".join(
             f"{l.side_label} {l.qty}x {l.symbol}" for l in self.open_legs
         )
-        s = f"[{self.id}] {self.state.value} | {legs_str}"
+        prefix = f"[{self.id}]"
+        if self.strategy_id:
+            prefix += f" ({self.strategy_id})"
+        s = f"{prefix} {self.state.value} | {legs_str}"
         if account and self.state == TradeState.OPEN:
             pnl = self.structure_pnl(account)
             greeks = self.structure_greeks(account)
@@ -411,6 +417,14 @@ class LifecycleManager:
     def get(self, trade_id: str) -> Optional[TradeLifecycle]:
         return self._trades.get(trade_id)
 
+    def get_trades_for_strategy(self, strategy_id: str) -> List[TradeLifecycle]:
+        """All trades (any state) belonging to a strategy."""
+        return [t for t in self._trades.values() if t.strategy_id == strategy_id]
+
+    def active_trades_for_strategy(self, strategy_id: str) -> List[TradeLifecycle]:
+        """Active (not CLOSED/FAILED) trades belonging to a strategy."""
+        return [t for t in self.active_trades if t.strategy_id == strategy_id]
+
     # -------------------------------------------------------------------------
     # Create
     # -------------------------------------------------------------------------
@@ -422,6 +436,7 @@ class LifecycleManager:
         execution_mode: Optional[str] = None,
         rfq_action: str = "buy",
         smart_config: Optional[SmartExecConfig] = None,
+        strategy_id: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> TradeLifecycle:
         """
@@ -444,6 +459,7 @@ class LifecycleManager:
         """
         trade = TradeLifecycle(
             open_legs=legs,
+            strategy_id=strategy_id,
             exit_conditions=exit_conditions or [],
             execution_mode=execution_mode,
             rfq_action=rfq_action,
@@ -451,7 +467,7 @@ class LifecycleManager:
             metadata=metadata or {},
         )
         self._trades[trade.id] = trade
-        logger.info(f"Trade {trade.id} created: {len(legs)} legs, mode={execution_mode or 'auto-route'}")
+        logger.info(f"Trade {trade.id} created: {len(legs)} legs, mode={execution_mode or 'auto-route'}, strategy={strategy_id}")
         return trade
 
     # -------------------------------------------------------------------------
@@ -610,29 +626,47 @@ class LifecycleManager:
             return False
 
     def _open_limit(self, trade: TradeLifecycle) -> bool:
-        """Open via limit orders — one order per leg."""
+        """Open via limit orders — one order per leg.
+
+        Fetches the current orderbook for each leg to determine the limit
+        price (best ask for buys, best bid for sells).
+
+        Failure handling: if any leg fails to place, all previously placed
+        orders are cancelled and the trade moves to FAILED.
+        """
         trade.state = TradeState.OPENING
 
         for leg in trade.open_legs:
             try:
+                price = self._get_orderbook_price(leg.symbol, leg.side)
+                if price is None:
+                    trade.error = f"No orderbook price for {leg.symbol} (side={leg.side_label})"
+                    logger.error(f"Trade {trade.id}: {trade.error}")
+                    self._cancel_placed_orders(trade.open_legs)
+                    trade.state = TradeState.FAILED
+                    return False
+
                 result = self._executor.place_order(
                     symbol=leg.symbol,
                     qty=leg.qty,
                     side=leg.side,
                     order_type=1,  # limit
+                    price=price,
                 )
                 if result:
                     leg.order_id = str(result.get('orderId', ''))
-                    logger.info(f"Trade {trade.id}: placed order {leg.order_id} for {leg.side_label} {leg.qty}x {leg.symbol}")
+                    logger.info(f"Trade {trade.id}: placed order {leg.order_id} for {leg.side_label} {leg.qty}x {leg.symbol} @ ${price}")
                 else:
-                    trade.state = TradeState.FAILED
                     trade.error = f"Failed to place order for {leg.symbol}"
                     logger.error(f"Trade {trade.id}: {trade.error}")
+                    self._cancel_placed_orders(trade.open_legs)
+                    trade.state = TradeState.FAILED
                     return False
             except Exception as e:
-                trade.state = TradeState.FAILED
                 trade.error = str(e)
                 logger.error(f"Trade {trade.id}: exception placing order: {e}")
+                self._cancel_placed_orders(trade.open_legs)
+                trade.state = TradeState.FAILED
                 return False
 
         logger.info(f"Trade {trade.id}: all {len(trade.open_legs)} open orders placed, awaiting fills")
@@ -756,35 +790,93 @@ class LifecycleManager:
             return False
 
     def _close_limit(self, trade: TradeLifecycle) -> bool:
-        """Close via limit orders — one order per leg."""
+        """Close via limit orders — one order per leg.
+
+        Fetches the current orderbook for each leg to determine the limit
+        price (best ask for buys, best bid for sells).
+
+        Failure handling: if any close order fails to place, all previously
+        placed close orders are cancelled and the trade reverts to
+        PENDING_CLOSE so the next tick retries the entire close atomically.
+        """
         trade.state = TradeState.CLOSING
 
         for leg in trade.close_legs:
             try:
+                price = self._get_orderbook_price(leg.symbol, leg.side)
+                if price is None:
+                    logger.error(
+                        f"Trade {trade.id}: no orderbook price for close leg "
+                        f"{leg.symbol} (side={leg.side_label}), will retry"
+                    )
+                    self._cancel_placed_orders(trade.close_legs)
+                    trade.state = TradeState.PENDING_CLOSE
+                    return False
+
                 result = self._executor.place_order(
                     symbol=leg.symbol,
                     qty=leg.qty,
                     side=leg.side,
                     order_type=1,
+                    price=price,
                 )
                 if result:
                     leg.order_id = str(result.get('orderId', ''))
                     logger.info(
                         f"Trade {trade.id}: placed close order {leg.order_id} "
-                        f"for {leg.side_label} {leg.qty}x {leg.symbol}"
+                        f"for {leg.side_label} {leg.qty}x {leg.symbol} @ ${price}"
                     )
                 else:
                     logger.error(f"Trade {trade.id}: failed to place close order for {leg.symbol}")
-                    # Don't fail the whole trade — keep trying on next tick
+                    self._cancel_placed_orders(trade.close_legs)
                     trade.state = TradeState.PENDING_CLOSE
                     return False
             except Exception as e:
                 logger.error(f"Trade {trade.id}: exception placing close order: {e}")
+                self._cancel_placed_orders(trade.close_legs)
                 trade.state = TradeState.PENDING_CLOSE
                 return False
 
         logger.info(f"Trade {trade.id}: all close orders placed, awaiting fills")
         return True
+
+    def _cancel_placed_orders(self, legs: List[TradeLeg]) -> None:
+        """Cancel any orders already placed for the given legs (cleanup on failure)."""
+        for leg in legs:
+            if leg.order_id and not leg.is_filled:
+                try:
+                    self._executor.cancel_order(leg.order_id)
+                    logger.info(f"Cancelled orphaned order {leg.order_id} for {leg.symbol}")
+                except Exception as e:
+                    logger.warning(f"Failed to cancel orphaned order {leg.order_id}: {e}")
+
+    def _get_orderbook_price(self, symbol: str, side: int) -> Optional[float]:
+        """Fetch best bid or ask from orderbook.
+
+        The orderbook endpoint returns::
+
+            {"bids": [{"price": "50", "size": "18.18"}, ...],
+             "asks": [{"price": "95", "size": "18.18"}, ...]}
+
+        Returns:
+            The best ask price if side==1 (buy), best bid if side==2 (sell),
+            or None if unavailable.
+        """
+        try:
+            ob = get_option_orderbook(symbol)
+            if not ob:
+                return None
+
+            # Orderbook endpoint returns nested bids/asks arrays
+            if side == 1 and ob.get('asks'):
+                return float(ob['asks'][0]['price'])
+            elif side == 2 and ob.get('bids'):
+                return float(ob['bids'][0]['price'])
+
+            return None
+        except Exception as e:
+            logger.error(f"Error fetching orderbook price for {symbol}: {e}")
+            return None
 
     # -------------------------------------------------------------------------
     # Fill Checking
@@ -803,7 +895,7 @@ class LifecycleManager:
             try:
                 info = self._executor.get_order_status(leg.order_id)
                 if info:
-                    executed = float(info.get('executedQty', 0))
+                    executed = float(info.get('fillQty', 0))
                     if executed > leg.filled_qty:
                         leg.filled_qty = executed
                         leg.fill_price = float(info.get('avgPrice', 0)) or leg.fill_price
@@ -813,8 +905,8 @@ class LifecycleManager:
                         )
 
                     state_code = info.get('state')
-                    # State 2 = filled, state 4 = cancelled
-                    if state_code == 4 and not leg.is_filled:
+                    # State 1 = FILLED, 3 = CANCELED (Coincall option order states)
+                    if state_code == 3 and not leg.is_filled:
                         logger.warning(
                             f"Trade {trade.id}: order {leg.order_id} was cancelled, "
                             f"filled {leg.filled_qty}/{leg.qty}"
@@ -844,7 +936,7 @@ class LifecycleManager:
             try:
                 info = self._executor.get_order_status(leg.order_id)
                 if info:
-                    executed = float(info.get('executedQty', 0))
+                    executed = float(info.get('fillQty', 0))
                     if executed > leg.filled_qty:
                         leg.filled_qty = executed
                         leg.fill_price = float(info.get('avgPrice', 0)) or leg.fill_price
@@ -916,6 +1008,10 @@ class LifecycleManager:
             except Exception as e:
                 logger.error(f"Trade {trade.id}: tick error in state {trade.state.value}: {e}")
 
+        # Persist trade state snapshot after processing
+        if self._trades:
+            self._persist_all_trades()
+
     # -------------------------------------------------------------------------
     # Manual Controls
     # -------------------------------------------------------------------------
@@ -956,6 +1052,44 @@ class LifecycleManager:
             return True
         logger.warning(f"Trade {trade.id}: cannot cancel in state {trade.state.value}")
         return False
+
+    # -------------------------------------------------------------------------
+    # Persistence
+    # -------------------------------------------------------------------------
+
+    def _persist_all_trades(self) -> None:
+        """Dump all trade states to JSON for inspection and crash recovery."""
+        try:
+            os.makedirs("logs", exist_ok=True)
+            trades_data = []
+            for trade in self._trades.values():
+                trades_data.append({
+                    "id": trade.id,
+                    "strategy_id": trade.strategy_id,
+                    "state": trade.state.value,
+                    "symbols": trade.symbols,
+                    "execution_mode": trade.execution_mode,
+                    "created_at": trade.created_at,
+                    "opened_at": trade.opened_at,
+                    "closed_at": trade.closed_at,
+                    "error": trade.error,
+                    "open_legs": [
+                        {"symbol": l.symbol, "qty": l.qty, "side": l.side,
+                         "filled_qty": l.filled_qty, "fill_price": l.fill_price,
+                         "order_id": l.order_id}
+                        for l in trade.open_legs
+                    ],
+                    "close_legs": [
+                        {"symbol": l.symbol, "qty": l.qty, "side": l.side,
+                         "filled_qty": l.filled_qty, "fill_price": l.fill_price,
+                         "order_id": l.order_id}
+                        for l in trade.close_legs
+                    ],
+                })
+            with open("logs/trades_snapshot.json", "w") as f:
+                json.dump({"timestamp": time.time(), "trades": trades_data}, f, indent=2)
+        except Exception as e:
+            logger.warning(f"Failed to persist trade snapshot: {e}")
 
     def status_report(self, account: Optional[AccountSnapshot] = None) -> str:
         """Human-readable status of all trades."""

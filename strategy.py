@@ -1,0 +1,577 @@
+#!/usr/bin/env python3
+"""
+Strategy Framework
+
+Provides infrastructure for running trading strategies as composable,
+config-driven routines:
+
+  - TradingContext: Dependency injection container for all services
+  - EntryCondition: Callable type for entry decisions (mirrors ExitCondition)
+  - StrategyConfig: Declarative strategy definition
+  - StrategyRunner: Executes one strategy — checks entries, creates trades
+
+Architecture:
+  A strategy is NOT a class to subclass.  It is a StrategyConfig that
+  declares *what* to trade, *when* to enter, *when* to exit, and *how*
+  to execute.  The StrategyRunner handles the mechanics.
+
+Usage:
+    from strategy import build_context, StrategyConfig, StrategyRunner
+    from strategy import time_window, weekday_filter, min_available_margin_pct
+    from option_selection import LegSpec
+    from trade_lifecycle import profit_target, max_loss, max_hold_hours
+
+    ctx = build_context()
+
+    config = StrategyConfig(
+        name="short_strangle_daily",
+        legs=[
+            LegSpec("C", side=2, qty=0.1,
+                    strike_criteria={"type": "delta", "value": 0.25},
+                    expiry_criteria={"symbol": "28MAR26"}),
+            LegSpec("P", side=2, qty=0.1,
+                    strike_criteria={"type": "delta", "value": -0.25},
+                    expiry_criteria={"symbol": "28MAR26"}),
+        ],
+        entry_conditions=[
+            time_window(8, 20),
+            weekday_filter(["mon", "tue", "wed", "thu"]),
+            min_available_margin_pct(50),
+        ],
+        exit_conditions=[
+            profit_target(50),
+            max_loss(100),
+            max_hold_hours(24),
+        ],
+        max_concurrent_trades=1,
+        cooldown_seconds=3600,
+    )
+
+    runner = StrategyRunner(config, ctx)
+    ctx.position_monitor.on_update(runner.tick)
+    ctx.position_monitor.start()
+"""
+
+import logging
+import time
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from typing import Any, Callable, Dict, List, Optional
+
+from account_manager import AccountManager, AccountSnapshot, PositionMonitor
+from auth import CoincallAuth
+from config import API_KEY, API_SECRET, BASE_URL
+from market_data import MarketData
+from multileg_orderbook import SmartExecConfig, SmartOrderbookExecutor
+from option_selection import LegSpec, resolve_legs
+from rfq import RFQExecutor
+from trade_execution import TradeExecutor
+from trade_lifecycle import (
+    ExitCondition,
+    LifecycleManager,
+    TradeLifecycle,
+    TradeState,
+)
+
+logger = logging.getLogger(__name__)
+
+
+# =============================================================================
+# Dependency Injection
+# =============================================================================
+
+@dataclass
+class TradingContext:
+    """
+    Container holding one instance of every service.
+
+    Strategies and the orchestration loop receive this instead of
+    importing module-level globals.  For tests, individual services
+    can be replaced with mocks.
+    """
+    auth: CoincallAuth
+    market_data: MarketData
+    executor: TradeExecutor
+    rfq_executor: RFQExecutor
+    smart_executor: SmartOrderbookExecutor
+    account_manager: AccountManager
+    position_monitor: PositionMonitor
+    lifecycle_manager: LifecycleManager
+
+
+def build_context(
+    poll_interval: int = 10,
+    rfq_notional_threshold: float = 50000.0,
+    smart_notional_threshold: float = 10000.0,
+) -> TradingContext:
+    """
+    Construct a fully-wired TradingContext from config.py settings.
+
+    The PositionMonitor is created but NOT started — caller must invoke
+    ctx.position_monitor.start() when ready.
+    """
+    auth = CoincallAuth(API_KEY, API_SECRET, BASE_URL)
+    market_data_svc = MarketData()
+    executor = TradeExecutor()
+    rfq_executor = RFQExecutor()
+    smart_executor = SmartOrderbookExecutor()
+    account_mgr = AccountManager()
+    monitor = PositionMonitor(poll_interval=poll_interval)
+    lifecycle_mgr = LifecycleManager(
+        rfq_notional_threshold=rfq_notional_threshold,
+        smart_notional_threshold=smart_notional_threshold,
+    )
+
+    # Wire lifecycle ticks to position monitor
+    monitor.on_update(lifecycle_mgr.tick)
+
+    return TradingContext(
+        auth=auth,
+        market_data=market_data_svc,
+        executor=executor,
+        rfq_executor=rfq_executor,
+        smart_executor=smart_executor,
+        account_manager=account_mgr,
+        position_monitor=monitor,
+        lifecycle_manager=lifecycle_mgr,
+    )
+
+
+# =============================================================================
+# Entry Conditions
+# =============================================================================
+
+# Type alias — mirrors ExitCondition but takes only an AccountSnapshot
+# (entry decisions don't reference a specific trade).
+EntryCondition = Callable[[AccountSnapshot], bool]
+
+
+def min_available_margin_pct(pct: float) -> EntryCondition:
+    """Block entry when available margin is less than pct% of equity."""
+    def _check(account: AccountSnapshot) -> bool:
+        if account.equity <= 0:
+            return False
+        margin_pct = (account.available_margin / account.equity) * 100
+        ok = margin_pct >= pct
+        if not ok:
+            logger.debug(f"min_available_margin_pct({pct}%): margin={margin_pct:.1f}% — blocked")
+        return ok
+    _check.__name__ = f"min_available_margin_pct({pct}%)"
+    return _check
+
+
+def time_window(start_hour: int, end_hour: int, tz: str = "UTC") -> EntryCondition:
+    """
+    Only allow entry between start_hour and end_hour (inclusive start,
+    exclusive end).  Supports wrapping past midnight (e.g., 22 -> 06).
+    Times are in UTC by default.
+    """
+    def _check(account: AccountSnapshot) -> bool:
+        hour = datetime.now(timezone.utc).hour
+        if start_hour <= end_hour:
+            ok = start_hour <= hour < end_hour
+        else:
+            ok = hour >= start_hour or hour < end_hour
+        if not ok:
+            logger.debug(f"time_window({start_hour}-{end_hour}): hour={hour} — blocked")
+        return ok
+    _check.__name__ = f"time_window({start_hour}-{end_hour} {tz})"
+    return _check
+
+
+def weekday_filter(days: List[str]) -> EntryCondition:
+    """
+    Only allow entry on specified weekdays.
+
+    Args:
+        days: List of day abbreviations, e.g. ["mon", "tue", "wed"]
+    """
+    day_names = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+    allowed = set()
+    for d in days:
+        abbr = d.lower()[:3]
+        if abbr in day_names:
+            allowed.add(day_names.index(abbr))
+        else:
+            raise ValueError(f"Unknown weekday: {d}")
+
+    def _check(account: AccountSnapshot) -> bool:
+        today = datetime.now(timezone.utc).weekday()
+        ok = today in allowed
+        if not ok:
+            logger.debug(f"weekday_filter({days}): today={day_names[today]} — blocked")
+        return ok
+    _check.__name__ = f"weekday_filter({days})"
+    return _check
+
+
+def min_equity(amount: float) -> EntryCondition:
+    """Block entry when account equity is below a minimum USD amount."""
+    def _check(account: AccountSnapshot) -> bool:
+        ok = account.equity >= amount
+        if not ok:
+            logger.debug(f"min_equity(${amount}): equity=${account.equity:.2f} — blocked")
+        return ok
+    _check.__name__ = f"min_equity(${amount})"
+    return _check
+
+
+def max_account_delta(threshold: float) -> EntryCondition:
+    """Block entry when absolute account delta exceeds threshold."""
+    def _check(account: AccountSnapshot) -> bool:
+        ok = abs(account.net_delta) <= threshold
+        if not ok:
+            logger.debug(
+                f"max_account_delta({threshold}): delta={account.net_delta:+.4f} — blocked"
+            )
+        return ok
+    _check.__name__ = f"max_account_delta({threshold})"
+    return _check
+
+
+def max_margin_utilization(pct: float) -> EntryCondition:
+    """Block entry when margin utilisation exceeds pct%."""
+    def _check(account: AccountSnapshot) -> bool:
+        ok = account.margin_utilization <= pct
+        if not ok:
+            logger.debug(
+                f"max_margin_utilization({pct}%): util={account.margin_utilization:.1f}% — blocked"
+            )
+        return ok
+    _check.__name__ = f"max_margin_utilization({pct}%)"
+    return _check
+
+
+def no_existing_position_in(symbols: List[str]) -> EntryCondition:
+    """Block entry if account already holds a position in any of the given symbols."""
+    def _check(account: AccountSnapshot) -> bool:
+        for sym in symbols:
+            if account.get_position(sym) is not None:
+                logger.debug(f"no_existing_position_in: have {sym} — blocked")
+                return False
+        return True
+    _check.__name__ = f"no_existing_position_in({symbols})"
+    return _check
+
+
+# =============================================================================
+# Strategy Configuration
+# =============================================================================
+
+@dataclass
+class StrategyConfig:
+    """
+    Declarative strategy definition.
+
+    Combines *what* to trade (legs), *when* to enter (entry_conditions),
+    *when* to exit (exit_conditions), *how* to execute (execution_mode),
+    and operational limits (max_concurrent_trades, cooldown).
+
+    Attributes:
+        name: Unique strategy identifier (used as strategy_id on trades)
+        legs: LegSpec templates — resolved to concrete symbols at trade time
+        entry_conditions: Callables that must ALL return True to open a trade
+        exit_conditions: Callables — ANY returning True triggers a close
+        execution_mode: "limit", "rfq", "smart", or "auto" (notional-based routing)
+        smart_config: Optional SmartExecConfig for "smart" mode
+        rfq_action: "buy" or "sell" — what to do on open (close is the reverse)
+        max_concurrent_trades: Maximum active trades for this strategy
+        cooldown_seconds: Minimum seconds between trade opens
+        check_interval_seconds: How often to evaluate entry conditions
+        dry_run: If True, run full pipeline but stop before placing orders
+        metadata: Arbitrary context passed to each trade
+    """
+    name: str
+    legs: List[LegSpec]
+    entry_conditions: List[EntryCondition] = field(default_factory=list)
+    exit_conditions: List[ExitCondition] = field(default_factory=list)
+    execution_mode: str = "auto"
+    smart_config: Optional[SmartExecConfig] = None
+    rfq_action: str = "buy"
+    max_concurrent_trades: int = 1
+    cooldown_seconds: float = 0.0
+    check_interval_seconds: float = 60.0
+    dry_run: bool = False
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+# =============================================================================
+# Strategy Runner
+# =============================================================================
+
+class StrategyRunner:
+    """
+    Executes a single strategy: evaluates entry conditions, resolves legs,
+    creates trades, and lets the LifecycleManager handle execution and exits.
+
+    Register with the PositionMonitor to receive periodic ticks:
+
+        runner = StrategyRunner(config, ctx)
+        ctx.position_monitor.on_update(runner.tick)
+
+    The runner does NOT run its own thread or event loop — it piggybacks
+    on the PositionMonitor's polling cycle via the tick() callback.
+    """
+
+    def __init__(self, config: StrategyConfig, ctx: TradingContext):
+        self.config = config
+        self.ctx = ctx
+        self._strategy_id: str = config.name
+        self._last_check_time: float = 0.0
+        self._enabled: bool = True
+        self._dry_run: bool = config.dry_run
+        self._last_dry_run_result: Optional[Dict[str, Any]] = None
+        mode_str = "DRY-RUN" if self._dry_run else "LIVE"
+        logger.info(
+            f"StrategyRunner '{config.name}' initialised [{mode_str}] "
+            f"(max_trades={config.max_concurrent_trades}, "
+            f"cooldown={config.cooldown_seconds}s, "
+            f"check_interval={config.check_interval_seconds}s)"
+        )
+
+    # -- Properties -----------------------------------------------------------
+
+    @property
+    def strategy_id(self) -> str:
+        return self._strategy_id
+
+    @property
+    def dry_run(self) -> bool:
+        return self._dry_run
+
+    @property
+    def last_dry_run_result(self) -> Optional[Dict[str, Any]]:
+        """Result from the most recent dry-run evaluation (None if never run)."""
+        return self._last_dry_run_result
+
+    @property
+    def active_trades(self) -> List[TradeLifecycle]:
+        """Active trades belonging to this strategy."""
+        return self.ctx.lifecycle_manager.active_trades_for_strategy(self._strategy_id)
+
+    @property
+    def all_trades(self) -> List[TradeLifecycle]:
+        """All trades (any state) belonging to this strategy."""
+        return self.ctx.lifecycle_manager.get_trades_for_strategy(self._strategy_id)
+
+    # -- Tick -----------------------------------------------------------------
+
+    def tick(self, account: AccountSnapshot) -> None:
+        """
+        Called on every PositionMonitor update.
+
+        Throttled by check_interval_seconds.  Evaluates entry conditions
+        and opens a new trade if all gates pass.
+        """
+        if not self._enabled:
+            return
+
+        now = time.time()
+        if now - self._last_check_time < self.config.check_interval_seconds:
+            return
+        self._last_check_time = now
+
+        if self._should_open(account):
+            self._open_trade()
+
+    # -- Entry Evaluation -----------------------------------------------------
+
+    def _should_open(self, account: AccountSnapshot) -> bool:
+        """Evaluate all entry gates.  All must pass to open."""
+
+        # Gate 1: max concurrent trades
+        active = self.active_trades
+        if len(active) >= self.config.max_concurrent_trades:
+            logger.debug(
+                f"[{self._strategy_id}] max_concurrent_trades "
+                f"({len(active)}/{self.config.max_concurrent_trades}) — skip"
+            )
+            return False
+
+        # Gate 2: cooldown since last trade
+        if self.config.cooldown_seconds > 0:
+            all_trades = self.all_trades
+            if all_trades:
+                last_created = max(t.created_at for t in all_trades)
+                elapsed = time.time() - last_created
+                if elapsed < self.config.cooldown_seconds:
+                    logger.debug(
+                        f"[{self._strategy_id}] cooldown "
+                        f"({elapsed:.0f}/{self.config.cooldown_seconds:.0f}s) — skip"
+                    )
+                    return False
+
+        # Gate 3: user-defined entry conditions (all must pass)
+        for cond in self.config.entry_conditions:
+            try:
+                if not cond(account):
+                    cond_name = getattr(cond, "__name__", repr(cond))
+                    logger.debug(f"[{self._strategy_id}] entry blocked by {cond_name}")
+                    return False
+            except Exception as e:
+                logger.error(f"[{self._strategy_id}] entry condition error: {e}")
+                return False  # Fail-safe: don't trade on error
+
+        return True
+
+    # -- Trade Creation -------------------------------------------------------
+
+    def _open_trade(self) -> None:
+        """Resolve leg specs to concrete symbols and create a trade."""
+        try:
+            legs = resolve_legs(self.config.legs)
+            logger.info(
+                f"[{self._strategy_id}] resolved {len(legs)} legs: "
+                f"{[l.symbol for l in legs]}"
+            )
+
+            exec_mode = (
+                None if self.config.execution_mode == "auto"
+                else self.config.execution_mode
+            )
+
+            # ── Dry-run: resolve + route but do NOT place orders ─────────
+            if self._dry_run:
+                self._execute_dry_run(legs, exec_mode)
+                return
+
+            # ── Live: full execution ─────────────────────────────────────
+            trade = self.ctx.lifecycle_manager.create(
+                legs=legs,
+                exit_conditions=list(self.config.exit_conditions),
+                execution_mode=exec_mode,
+                rfq_action=self.config.rfq_action,
+                smart_config=self.config.smart_config,
+                strategy_id=self._strategy_id,
+                metadata={"strategy": self._strategy_id, **self.config.metadata},
+            )
+
+            logger.info(f"[{self._strategy_id}] opening trade {trade.id}")
+            self.ctx.lifecycle_manager.open(trade.id)
+
+        except Exception as e:
+            logger.error(f"[{self._strategy_id}] failed to open trade: {e}")
+
+    # -- Dry-Run Execution ----------------------------------------------------
+
+    def _execute_dry_run(self, legs: list, exec_mode: Optional[str]) -> None:
+        """
+        Full pipeline minus actual order placement.
+
+        Fetches orderbook for each leg, determines execution mode via
+        notional routing, and logs exactly what *would* happen.
+        Stores result in self._last_dry_run_result for programmatic access.
+        """
+        from market_data import get_option_orderbook, get_option_details
+
+        result: Dict[str, Any] = {
+            "strategy": self._strategy_id,
+            "timestamp": time.time(),
+            "legs": [],
+            "total_notional": 0.0,
+            "execution_mode": None,
+            "would_open": True,
+        }
+
+        total_notional = 0.0
+        for leg in legs:
+            leg_info: Dict[str, Any] = {
+                "symbol": leg.symbol,
+                "side": leg.side,
+                "side_label": "buy" if leg.side == 1 else "sell",
+                "qty": leg.qty,
+            }
+            try:
+                # get_option_details has top-level bid/ask/markPrice
+                details = get_option_details(leg.symbol)
+                if details:
+                    mark = float(details.get('markPrice', 0))
+                    best_bid = float(details.get('bid', 0))
+                    best_ask = float(details.get('ask', 0))
+                    leg_info["mark_price"] = mark
+                    leg_info["best_bid"] = best_bid
+                    leg_info["best_ask"] = best_ask
+                    leg_info["notional"] = mark * leg.qty
+                    total_notional += leg_info["notional"]
+                else:
+                    leg_info["error"] = "no option details"
+            except Exception as e:
+                leg_info["error"] = str(e)
+
+            result["legs"].append(leg_info)
+
+        result["total_notional"] = total_notional
+
+        # Determine execution mode via the same routing logic
+        if exec_mode:
+            routed_mode = exec_mode
+        elif len(legs) == 1:
+            routed_mode = "limit"
+        elif total_notional >= self.ctx.lifecycle_manager.rfq_notional_threshold:
+            routed_mode = "rfq"
+        elif total_notional >= self.ctx.lifecycle_manager.smart_notional_threshold:
+            routed_mode = "smart"
+        else:
+            routed_mode = "limit"
+        result["execution_mode"] = routed_mode
+
+        self._last_dry_run_result = result
+
+        # Pretty log
+        logger.info(f"\n{'='*60}")
+        logger.info(f"DRY-RUN — strategy '{self._strategy_id}'")
+        logger.info(f"{'='*60}")
+        for linfo in result["legs"]:
+            err = linfo.get("error")
+            if err:
+                logger.info(f"  {linfo['side_label'].upper()} {linfo['qty']}x {linfo['symbol']}  ⚠ {err}")
+            else:
+                logger.info(
+                    f"  {linfo['side_label'].upper()} {linfo['qty']}x {linfo['symbol']}  "
+                    f"mark=${linfo['mark_price']:.2f}  "
+                    f"bid=${linfo['best_bid']:.2f}  ask=${linfo['best_ask']:.2f}  "
+                    f"notional=${linfo['notional']:.2f}"
+                )
+        logger.info(f"  Total notional: ${total_notional:.2f}")
+        logger.info(f"  Routed mode: {routed_mode}")
+        logger.info(f"  ACTION: would open trade — orders NOT placed (dry-run)")
+        logger.info(f"{'='*60}")
+
+    # -- Controls -------------------------------------------------------------
+
+    def enable(self) -> None:
+        """Resume entry evaluation."""
+        self._enabled = True
+        logger.info(f"[{self._strategy_id}] enabled")
+
+    def disable(self) -> None:
+        """Pause entry evaluation (existing trades still managed by lifecycle)."""
+        self._enabled = False
+        logger.info(f"[{self._strategy_id}] disabled")
+
+    def stop(self) -> None:
+        """Disable and force-close all active trades."""
+        self._enabled = False
+        active = self.active_trades
+        for trade in active:
+            self.ctx.lifecycle_manager.force_close(trade.id)
+        logger.info(
+            f"[{self._strategy_id}] stopped — "
+            f"force-closed {len(active)} active trade(s)"
+        )
+
+    # -- Status ---------------------------------------------------------------
+
+    def status(self, account: Optional[AccountSnapshot] = None) -> str:
+        """Human-readable status report for this strategy."""
+        active = self.active_trades
+        all_t = self.all_trades
+        lines = [
+            f"Strategy: {self._strategy_id}",
+            f"  Enabled: {self._enabled}",
+            f"  Active trades: {len(active)}/{self.config.max_concurrent_trades}",
+            f"  Total trades: {len(all_t)}",
+        ]
+        for trade in active:
+            lines.append(f"  {trade.summary(account)}")
+        return "\n".join(lines)

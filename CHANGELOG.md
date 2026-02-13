@@ -5,6 +5,36 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-02-14
+
+### Added - Strategy Framework (Phase 4)
+- **Strategy framework** (`strategy.py` ~578 lines)
+  - `TradingContext` — dependency injection container holding all services
+  - `StrategyConfig` — declarative strategy definition (legs, entry/exit conditions, execution mode, concurrency, cooldown, dry-run)
+  - `StrategyRunner` — tick-driven executor: entry checks → leg resolution → trade creation → lifecycle management
+  - `build_context()` — factory wiring all services from config.py settings
+  - **Entry condition factories**: `time_window()`, `weekday_filter()`, `min_available_margin_pct()`, `min_equity()`, `max_account_delta()`, `max_margin_utilization()`, `no_existing_position_in()`
+  - **Dry-run mode**: `StrategyConfig(dry_run=True)` — fetches live prices, simulates execution without placing orders
+- **LegSpec dataclass** (`option_selection.py`) — declares option_type, side, qty, strike/expiry criteria
+- **resolve_legs()** (`option_selection.py`) — converts LegSpec list to TradeLeg list via market data queries
+- **strategy_id tracking** (`trade_lifecycle.py`) — per-strategy trade identification
+- **_get_orderbook_price()** (`trade_lifecycle.py`) — live orderbook pricing helper
+- **get_trades_for_strategy() / active_trades_for_strategy()** (`trade_lifecycle.py`)
+- **Test suites**:
+  - `tests/test_strategy_framework.py` — 72/72 unit assertions (config, context, conditions, LegSpec, runner, dry-run, edge cases)
+  - `tests/test_live_dry_run.py` — 27/27 integration assertions (11 dry-run + 16 micro-trade lifecycle)
+
+### Changed
+- **main.py** — completely rewritten: uses `build_context()` for DI, registers `StrategyRunner` instances on `PositionMonitor.on_update()`, signal handling for graceful shutdown
+- **trade_execution.py** — `get_order_status()` now uses correct endpoint: `GET /open/option/order/singleQuery/v1?orderId={id}` (was path-based URL returning 404)
+- **trade_execution.py** — `cancel_order()` sends orderId as `int()` per API spec
+- **trade_lifecycle.py** — fill detection uses `fillQty` field (was `executedQty`), state 3 = CANCELED (was 4)
+
+### Removed
+- Moved 6 pre-strategy legacy files to `archive/`: `check_positions.py` (old), `test_smart_strangle.py` (old), and 4 other superseded scripts
+
+---
+
 ## [0.3.0] - 2026-02-13
 
 ### Added - Smart Orderbook Execution (Phase 3)
@@ -130,6 +160,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 | Version | Key Feature | Lines of Code | Test Coverage |
 |---------|-------------|---------------|---------------|
+| 0.4.0 | Strategy Framework | ~578 (strategy.py) + modifications | 72/72 unit + 27/27 integration |
 | 0.3.0 | Smart Orderbook Execution | ~1000 (multileg_orderbook.py) | Butterfly lifecycle test |
 | 0.2.0 | Position Monitoring & Lifecycle | ~800 (trade_lifecycle.py, account_manager.py) | Position monitor, lifecycle tests |
 | 0.1.0 | RFQ Block Trades | ~800 (rfq.py) | RFQ integration tests |
@@ -138,6 +169,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ---
 
 ## Migration Notes
+
+### Upgrading to 0.4.0
+- **main.py rewritten** — If you customised main.py, review the new version. It now uses `build_context()` + `StrategyRunner` instead of APScheduler
+- **Strategy definition** — Replace old `config.py` strategy dicts with `StrategyConfig` + `LegSpec` objects
+- **Entry conditions** — Use factory functions from `strategy.py` instead of hardcoded checks
+- **Order status** — `get_order_status()` now uses the correct endpoint; no user action needed
+- **Fill tracking** — Uses `fillQty` field and state 3 = CANCELED; no user action needed
+- **Legacy files** — 6 scripts moved to `archive/`; import paths may need updating if referenced
 
 ### Upgrading to 0.3.0
 - **LifecycleManager** now supports `execution_mode="smart"` with `smart_config` parameter
@@ -160,11 +199,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 See [docs/ARCHITECTURE_PLAN.md](docs/ARCHITECTURE_PLAN.md) for the complete roadmap.
 
-**Next up (Phase 4):**
-- Scheduling & time-based conditions
-- Weekday filters
-- Time window definitions
-- Expiry date awareness
+**Next up (Phase 5):**
+- Multi-instrument support (futures, spot)
+- Unified order interface across instruments
+- Cross-instrument hedging
 
 ---
 

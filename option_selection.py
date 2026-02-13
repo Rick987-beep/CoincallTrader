@@ -9,8 +9,81 @@ Handles option selection logic based on various criteria:
 
 import time
 import logging
+from dataclasses import dataclass
+from typing import List
 from market_data import get_option_instruments, get_option_details, get_btc_futures_price
 
+
+# =============================================================================
+# Leg Specification — Declarative Leg Templates
+# =============================================================================
+
+@dataclass
+class LegSpec:
+    """
+    Declarative leg template — resolved to a concrete TradeLeg at trade time.
+
+    Strategies define legs as LegSpecs with criteria (e.g., "25-delta call").
+    At execution time, resolve_legs() calls select_option() for each spec
+    and returns TradeLeg instances with real symbols.
+
+    Attributes:
+        option_type: "C" for call, "P" for put
+        side: 1=buy, 2=sell
+        qty: Quantity for this leg
+        strike_criteria: e.g. {"type": "delta", "value": 0.25}
+        expiry_criteria: e.g. {"symbol": "28MAR26"}
+        underlying: Underlying asset (default "BTC")
+    """
+    option_type: str
+    side: int
+    qty: float
+    strike_criteria: dict
+    expiry_criteria: dict
+    underlying: str = "BTC"
+
+
+def resolve_legs(specs: List[LegSpec]) -> list:
+    """
+    Resolve a list of LegSpec templates into concrete TradeLeg objects.
+
+    Each LegSpec's criteria are passed to select_option() to find the
+    matching symbol. Returns a list of TradeLeg instances ready for
+    LifecycleManager.create().
+
+    Args:
+        specs: List of LegSpec templates
+
+    Returns:
+        List of TradeLeg objects with resolved symbols
+
+    Raises:
+        ValueError: If any leg cannot be resolved to a real option symbol
+    """
+    from trade_lifecycle import TradeLeg
+
+    resolved = []
+    for i, spec in enumerate(specs):
+        symbol = select_option(
+            expiry_criteria=spec.expiry_criteria,
+            strike_criteria=spec.strike_criteria,
+            option_type=spec.option_type,
+            underlying=spec.underlying,
+        )
+        if symbol is None:
+            raise ValueError(
+                f"Could not resolve leg {i}: {spec.option_type} "
+                f"strike={spec.strike_criteria} expiry={spec.expiry_criteria}"
+            )
+        resolved.append(TradeLeg(symbol=symbol, qty=spec.qty, side=spec.side))
+        logging.info(f"Resolved leg {i}: {spec.option_type} {spec.strike_criteria} -> {symbol}")
+
+    return resolved
+
+
+# =============================================================================
+# Option Selection
+# =============================================================================
 
 def select_option(expiry_criteria, strike_criteria, option_type='C', underlying='BTC'):
     """

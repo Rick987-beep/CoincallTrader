@@ -1,9 +1,99 @@
 # Coincall API Reference
 
 **Official Documentation:** https://docs.coincall.com/  
-**Last Updated:** February 13, 2026
+**Last Updated:** February 14, 2026
 
 This document summarizes the key Coincall API endpoints and internal modules relevant to our trading system.
+
+---
+
+## Internal Module: Strategy Framework
+
+See [strategy.py](../strategy.py) for the implementation.
+
+### Quick Start
+```python
+from strategy import build_context, StrategyConfig, StrategyRunner
+from strategy import time_window, weekday_filter, min_available_margin_pct
+from option_selection import LegSpec
+from trade_lifecycle import profit_target, max_loss, max_hold_hours
+
+ctx = build_context()
+
+config = StrategyConfig(
+    name="short_strangle_daily",
+    legs=[
+        LegSpec("C", side=2, qty=0.1,
+                strike_criteria={"type": "delta", "value": 0.25},
+                expiry_criteria={"symbol": "28MAR26"}),
+        LegSpec("P", side=2, qty=0.1,
+                strike_criteria={"type": "delta", "value": -0.25},
+                expiry_criteria={"symbol": "28MAR26"}),
+    ],
+    entry_conditions=[
+        time_window(8, 20),
+        weekday_filter(["mon", "tue", "wed", "thu"]),
+        min_available_margin_pct(50),
+    ],
+    exit_conditions=[
+        profit_target(50),
+        max_loss(100),
+        max_hold_hours(24),
+    ],
+    max_concurrent_trades=1,
+    cooldown_seconds=3600,
+    check_interval_seconds=60,
+    dry_run=False,  # set True for simulated execution
+)
+
+runner = StrategyRunner(config, ctx)
+ctx.position_monitor.on_update(runner.tick)
+ctx.position_monitor.start()
+```
+
+### Key Classes
+| Class | Purpose |
+|-------|---------|
+| `TradingContext` | DI container: auth, market_data, executor, rfq_executor, smart_executor, account_manager, position_monitor, lifecycle_manager |
+| `StrategyConfig` | Declarative definition: name, legs, entry/exit conditions, execution_mode, max_concurrent, cooldown, dry_run |
+| `StrategyRunner` | Tick-driven executor: checks entries, resolves legs, creates trades, delegates to LifecycleManager |
+
+### Entry Condition Factories
+| Factory | Signature | Description |
+|---------|-----------|-------------|
+| `time_window(start, end)` | `int, int → EntryCondition` | UTC hour window (e.g., 8–20) |
+| `weekday_filter(days)` | `list[str] → EntryCondition` | Weekday filter (e.g., `["mon","tue","wed","thu"]`) |
+| `min_available_margin_pct(pct)` | `float → EntryCondition` | Minimum available margin as % of equity |
+| `min_equity(usd)` | `float → EntryCondition` | Minimum account equity in USD |
+| `max_account_delta(limit)` | `float → EntryCondition` | Block if account delta exceeds threshold |
+| `max_margin_utilization(pct)` | `float → EntryCondition` | IM/equity ceiling |
+| `no_existing_position_in(symbols)` | `list[str] → EntryCondition` | Block if already positioned in given symbols |
+
+### LegSpec Dataclass
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `option_type` | `str` | required | `"C"` or `"P"` |
+| `side` | `int` | required | 1=BUY, 2=SELL |
+| `qty` | `float` | required | Contract quantity |
+| `strike_criteria` | `dict` | required | Resolution method: `{"type": "delta", "value": 0.25}`, `{"type": "closestStrike"}`, `{"type": "spotdistance%", "value": 10}` |
+| `expiry_criteria` | `dict` | required | Filter: `{"symbol": "28MAR26"}` |
+| `underlying` | `str` | `"BTC"` | Underlying asset |
+
+### Dry-Run Mode
+Set `dry_run=True` in `StrategyConfig` to:
+- Fetch live prices from the exchange (via `get_option_details()`)
+- Simulate entry/exit without placing real orders
+- Log estimated prices, PnL, and position details
+- Useful for validating strategies before committing capital
+
+### StrategyRunner Lifecycle
+1. `tick(snapshot)` is called on each PositionMonitor update
+2. Entry conditions checked — all must return `True`
+3. `resolve_legs()` converts `LegSpec` list to concrete `TradeLeg` list
+4. `LifecycleManager.create()` creates trade with exit conditions
+5. `LifecycleManager.open()` begins execution
+6. Subsequent ticks advance lifecycle (fill checks, exit evaluations)
+7. `runner.stop()` for graceful shutdown
 
 ---
 
@@ -387,7 +477,37 @@ Up to 40 orders per request.
 ```
 POST /open/option/order/cancel/v1
 ```
-By orderId or clientOrderId.
+By orderId or clientOrderId. **Important:** `orderId` must be sent as an integer, not a string.
+
+### Get Order Status
+```
+GET /open/option/order/singleQuery/v1?orderId={orderId}
+```
+Returns details of a single order. **Note:** The path-based endpoint (`/open/option/order/{id}/v1`) returns 404 — use the query-parameter version above.
+
+**Response data:**
+| Field | Type | Description |
+|-------|------|-------------|
+| orderId | number | Order ID |
+| symbol | string | Option symbol |
+| qty | number | Ordered quantity |
+| fillQty | number | Filled quantity (not `executedQty`) |
+| remainQty | number | Remaining quantity |
+| price | number | Order price |
+| avgPrice | number | Average fill price |
+| state | number | Order state (see below) |
+
+**Order states:**
+| State | Meaning |
+|-------|---------|
+| 0 | NEW |
+| 1 | FILLED |
+| 2 | PARTIALLY_FILLED |
+| 3 | CANCELED |
+| 4 | PRE_CANCEL |
+| 5 | CANCELING |
+| 6 | INVALID |
+| 10 | CANCEL_BY_EXERCISE |
 
 ### Get Positions
 ```

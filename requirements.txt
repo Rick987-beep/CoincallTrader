@@ -4,7 +4,6 @@
 # Core dependencies
 requests>=2.31.0          # HTTP client for API calls
 python-dotenv>=1.0.0      # Environment variable management
-APScheduler>=3.10.0       # Job scheduling
 
 # Optional - for WebSocket support (future)
 websockets>=12.0          # WebSocket client

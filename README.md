@@ -1,110 +1,217 @@
 # CoincallTrader
 
-A comprehensive trading management system for the Coincall exchange, supporting options, futures, and spot trading with sophisticated strategy execution.
+A strategy-driven options trading system for the [Coincall](https://www.coincall.com/) exchange.  
+Strategies are declared as configuration — not coded as classes — and the framework handles entry checks, leg resolution, execution, lifecycle management, and exits automatically.
 
-## Project Status
-
-🔧 **In Development** - Evolving from a simple options bot to a full trading management system.
-
-See [docs/ARCHITECTURE_PLAN.md](docs/ARCHITECTURE_PLAN.md) for the complete roadmap and requirements.
+**Current version:** 0.4.0 — Strategy Framework
 
 ## Highlights
 
-- **Trade lifecycle management**: Full open → manage → close cycle with state machine ✅
-- **Position monitoring**: Live Greeks, PnL, and account snapshots with background polling ✅
-- **Smart orderbook execution**: Chunked multi-leg execution with continuous quoting and aggressive fallback ✅
-- **RFQ execution**: Block trades for multi-leg options strategies with best-quote selection ✅
-- **Dual execution modes**: RFQ for large trades ($50k+), smart orderbook for smaller sizes ✅
-- **Exit conditions**: Composable callables — profit target, max loss, time, Greeks limits ✅
+- **Declarative strategy framework**: Define _what_ to trade, _when_ to enter, _when_ to exit, and _how_ to execute — all via `StrategyConfig` ✅
+- **Dependency injection**: `TradingContext` wires every service; strategies and tests receive the same container ✅
+- **Entry conditions**: Composable factories — `time_window()`, `weekday_filter()`, `min_available_margin_pct()`, `min_equity()`, `max_account_delta()`, `max_margin_utilization()`, `no_existing_position_in()` ✅
+- **Leg specifications**: `LegSpec` dataclass resolves strike/expiry criteria into concrete symbols at runtime ✅
+- **Trade lifecycle**: Full open → manage → close state machine with automatic exit evaluation ✅
+- **Exit conditions**: `profit_target()`, `max_loss()`, `max_hold_hours()`, `account_delta_limit()`, `structure_delta_limit()`, `leg_greek_limit()` ✅
+- **Three execution modes**: Limit orders, RFQ block trades ($50 k+), and smart orderbook (chunked quoting with aggressive fallback) ✅
+- **Dry-run mode**: Live pricing from the exchange, no orders placed ✅
+- **Position monitoring**: Background polling with live Greeks, PnL, account snapshots, and tick-driven strategy execution ✅
 - **Multi-leg native**: Strangles, Iron Condors, Butterflies — any structure as one lifecycle ✅
-- **Environment switching**: Seamless testnet ↔ production ✅
 - **HMAC-SHA256 authentication**: Secure API access via `auth.py` ✅
-- **Config-driven strategies**: Parameters defined in `config.py` ✅
-- **Modular architecture**: Clean separation of concerns ✅
 
 ## Quick Start
 
-### 1. Install Dependencies
+### 1. Install dependencies
 ```bash
 pip install -r requirements.txt
 ```
 
-### 2. Configure Environment
-Copy `.env.example` to `.env` and fill in your API keys:
+### 2. Configure environment
+Copy `.env.example` to `.env` and set your API keys:
 ```
-TRADING_ENVIRONMENT=testnet   # or production
+TRADING_ENVIRONMENT=production   # or testnet
 
-# Testnet
-COINCALL_API_KEY_TEST=your_testnet_key
-COINCALL_API_SECRET_TEST=your_testnet_secret
-
-# Production
-COINCALL_API_KEY_PROD=your_production_key
-COINCALL_API_SECRET_PROD=your_production_secret
+COINCALL_API_KEY_PROD=your_key
+COINCALL_API_SECRET_PROD=your_secret
 ```
 
-### 3. Run the Bot
+### 3. Define a strategy in `main.py`
+```python
+from option_selection import LegSpec
+from trade_lifecycle import profit_target, max_loss, max_hold_hours
+from strategy import (
+    build_context, StrategyConfig, StrategyRunner,
+    time_window, weekday_filter, min_available_margin_pct,
+)
+
+ctx = build_context()
+
+config = StrategyConfig(
+    name="short_strangle_daily",
+    legs=[
+        LegSpec("C", side=2, qty=0.1,
+                strike_criteria={"type": "delta", "value": 0.25},
+                expiry_criteria={"symbol": "28MAR26"}),
+        LegSpec("P", side=2, qty=0.1,
+                strike_criteria={"type": "delta", "value": -0.25},
+                expiry_criteria={"symbol": "28MAR26"}),
+    ],
+    entry_conditions=[
+        time_window(8, 20),
+        weekday_filter(["mon", "tue", "wed", "thu"]),
+        min_available_margin_pct(50),
+    ],
+    exit_conditions=[
+        profit_target(50),
+        max_loss(100),
+        max_hold_hours(24),
+    ],
+    max_concurrent_trades=1,
+    cooldown_seconds=3600,
+    check_interval_seconds=60,
+)
+
+runner = StrategyRunner(config, ctx)
+ctx.position_monitor.on_update(runner.tick)
+ctx.position_monitor.start()
+```
+
+### 4. Run
 ```bash
-python main.py
+python main.py          # live trading
+# or set dry_run=True in StrategyConfig for simulated execution
 ```
 
 ## Project Structure
 
 ```
 CoincallTrader/
-├── main.py                # Entry point with scheduler
-├── config.py              # Environment & strategy config
-├── auth.py                # API authentication (HMAC-SHA256)
-├── market_data.py         # Market data retrieval (options, orderbooks)
-├── option_selection.py    # Option filtering logic
-├── trade_execution.py     # Order management (limit, market orders)
-├── rfq.py                 # RFQ block-trade execution (multi-leg $50k+ trades)
-├── multileg_orderbook.py  # Smart orderbook execution (chunking, quoting, fallback)
-├── trade_lifecycle.py     # Trade lifecycle state machine
-├── account_manager.py     # Account info, position monitoring, snapshots
-├── docs/                  # Documentation
-│   ├── ARCHITECTURE_PLAN.md  # Development roadmap & phases
-│   └── API_REFERENCE.md      # Coincall API notes
-├── tests/                 # Unit & integration tests
-│   ├── test_smart_butterfly.py  # Smart execution test
-│   └── close_butterfly_now.py   # Emergency position closer
-├── logs/                  # Trading logs
-└── archive/               # Legacy code & historical tests
+├── main.py                 # Entry point — wires context, registers runners
+├── strategy.py             # Strategy framework (TradingContext, StrategyConfig, StrategyRunner)
+├── config.py               # Environment & global config (.env loading)
+├── auth.py                 # HMAC-SHA256 API authentication
+├── market_data.py          # Market data (option chains, orderbooks, BTC price)
+├── option_selection.py     # LegSpec, resolve_legs(), select_option()
+├── trade_execution.py      # Order placement, cancellation, status queries
+├── trade_lifecycle.py      # TradeState machine, TradeLeg, LifecycleManager, exit conditions
+├── multileg_orderbook.py   # Smart chunked multi-leg execution
+├── rfq.py                  # RFQ block-trade execution ($50k+ notional)
+├── account_manager.py      # AccountSnapshot, PositionMonitor, margin/equity queries
+├── docs/
+│   ├── ARCHITECTURE_PLAN.md   # Roadmap, phases, requirements
+│   └── API_REFERENCE.md       # Coincall API & internal module reference
+├── tests/
+│   ├── test_strategy_framework.py  # Unit tests — config, context, conditions (72/72)
+│   └── test_live_dry_run.py        # Integration — dry-run + micro-trade (27/27)
+├── logs/                   # Runtime logs (gitignored)
+├── archive/                # Legacy code (gitignored)
+├── CHANGELOG.md
+├── RELEASE_NOTES.md
+└── requirements.txt
+```
+
+## Architecture Overview
+
+```
+┌──────────────────────────────────────────────────────┐
+│  main.py                                             │
+│  build_context() → TradingContext (DI container)     │
+│  StrategyRunner.tick() registered on PositionMonitor │
+└────────────────┬─────────────────────────────────────┘
+                 │ on each tick
+   ┌─────────────▼──────────────┐
+   │  StrategyRunner            │
+   │  • check entry conditions  │
+   │  • resolve LegSpecs        │
+   │  • create trade lifecycle  │
+   │  • LifecycleManager.tick() │
+   │    evaluates exit conds    │
+   └─────┬─────────────┬───────┘
+         │             │
+   ┌─────▼─────┐ ┌────▼───────────┐
+   │ option_   │ │ trade_         │
+   │ selection │ │ lifecycle.py   │
+   │ LegSpec → │ │ TradeState FSM │
+   │ TradeLeg  │ │ exit conditions│
+   └───────────┘ └──────┬─────────┘
+                        │
+         ┌──────────────┼──────────────┐
+         │              │              │
+   ┌─────▼─────┐ ┌─────▼─────┐ ┌─────▼──────────┐
+   │ trade_    │ │ rfq.py    │ │ multileg_      │
+   │ execution │ │ $50k+     │ │ orderbook.py   │
+   │ (limit)   │ │ block     │ │ smart chunked  │
+   └───────────┘ └───────────┘ └────────────────┘
 ```
 
 ## Configuration
 
-Edit `config.py` to adjust:
+### StrategyConfig fields
 
-| Section | Purpose |
-|---------|---------|
-| `POSITION_CONFIG` | Strategy legs, expiry criteria |
-| `TRADING_CONFIG` | Intervals, timeouts, retries |
-| `RISK_CONFIG` | Position limits, margin thresholds |
-| `OPEN_POSITION_CONDITIONS` | Entry criteria |
-| `CLOSE_POSITION_CONDITIONS` | Exit criteria |
+| Field | Type | Description |
+|-------|------|-------------|
+| `name` | `str` | Unique strategy identifier |
+| `legs` | `list[LegSpec]` | What to trade — option type, side, qty, strike/expiry criteria |
+| `entry_conditions` | `list[EntryCondition]` | All must pass before opening |
+| `exit_conditions` | `list[ExitCondition]` | Any triggers a close |
+| `execution_mode` | `str` | `"limit"`, `"rfq"`, or `"smart"` |
+| `max_concurrent_trades` | `int` | Max simultaneous open trades |
+| `cooldown_seconds` | `float` | Delay between new trades |
+| `check_interval_seconds` | `float` | Throttle between entry checks |
+| `dry_run` | `bool` | Simulate with live prices, no real orders |
+
+### LegSpec fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `option_type` | `str` | `"C"` or `"P"` |
+| `side` | `int` | `1` = BUY, `2` = SELL |
+| `qty` | `float` | Contract quantity |
+| `strike_criteria` | `dict` | `{"type": "delta", "value": 0.25}`, `{"type": "closestStrike"}`, `{"type": "spotdistance%", "value": 10}` |
+| `expiry_criteria` | `dict` | `{"symbol": "28MAR26"}` |
+| `underlying` | `str` | Default `"BTC"` |
+
+### Entry condition factories
+
+| Factory | Description |
+|---------|-------------|
+| `time_window(start_hour, end_hour)` | UTC hour window |
+| `weekday_filter(days)` | e.g. `["mon", "tue", "wed", "thu"]` |
+| `min_available_margin_pct(pct)` | Minimum free margin % |
+| `min_equity(usd)` | Minimum account equity |
+| `max_account_delta(limit)` | Account delta threshold |
+| `max_margin_utilization(pct)` | IM/equity ceiling |
+| `no_existing_position_in(symbols)` | Block if already positioned |
+
+## Testing
+
+```bash
+# Unit tests (72 assertions)
+python -m pytest tests/test_strategy_framework.py -v
+
+# Integration tests — dry-run + micro-trade (27 assertions)
+python -m pytest tests/test_live_dry_run.py -v
+```
 
 ## Documentation
 
-- **[Architecture Plan](docs/ARCHITECTURE_PLAN.md)** - Full roadmap, requirements, and implementation phases
-- **[API Reference](docs/API_REFERENCE.md)** - Coincall API endpoints and examples
+- **[Architecture Plan](docs/ARCHITECTURE_PLAN.md)** — Phases, requirements, and roadmap
+- **[API Reference](docs/API_REFERENCE.md)** — Coincall API endpoints and internal module docs
+- **[Changelog](CHANGELOG.md)** — Version history
+- **[Release Notes](RELEASE_NOTES.md)** — Detailed v0.4.0 release notes
 
 ## Roadmap
 
-1. ✅ Basic options trading
-2. ✅ RFQ execution (block trades with best-quote selection)
-3. ✅ Position monitoring (live Greeks, PnL, account snapshots)
-4. ✅ Trade lifecycle management (open → manage → close state machine)
-5. ✅ Smart orderbook execution (chunking, quoting, aggressive fallback)
-6. ⬜ Scheduling & time-based conditions
-7. ⬜ Multi-instrument (futures, spot)
-8. ⬜ Web dashboard
-9. ⬜ Persistence & recovery
-
-## API Documentation
-
-Official Coincall API: https://docs.coincall.com/
+1. ✅ Foundation — auth, config, market data, option selection
+2. ✅ RFQ execution — block trades with best-quote selection
+3. ✅ Position monitoring — live Greeks, PnL, account snapshots
+4. ✅ Trade lifecycle — open → manage → close state machine
+5. ✅ Smart orderbook execution — chunked quoting with aggressive fallback
+6. ✅ **Strategy framework** — declarative configs, entry/exit conditions, DI, dry-run
+7. ⬜ Multi-instrument — futures, spot trading
+8. ⬜ Web dashboard — monitoring interface
+9. ⬜ Persistence & recovery — state persistence, crash recovery
 
 ## Disclaimer
 
-⚠️ **Trading involves significant risk of loss.** This software is provided as-is, without warranty. Use at your own risk. Always test thoroughly on testnet before production use.
+⚠️ **Trading involves significant risk of loss.** This software is provided as-is, without warranty. Use at your own risk. Always test on testnet or in dry-run mode before live production trading.

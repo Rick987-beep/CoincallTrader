@@ -21,11 +21,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from account_manager import AccountSnapshot, PositionSnapshot
 from trade_lifecycle import (
     LifecycleManager, TradeLifecycle, TradeLeg, TradeState,
-    max_hold_hours,
 )
 from option_selection import LegSpec
 from strategy import (
     StrategyConfig, StrategyRunner, TradingContext, build_context,
+    max_hold_hours,
 )
 
 # ── Logging ──────────────────────────────────────────────────────────────────

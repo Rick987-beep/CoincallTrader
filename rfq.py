@@ -685,21 +685,27 @@ class RFQExecutor:
             from trade_execution import trade_executor
             
             try:
-                trades = []
+                placed_orders = []
+                all_placed = True
                 for leg in legs:
                     side = 1 if leg.side == "BUY" else 2
-                    trades.append((leg.instrument, leg.qty, side, 60))
+                    order = trade_executor.place_order(
+                        symbol=leg.instrument,
+                        qty=leg.qty,
+                        side=side,
+                        order_type=1,  # limit
+                    )
+                    if order:
+                        placed_orders.append(order)
+                    else:
+                        all_placed = False
+                        break
                 
-                results = trade_executor.execute_multiple_trades(trades)
-                
-                # Check if all legs executed
-                all_success = all(r is not None for r in results)
-                
-                if all_success:
+                if all_placed and placed_orders:
                     result.success = True
                     result.state = RFQState.FILLED
                     result.message = "Executed on orderbook (RFQ fallback)"
-                    result.improvement_pct = 0.0  # No improvement vs orderbook
+                    result.improvement_pct = 0.0
                 else:
                     result.message = "Partial execution on orderbook fallback"
                     

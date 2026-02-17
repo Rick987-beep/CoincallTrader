@@ -6,7 +6,7 @@ Provides infrastructure for running trading strategies as composable,
 config-driven routines:
 
   - TradingContext: Dependency injection container for all services
-  - EntryCondition: Callable type for entry decisions (mirrors ExitCondition)
+  - EntryCondition / ExitCondition factory functions
   - StrategyConfig: Declarative strategy definition
   - StrategyRunner: Executes one strategy — checks entries, creates trades
 
@@ -18,21 +18,14 @@ Architecture:
 Usage:
     from strategy import build_context, StrategyConfig, StrategyRunner
     from strategy import time_window, weekday_filter, min_available_margin_pct
+    from strategy import profit_target, max_loss, max_hold_hours
     from option_selection import LegSpec
-    from trade_lifecycle import profit_target, max_loss, max_hold_hours
 
     ctx = build_context()
 
     config = StrategyConfig(
         name="short_strangle_daily",
-        legs=[
-            LegSpec("C", side=2, qty=0.1,
-                    strike_criteria={"type": "delta", "value": 0.25},
-                    expiry_criteria={"symbol": "28MAR26"}),
-            LegSpec("P", side=2, qty=0.1,
-                    strike_criteria={"type": "delta", "value": -0.25},
-                    expiry_criteria={"symbol": "28MAR26"}),
-        ],
+        legs=[...],
         entry_conditions=[
             time_window(8, 20),
             weekday_filter(["mon", "tue", "wed", "thu"]),
@@ -114,8 +107,10 @@ def build_context(
     market_data_svc = MarketData()
     executor = TradeExecutor()
     rfq_executor = RFQExecutor()
-    smart_executor = SmartOrderbookExecutor()
     account_mgr = AccountManager()
+    smart_executor = SmartOrderbookExecutor(
+        get_positions=lambda: account_mgr.get_positions(force_refresh=True),
+    )
     monitor = PositionMonitor(poll_interval=poll_interval)
     lifecycle_mgr = LifecycleManager(
         rfq_notional_threshold=rfq_notional_threshold,
@@ -138,12 +133,15 @@ def build_context(
 
 
 # =============================================================================
-# Entry Conditions
+# Condition Type Aliases
 # =============================================================================
 
-# Type alias — mirrors ExitCondition but takes only an AccountSnapshot
-# (entry decisions don't reference a specific trade).
+# EntryCondition: callable checked before opening a trade.
+# Takes only an AccountSnapshot (no trade reference yet).
 EntryCondition = Callable[[AccountSnapshot], bool]
+
+# ExitCondition is imported from trade_lifecycle (canonical definition):
+#   Callable[[AccountSnapshot, TradeLifecycle], bool]
 
 
 def min_available_margin_pct(pct: float) -> EntryCondition:
@@ -251,6 +249,155 @@ def no_existing_position_in(symbols: List[str]) -> EntryCondition:
                 return False
         return True
     _check.__name__ = f"no_existing_position_in({symbols})"
+    return _check
+
+
+# =============================================================================
+# Exit Condition Factories
+# =============================================================================
+
+def profit_target(pct: float) -> ExitCondition:
+    """
+    Close when structure PnL exceeds +pct% of entry cost.
+
+    Example: profit_target(50) closes when profit >= 50% of premium received.
+    """
+    def _check(account: AccountSnapshot, trade: "TradeLifecycle") -> bool:
+        entry = trade.total_entry_cost()
+        if entry == 0:
+            return False
+        pnl = trade.structure_pnl(account)
+        ratio = (pnl / abs(entry)) * 100 if entry != 0 else 0
+        triggered = ratio >= pct
+        if triggered:
+            logger.info(f"[{trade.id}] profit_target({pct}%) triggered: PnL ratio={ratio:.1f}%")
+        return triggered
+    _check.__name__ = f"profit_target({pct}%)"
+    return _check
+
+
+def max_loss(pct: float) -> ExitCondition:
+    """
+    Close when structure loss exceeds pct% of entry cost.
+
+    Example: max_loss(100) closes when loss >= 100% of premium received.
+    """
+    def _check(account: AccountSnapshot, trade: "TradeLifecycle") -> bool:
+        entry = trade.total_entry_cost()
+        if entry == 0:
+            return False
+        pnl = trade.structure_pnl(account)
+        ratio = (pnl / abs(entry)) * 100 if entry != 0 else 0
+        triggered = ratio <= -pct
+        if triggered:
+            logger.info(f"[{trade.id}] max_loss({pct}%) triggered: PnL ratio={ratio:.1f}%")
+        return triggered
+    _check.__name__ = f"max_loss({pct}%)"
+    return _check
+
+
+def max_hold_hours(hours: float) -> ExitCondition:
+    """Close when position has been open longer than N hours."""
+    def _check(account: AccountSnapshot, trade: "TradeLifecycle") -> bool:
+        hold = trade.hold_seconds
+        if hold is None:
+            return False
+        triggered = hold >= hours * 3600
+        if triggered:
+            logger.info(f"[{trade.id}] max_hold_hours({hours}h) triggered: held {hold/3600:.1f}h")
+        return triggered
+    _check.__name__ = f"max_hold_hours({hours}h)"
+    return _check
+
+
+def time_exit(hour: int, minute: int = 0) -> ExitCondition:
+    """
+    Close the trade at or after a specific UTC wall-clock time.
+
+    Args:
+        hour: UTC hour (0-23).
+        minute: UTC minute (0-59), default 0.
+
+    Example:
+        time_exit(19, 0)  → close at or after 19:00 UTC
+    """
+    def _check(account: AccountSnapshot, trade: "TradeLifecycle") -> bool:
+        now = datetime.now(timezone.utc)
+        cutoff = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        triggered = now >= cutoff
+        if triggered:
+            logger.info(
+                f"[{trade.id}] time_exit({hour:02d}:{minute:02d} UTC) triggered: "
+                f"now={now.strftime('%H:%M:%S')}"
+            )
+        return triggered
+    _check.__name__ = f"time_exit({hour:02d}:{minute:02d} UTC)"
+    return _check
+
+
+def account_delta_limit(threshold: float) -> ExitCondition:
+    """Close when account-wide absolute delta exceeds threshold."""
+    def _check(account: AccountSnapshot, trade: "TradeLifecycle") -> bool:
+        triggered = abs(account.net_delta) > threshold
+        if triggered:
+            logger.info(
+                f"[{trade.id}] account_delta_limit({threshold}) triggered: "
+                f"account delta={account.net_delta:+.4f}"
+            )
+        return triggered
+    _check.__name__ = f"account_delta_limit({threshold})"
+    return _check
+
+
+def structure_delta_limit(threshold: float) -> ExitCondition:
+    """Close when this trade's absolute delta exceeds threshold."""
+    def _check(account: AccountSnapshot, trade: "TradeLifecycle") -> bool:
+        d = trade.structure_delta(account)
+        triggered = abs(d) > threshold
+        if triggered:
+            logger.info(
+                f"[{trade.id}] structure_delta_limit({threshold}) triggered: "
+                f"structure delta={d:+.4f}"
+            )
+        return triggered
+    _check.__name__ = f"structure_delta_limit({threshold})"
+    return _check
+
+
+def leg_greek_limit(leg_index: int, greek: str, op: str, value: float) -> ExitCondition:
+    """
+    Close when a specific leg's Greek crosses a threshold.
+
+    Args:
+        leg_index: Index into open_legs (0 = first leg)
+        greek: "delta", "gamma", "theta", or "vega"
+        op: ">" or "<"
+        value: Threshold value
+
+    Example: leg_greek_limit(0, "theta", "<", -5.0)
+             → close when first leg's theta drops below -5
+    """
+    def _check(account: AccountSnapshot, trade: "TradeLifecycle") -> bool:
+        if leg_index >= len(trade.open_legs):
+            return False
+        leg = trade.open_legs[leg_index]
+        pos = account.get_position(leg.symbol)
+        if pos is None:
+            return False
+        actual = getattr(pos, greek, 0.0)
+        if op == ">":
+            triggered = actual > value
+        elif op == "<":
+            triggered = actual < value
+        else:
+            return False
+        if triggered:
+            logger.info(
+                f"[{trade.id}] leg_greek_limit(leg[{leg_index}].{greek} {op} {value}) "
+                f"triggered: actual={actual:+.6f}"
+            )
+        return triggered
+    _check.__name__ = f"leg[{leg_index}].{greek}{op}{value}"
     return _check
 
 

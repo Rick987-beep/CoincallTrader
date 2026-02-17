@@ -31,7 +31,7 @@ from enum import Enum
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from account_manager import AccountSnapshot, PositionMonitor, PositionSnapshot
-from trade_execution import TradeExecutor
+from trade_execution import TradeExecutor, LimitFillManager, ExecutionParams
 from rfq import RFQExecutor, OptionLeg, RFQResult
 from multileg_orderbook import SmartOrderbookExecutor, SmartExecConfig
 from market_data import get_option_orderbook
@@ -222,159 +222,14 @@ class TradeLifecycle:
 
 
 # =============================================================================
-# Exit Condition Factories
+# NOTE: Exit condition factories have moved to strategy.py.
+#
+# Import them from there:
+#   from strategy import profit_target, max_loss, max_hold_hours, time_exit
+#   from strategy import account_delta_limit, structure_delta_limit, leg_greek_limit
+#
+# The ExitCondition type alias is also now in strategy.py.
 # =============================================================================
-
-def profit_target(pct: float) -> ExitCondition:
-    """
-    Close when structure PnL exceeds +pct% of entry cost.
-
-    Example: profit_target(50) closes when profit >= 50% of premium received.
-    """
-    def _check(account: AccountSnapshot, trade: TradeLifecycle) -> bool:
-        entry = trade.total_entry_cost()
-        if entry == 0:
-            return False
-        pnl = trade.structure_pnl(account)
-        # For credit trades (entry < 0), profit = -pnl > 0
-        # For debit trades (entry > 0), profit = pnl > 0
-        ratio = (pnl / abs(entry)) * 100 if entry != 0 else 0
-        triggered = ratio >= pct
-        if triggered:
-            logger.info(f"[{trade.id}] profit_target({pct}%) triggered: PnL ratio={ratio:.1f}%")
-        return triggered
-    _check.__name__ = f"profit_target({pct}%)"
-    return _check
-
-
-def max_loss(pct: float) -> ExitCondition:
-    """
-    Close when structure loss exceeds pct% of entry cost.
-
-    Example: max_loss(100) closes when loss >= 100% of premium received.
-    """
-    def _check(account: AccountSnapshot, trade: TradeLifecycle) -> bool:
-        entry = trade.total_entry_cost()
-        if entry == 0:
-            return False
-        pnl = trade.structure_pnl(account)
-        ratio = (pnl / abs(entry)) * 100 if entry != 0 else 0
-        triggered = ratio <= -pct
-        if triggered:
-            logger.info(f"[{trade.id}] max_loss({pct}%) triggered: PnL ratio={ratio:.1f}%")
-        return triggered
-    _check.__name__ = f"max_loss({pct}%)"
-    return _check
-
-
-def max_hold_hours(hours: float) -> ExitCondition:
-    """Close when position has been open longer than N hours."""
-    def _check(account: AccountSnapshot, trade: TradeLifecycle) -> bool:
-        hold = trade.hold_seconds
-        if hold is None:
-            return False
-        triggered = hold >= hours * 3600
-        if triggered:
-            logger.info(f"[{trade.id}] max_hold_hours({hours}h) triggered: held {hold/3600:.1f}h")
-        return triggered
-    _check.__name__ = f"max_hold_hours({hours}h)"
-    return _check
-
-
-def time_exit(hour: int, minute: int = 0) -> ExitCondition:
-    """
-    Close the trade at or after a specific UTC wall-clock time.
-
-    Useful for daily strategies that must close by end-of-session
-    regardless of P&L (e.g., "close at 19:00 UTC").
-
-    Args:
-        hour: UTC hour (0-23).
-        minute: UTC minute (0-59), default 0.
-
-    Example:
-        time_exit(19, 0)  → close at or after 19:00 UTC
-    """
-    from datetime import datetime, timezone
-
-    def _check(account: AccountSnapshot, trade: TradeLifecycle) -> bool:
-        now = datetime.now(timezone.utc)
-        cutoff = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-        triggered = now >= cutoff
-        if triggered:
-            logger.info(
-                f"[{trade.id}] time_exit({hour:02d}:{minute:02d} UTC) triggered: "
-                f"now={now.strftime('%H:%M:%S')}"
-            )
-        return triggered
-    _check.__name__ = f"time_exit({hour:02d}:{minute:02d} UTC)"
-    return _check
-
-
-def account_delta_limit(threshold: float) -> ExitCondition:
-    """Close when account-wide absolute delta exceeds threshold."""
-    def _check(account: AccountSnapshot, trade: TradeLifecycle) -> bool:
-        triggered = abs(account.net_delta) > threshold
-        if triggered:
-            logger.info(
-                f"[{trade.id}] account_delta_limit({threshold}) triggered: "
-                f"account delta={account.net_delta:+.4f}"
-            )
-        return triggered
-    _check.__name__ = f"account_delta_limit({threshold})"
-    return _check
-
-
-def structure_delta_limit(threshold: float) -> ExitCondition:
-    """Close when this trade's absolute delta exceeds threshold."""
-    def _check(account: AccountSnapshot, trade: TradeLifecycle) -> bool:
-        d = trade.structure_delta(account)
-        triggered = abs(d) > threshold
-        if triggered:
-            logger.info(
-                f"[{trade.id}] structure_delta_limit({threshold}) triggered: "
-                f"structure delta={d:+.4f}"
-            )
-        return triggered
-    _check.__name__ = f"structure_delta_limit({threshold})"
-    return _check
-
-
-def leg_greek_limit(leg_index: int, greek: str, op: str, value: float) -> ExitCondition:
-    """
-    Close when a specific leg's Greek crosses a threshold.
-
-    Args:
-        leg_index: Index into open_legs (0 = first leg)
-        greek: "delta", "gamma", "theta", or "vega"
-        op: ">" or "<"
-        value: Threshold value
-
-    Example: leg_greek_limit(0, "theta", "<", -5.0)
-             → close when first leg's theta drops below -5
-    """
-    def _check(account: AccountSnapshot, trade: TradeLifecycle) -> bool:
-        if leg_index >= len(trade.open_legs):
-            return False
-        leg = trade.open_legs[leg_index]
-        pos = account.get_position(leg.symbol)
-        if pos is None:
-            return False
-        actual = getattr(pos, greek, 0.0)
-        if op == ">":
-            triggered = actual > value
-        elif op == "<":
-            triggered = actual < value
-        else:
-            return False
-        if triggered:
-            logger.info(
-                f"[{trade.id}] leg_greek_limit(leg[{leg_index}].{greek} {op} {value}) "
-                f"triggered: actual={actual:+.6f}"
-            )
-        return triggered
-    _check.__name__ = f"leg[{leg_index}].{greek}{op}{value}"
-    return _check
 
 
 # =============================================================================
@@ -656,50 +511,25 @@ class LifecycleManager:
             return False
 
     def _open_limit(self, trade: TradeLifecycle) -> bool:
-        """Open via limit orders — one order per leg.
+        """Open via limit orders — delegates placement to LimitFillManager.
 
-        Fetches the current orderbook for each leg to determine the limit
-        price (best ask for buys, best bid for sells).
-
-        Failure handling: if any leg fails to place, all previously placed
-        orders are cancelled and the trade moves to FAILED.
+        Creates a fill manager, places aggressive limit orders for all legs,
+        and stores the manager in trade metadata for tick-based fill checking.
         """
         trade.state = TradeState.OPENING
 
-        for leg in trade.open_legs:
-            try:
-                price = self._get_orderbook_price(leg.symbol, leg.side)
-                if price is None:
-                    trade.error = f"No orderbook price for {leg.symbol} (side={leg.side_label})"
-                    logger.error(f"Trade {trade.id}: {trade.error}")
-                    self._cancel_placed_orders(trade.open_legs)
-                    trade.state = TradeState.FAILED
-                    return False
+        params = trade.metadata.get("execution_params") or ExecutionParams()
+        mgr = LimitFillManager(self._executor, params)
 
-                result = self._executor.place_order(
-                    symbol=leg.symbol,
-                    qty=leg.qty,
-                    side=leg.side,
-                    order_type=1,  # limit
-                    price=price,
-                )
-                if result:
-                    leg.order_id = str(result.get('orderId', ''))
-                    logger.info(f"Trade {trade.id}: placed order {leg.order_id} for {leg.side_label} {leg.qty}x {leg.symbol} @ ${price}")
-                else:
-                    trade.error = f"Failed to place order for {leg.symbol}"
-                    logger.error(f"Trade {trade.id}: {trade.error}")
-                    self._cancel_placed_orders(trade.open_legs)
-                    trade.state = TradeState.FAILED
-                    return False
-            except Exception as e:
-                trade.error = str(e)
-                logger.error(f"Trade {trade.id}: exception placing order: {e}")
-                self._cancel_placed_orders(trade.open_legs)
-                trade.state = TradeState.FAILED
-                return False
+        ok = mgr.place_all(trade.open_legs)
+        if not ok:
+            trade.error = "Failed to place one or more open orders"
+            logger.error(f"Trade {trade.id}: {trade.error}")
+            trade.state = TradeState.FAILED
+            return False
 
-        logger.info(f"Trade {trade.id}: all {len(trade.open_legs)} open orders placed, awaiting fills")
+        trade.metadata["_open_fill_mgr"] = mgr
+        logger.info(f"Trade {trade.id}: all {len(trade.open_legs)} open orders placed via LimitFillManager")
         return True
 
     def _open_smart(self, trade: TradeLifecycle) -> bool:
@@ -844,54 +674,26 @@ class LifecycleManager:
             return False
 
     def _close_limit(self, trade: TradeLifecycle) -> bool:
-        """Close via limit orders — one order per leg.
+        """Close via limit orders — delegates placement to LimitFillManager.
 
-        Fetches the current orderbook for each leg to determine the limit
-        price (best ask for buys, best bid for sells).
+        Creates a fill manager for close legs, places aggressive limit
+        orders, and stores the manager for tick-based fill checking.
 
-        Failure handling: if any close order fails to place, all previously
-        placed close orders are cancelled and the trade reverts to
-        PENDING_CLOSE so the next tick retries the entire close atomically.
+        On failure, reverts to PENDING_CLOSE so the next tick retries.
         """
         trade.state = TradeState.CLOSING
 
-        for leg in trade.close_legs:
-            try:
-                price = self._get_orderbook_price(leg.symbol, leg.side)
-                if price is None:
-                    logger.error(
-                        f"Trade {trade.id}: no orderbook price for close leg "
-                        f"{leg.symbol} (side={leg.side_label}), will retry"
-                    )
-                    self._cancel_placed_orders(trade.close_legs)
-                    trade.state = TradeState.PENDING_CLOSE
-                    return False
+        params = trade.metadata.get("execution_params") or ExecutionParams()
+        mgr = LimitFillManager(self._executor, params)
 
-                result = self._executor.place_order(
-                    symbol=leg.symbol,
-                    qty=leg.qty,
-                    side=leg.side,
-                    order_type=1,
-                    price=price,
-                )
-                if result:
-                    leg.order_id = str(result.get('orderId', ''))
-                    logger.info(
-                        f"Trade {trade.id}: placed close order {leg.order_id} "
-                        f"for {leg.side_label} {leg.qty}x {leg.symbol} @ ${price}"
-                    )
-                else:
-                    logger.error(f"Trade {trade.id}: failed to place close order for {leg.symbol}")
-                    self._cancel_placed_orders(trade.close_legs)
-                    trade.state = TradeState.PENDING_CLOSE
-                    return False
-            except Exception as e:
-                logger.error(f"Trade {trade.id}: exception placing close order: {e}")
-                self._cancel_placed_orders(trade.close_legs)
-                trade.state = TradeState.PENDING_CLOSE
-                return False
+        ok = mgr.place_all(trade.close_legs)
+        if not ok:
+            logger.error(f"Trade {trade.id}: failed to place close orders, will retry")
+            trade.state = TradeState.PENDING_CLOSE
+            return False
 
-        logger.info(f"Trade {trade.id}: all close orders placed, awaiting fills")
+        trade.metadata["_close_fill_mgr"] = mgr
+        logger.info(f"Trade {trade.id}: all close orders placed via LimitFillManager")
         return True
 
     def _cancel_placed_orders(self, legs: List[TradeLeg]) -> None:
@@ -904,201 +706,116 @@ class LifecycleManager:
                 except Exception as e:
                     logger.warning(f"Failed to cancel orphaned order {leg.order_id}: {e}")
 
-    def _get_orderbook_price(self, symbol: str, side: int, aggressive: bool = True) -> Optional[float]:
-        """Fetch best bid or ask from orderbook with optional aggressive buffer.
+    def _unwind_filled_legs(self, trade: TradeLifecycle, filled_legs: List[TradeLeg]) -> None:
+        """Unwind partially-filled legs by transitioning through close cycle.
 
-        The orderbook endpoint returns::
-
-            {"bids": [{"price": "50", "size": "18.18"}, ...],
-             "asks": [{"price": "95", "size": "18.18"}, ...]}
-
-        When aggressive=True (default), adds a 2% buffer beyond the best
-        level to improve fill probability on illiquid options:
-          - Buy  → ask * 1.02 (willing to pay a bit more)
-          - Sell → bid * 0.98 (willing to receive a bit less)
-
-        Returns:
-            The (possibly buffered) price, or None if unavailable.
+        Trims the trade's open_legs to only the filled ones, sets state to
+        PENDING_CLOSE, and lets the normal tick loop handle close orders.
         """
-        try:
-            ob = get_option_orderbook(symbol)
-            if not ob:
-                return None
-
-            BUFFER = 1.02 if aggressive else 1.00
-
-            # Orderbook endpoint returns nested bids/asks arrays
-            if side == 1 and ob.get('asks'):
-                raw = float(ob['asks'][0]['price'])
-                price = round(raw * BUFFER, 2)
-                if aggressive and price != raw:
-                    logger.debug(f"{symbol}: ask={raw} → aggressive buy @ {price}")
-                return price
-            elif side == 2 and ob.get('bids'):
-                raw = float(ob['bids'][0]['price'])
-                price = round(raw / BUFFER, 2)  # sell slightly below best bid
-                if aggressive and price != raw:
-                    logger.debug(f"{symbol}: bid={raw} → aggressive sell @ {price}")
-                return price
-
-            return None
-        except Exception as e:
-            logger.error(f"Error fetching orderbook price for {symbol}: {e}")
-            return None
-
-    # -------------------------------------------------------------------------
-    # Fill Checking
-    # -------------------------------------------------------------------------
-
-    # Maximum seconds to wait for all open/close legs to fill before requoting
-    FILL_TIMEOUT_SECONDS = 30
+        trade.open_legs = filled_legs
+        trade.state = TradeState.OPEN
+        trade.opened_at = time.time()
+        trade.state = TradeState.PENDING_CLOSE  # next tick will call close()
+        logger.info(
+            f"Trade {trade.id}: unwinding {len(filled_legs)} filled legs "
+            f"via PENDING_CLOSE"
+        )
 
     def _check_open_fills(self, trade: TradeLifecycle) -> None:
-        """Poll order status for open legs. Transition to OPEN when all filled.
+        """Delegate fill-checking to LimitFillManager.
 
-        If fills haven't completed within FILL_TIMEOUT_SECONDS, cancel
-        unfilled orders and requote them at fresh orderbook prices.
-        If any legs already filled and the requote still fails, those
-        positions are unwound (closed) and the trade moves to FAILED.
+        Result map:
+          "filled"   → all legs done → OPEN
+          "requoted" → timeout hit, orders cancelled & re-placed → stay OPENING
+          "failed"   → max requotes exhausted → unwind filled legs
+          "pending"  → still waiting
         """
-        all_filled = True
-        for leg in trade.open_legs:
-            if leg.is_filled:
-                continue
-            if not leg.order_id:
-                all_filled = False
-                continue
+        mgr: Optional[LimitFillManager] = trade.metadata.get("_open_fill_mgr")
+        if mgr is None:
+            logger.error(f"Trade {trade.id}: no fill manager for OPENING state")
+            return
 
-            try:
-                info = self._executor.get_order_status(leg.order_id)
-                if info:
-                    executed = float(info.get('fillQty', 0))
-                    if executed > leg.filled_qty:
-                        leg.filled_qty = executed
-                        leg.fill_price = float(info.get('avgPrice', 0)) or leg.fill_price
-                        logger.info(
-                            f"Trade {trade.id}: {leg.symbol} filled "
-                            f"{leg.filled_qty}/{leg.qty} @ {leg.fill_price}"
-                        )
+        result = mgr.check()
 
-                    state_code = info.get('state')
-                    # State 1 = FILLED, 3 = CANCELED (Coincall option order states)
-                    if state_code == 3 and not leg.is_filled:
-                        logger.warning(
-                            f"Trade {trade.id}: order {leg.order_id} was cancelled, "
-                            f"filled {leg.filled_qty}/{leg.qty}"
-                        )
-
-                if not leg.is_filled:
-                    all_filled = False
-            except Exception as e:
-                logger.error(f"Trade {trade.id}: error checking order {leg.order_id}: {e}")
-                all_filled = False
-
-        if all_filled:
+        if result == "filled":
+            # Sync fill data back to TradeLegs
+            for ls, leg in zip(mgr.filled_legs, trade.open_legs):
+                leg.filled_qty = ls.filled_qty
+                leg.fill_price = ls.fill_price
+                leg.order_id = ls.order_id
             trade.state = TradeState.OPEN
             trade.opened_at = time.time()
             logger.info(f"Trade {trade.id}: all open legs filled → OPEN")
-            return
 
-        # --- Timeout: requote unfilled legs -----------------------------------
-        open_start = trade.metadata.get("_open_started_at", trade.created_at)
-        elapsed = time.time() - open_start
-        if elapsed > self.FILL_TIMEOUT_SECONDS:
-            logger.warning(
-                f"Trade {trade.id}: OPENING timeout ({elapsed:.0f}s > "
-                f"{self.FILL_TIMEOUT_SECONDS}s) — requoting unfilled legs"
-            )
-            trade.metadata["_open_started_at"] = time.time()  # reset for next round
-            self._requote_unfilled_legs(trade, trade.open_legs)
-
-    def _requote_unfilled_legs(self, trade: TradeLifecycle, legs: List[TradeLeg]) -> None:
-        """Cancel unfilled orders and replace them at fresh prices."""
-        for leg in legs:
-            if leg.is_filled:
-                continue
-            if not leg.order_id:
-                continue
-            # Cancel the stale order
-            try:
-                self._executor.cancel_order(leg.order_id)
-                logger.info(f"Trade {trade.id}: cancelled stale order {leg.order_id} for {leg.symbol}")
-            except Exception as e:
-                logger.warning(f"Trade {trade.id}: cancel failed for {leg.order_id}: {e}")
-
-            # Place a fresh order at current best price (aggressive)
-            try:
-                price = self._get_orderbook_price(leg.symbol, leg.side, aggressive=True)
-                if price is None:
-                    logger.error(f"Trade {trade.id}: no price for {leg.symbol} on requote")
-                    continue
-                result = self._executor.place_order(
-                    symbol=leg.symbol,
-                    qty=leg.qty - leg.filled_qty,
-                    side=leg.side,
-                    order_type=1,
-                    price=price,
+        elif result == "failed":
+            logger.error(f"Trade {trade.id}: fill manager exhausted requote rounds")
+            # Sync partial fills back, then cancel remaining
+            for ls, leg in zip(mgr.filled_legs, trade.open_legs):
+                leg.filled_qty = ls.filled_qty
+                leg.fill_price = ls.fill_price
+                leg.order_id = ls.order_id
+            mgr.cancel_all()
+            # If any legs partially filled, we need to unwind them
+            filled_legs = [leg for leg in trade.open_legs if leg.filled_qty > 0]
+            if filled_legs:
+                logger.warning(
+                    f"Trade {trade.id}: {len(filled_legs)} legs have partial fills "
+                    f"— unwinding"
                 )
-                if result:
-                    leg.order_id = str(result.get('orderId', ''))
-                    logger.info(
-                        f"Trade {trade.id}: requoted {leg.side_label} "
-                        f"{leg.qty - leg.filled_qty}x {leg.symbol} @ ${price}"
-                    )
-                else:
-                    logger.error(f"Trade {trade.id}: requote failed for {leg.symbol}")
-            except Exception as e:
-                logger.error(f"Trade {trade.id}: requote exception for {leg.symbol}: {e}")
+                self._unwind_filled_legs(trade, filled_legs)
+            else:
+                trade.state = TradeState.FAILED
+                trade.error = "Fill timeout exhausted, no fills"
+
+        elif result == "requoted":
+            # Sync order_ids back (they changed after requote)
+            for ls, leg in zip(mgr.filled_legs, trade.open_legs):
+                leg.order_id = ls.order_id
+                leg.filled_qty = ls.filled_qty
+                leg.fill_price = ls.fill_price
+            logger.info(f"Trade {trade.id}: requoted unfilled open legs, continuing")
+
+        # "pending" → nothing to do, wait for next tick
 
     def _check_close_fills(self, trade: TradeLifecycle) -> None:
-        """Poll order status for close legs. Transition to CLOSED when all filled.
+        """Delegate close-fill checking to LimitFillManager.
 
-        Also applies the same requote timeout as open fills.
+        Result map mirrors _check_open_fills:
+          "filled"   → CLOSED
+          "requoted" → timeout hit, re-placed → stay CLOSING
+          "failed"   → max requotes exhausted → revert to PENDING_CLOSE
+          "pending"  → still waiting
         """
-        all_filled = True
-        for leg in trade.close_legs:
-            if leg.is_filled:
-                continue
-            if not leg.order_id:
-                all_filled = False
-                continue
+        mgr: Optional[LimitFillManager] = trade.metadata.get("_close_fill_mgr")
+        if mgr is None:
+            logger.error(f"Trade {trade.id}: no fill manager for CLOSING state")
+            return
 
-            try:
-                info = self._executor.get_order_status(leg.order_id)
-                if info:
-                    executed = float(info.get('fillQty', 0))
-                    if executed > leg.filled_qty:
-                        leg.filled_qty = executed
-                        leg.fill_price = float(info.get('avgPrice', 0)) or leg.fill_price
-                        logger.info(
-                            f"Trade {trade.id}: close {leg.symbol} filled "
-                            f"{leg.filled_qty}/{leg.qty} @ {leg.fill_price}"
-                        )
+        result = mgr.check()
 
-                if not leg.is_filled:
-                    all_filled = False
-            except Exception as e:
-                logger.error(f"Trade {trade.id}: error checking close order {leg.order_id}: {e}")
-                all_filled = False
-
-        if all_filled:
+        if result == "filled":
+            for ls, leg in zip(mgr.filled_legs, trade.close_legs):
+                leg.filled_qty = ls.filled_qty
+                leg.fill_price = ls.fill_price
+                leg.order_id = ls.order_id
             trade.state = TradeState.CLOSED
             trade.closed_at = time.time()
             logger.info(f"Trade {trade.id}: all close legs filled → CLOSED")
-            return
 
-        # --- Timeout: requote unfilled close legs ----------------------------
-        close_start = trade.metadata.get("_close_started_at")
-        if close_start is None:
-            trade.metadata["_close_started_at"] = time.time()
-        elif time.time() - close_start > self.FILL_TIMEOUT_SECONDS:
-            logger.warning(
-                f"Trade {trade.id}: CLOSING timeout "
-                f"({time.time() - close_start:.0f}s > {self.FILL_TIMEOUT_SECONDS}s) "
-                f"— requoting unfilled close legs"
-            )
-            trade.metadata["_close_started_at"] = time.time()  # reset for next round
-            self._requote_unfilled_legs(trade, trade.close_legs)
+        elif result == "failed":
+            logger.error(f"Trade {trade.id}: close fill manager exhausted requote rounds")
+            mgr.cancel_all()
+            # Revert to PENDING_CLOSE so next tick retries
+            trade.state = TradeState.PENDING_CLOSE
+
+        elif result == "requoted":
+            for ls, leg in zip(mgr.filled_legs, trade.close_legs):
+                leg.order_id = ls.order_id
+                leg.filled_qty = ls.filled_qty
+                leg.fill_price = ls.fill_price
+            logger.info(f"Trade {trade.id}: requoted unfilled close legs, continuing")
+
+        # "pending" → wait for next tick
 
     # -------------------------------------------------------------------------
     # Exit Evaluation
@@ -1240,11 +957,7 @@ class LifecycleManager:
                 f"Trade {trade.id}: {len(filled_legs)} legs already filled "
                 f"— unwinding via close orders"
             )
-            # Remove unfilled legs from the trade so close() only reverses filled ones
-            trade.open_legs = filled_legs
-            trade.state = TradeState.OPEN
-            trade.opened_at = time.time()
-            trade.state = TradeState.PENDING_CLOSE  # next tick will call close()
+            self._unwind_filled_legs(trade, filled_legs)
             return True
 
         # 3. Nothing filled — just mark FAILED

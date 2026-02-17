@@ -20,7 +20,6 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from account_manager import AccountSnapshot, PositionSnapshot
 from trade_lifecycle import (
     LifecycleManager, TradeLifecycle, TradeLeg, TradeState,
-    profit_target, max_loss, max_hold_hours,
 )
 from option_selection import LegSpec
 from strategy import (
@@ -29,6 +28,7 @@ from strategy import (
     time_window, weekday_filter, min_available_margin_pct,
     min_equity, max_account_delta, max_margin_utilization,
     no_existing_position_in,
+    profit_target, max_loss, max_hold_hours,
 )
 
 # Track results

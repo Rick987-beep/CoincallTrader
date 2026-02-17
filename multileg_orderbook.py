@@ -34,7 +34,6 @@ from typing import Dict, List, Optional, Any, Tuple
 
 from market_data import get_option_orderbook
 from trade_execution import TradeExecutor
-from account_manager import account_manager
 
 logger = logging.getLogger(__name__)
 
@@ -229,10 +228,18 @@ class SmartOrderbookExecutor:
         result = executor.execute_smart_multi_leg(legs, config)
     """
 
-    def __init__(self):
-        """Initialize smart orderbook executor."""
+    def __init__(self, get_positions=None):
+        """Initialize smart orderbook executor.
+
+        Args:
+            get_positions: Optional callable that returns a list of position
+                dicts (each with 'symbol' and 'qty' keys).  If not provided,
+                position tracking is skipped and only order-based fill
+                detection is used.
+        """
         self._executor = TradeExecutor()
         self._active_chunks: Dict[int, ChunkState] = {}
+        self._get_positions = get_positions or (lambda: [])
 
     def execute_smart_multi_leg(
         self,
@@ -261,7 +268,7 @@ class SmartOrderbookExecutor:
             
             # Get starting positions
             try:
-                positions = account_manager.get_positions(force_refresh=True)
+                positions = self._get_positions()
                 for leg in legs:
                     pos_qty = 0.0
                     for pos in positions:
@@ -285,7 +292,7 @@ class SmartOrderbookExecutor:
             for chunk_idx in range(config.chunk_count):
                 # Check current positions to measure progress
                 try:
-                    positions = account_manager.get_positions(force_refresh=True)
+                    positions = self._get_positions()
                     for leg in legs:
                         pos_qty = 0.0
                         for pos in positions:
@@ -354,7 +361,7 @@ class SmartOrderbookExecutor:
             
             # Final position check to get accurate fills
             try:
-                positions = account_manager.get_positions(force_refresh=True)
+                positions = self._get_positions()
                 for leg in legs:
                     pos_qty = 0.0
                     for pos in positions:
@@ -467,7 +474,7 @@ class SmartOrderbookExecutor:
         # Get starting positions for this chunk
         starting_positions = {}
         try:
-            positions = account_manager.get_positions(force_refresh=True)
+            positions = self._get_positions()
             for leg in chunk_legs:
                 for pos in positions:
                     if pos.get('symbol') == leg.symbol:
@@ -919,7 +926,7 @@ class SmartOrderbookExecutor:
         """
         try:
             # Get current positions
-            positions = account_manager.get_positions(force_refresh=True)
+            positions = self._get_positions()
             
             for symbol in active_orders.keys():
                 leg_state = chunk_state.legs_state.get(symbol)

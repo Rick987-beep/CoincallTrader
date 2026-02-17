@@ -1,16 +1,21 @@
 #!/usr/bin/env python3
 """
-Trade Execution Module
+Trade Execution Module — Transport & Fill Management Layer
 
-Handles all order and trade execution operations.
-Environment-agnostic - works the same for testnet and production.
+Provides:
+  1. TradeExecutor  — thin API client (place, cancel, query orders)
+  2. ExecutionParams — per-trade fill-management configuration
+  3. LimitFillManager — tracks a set of pending leg orders, polls fills,
+     and requotes on timeout.  Used by trade_lifecycle for "limit" mode.
+
+Environment-agnostic — works the same for testnet and production.
 The environment is controlled via config.py.
 """
 
 import logging
 import time
-import concurrent.futures
-from typing import Dict, List, Tuple, Optional, Any
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Any
 from config import BASE_URL, API_KEY, API_SECRET
 from auth import CoincallAuth
 from market_data import get_option_orderbook
@@ -120,220 +125,295 @@ class TradeExecutor:
             logger.error(f"Exception getting order status for {order_id}: {e}")
             return None
 
-    def execute_trade(
-        self,
-        symbol: str,
-        qty: float,
-        side: int,
-        timeout_seconds: int = 60,
-        requote_interval: int = 10
-    ) -> Optional[Dict[str, Any]]:
+
+# =============================================================================
+# Execution Parameters — configurable per-trade
+# =============================================================================
+
+@dataclass
+class ExecutionParams:
+    """
+    Per-trade fill-management configuration.
+
+    Strategies set these at trade-creation time to control how aggressively
+    orders are filled.  Stored on TradeLifecycle so the LimitFillManager
+    can read them.
+
+    Attributes:
+        fill_timeout_seconds: Seconds before cancelling and requoting unfilled orders.
+        aggressive_buffer_pct: % beyond best price (buy: ask×1.02, sell: bid/1.02).
+        max_requote_rounds: Give up and fail after this many requote cycles.
+    """
+    fill_timeout_seconds: float = 30.0
+    aggressive_buffer_pct: float = 2.0
+    max_requote_rounds: int = 10
+
+
+# =============================================================================
+# Limit Fill Manager — tracks pending orders, polls fills, requotes on timeout
+# =============================================================================
+
+@dataclass
+class _LegFillState:
+    """Internal: tracks one leg's order and fill progress."""
+    symbol: str
+    qty: float
+    side: int          # 1=buy, 2=sell
+    order_id: Optional[str] = None
+    filled_qty: float = 0.0
+    fill_price: Optional[float] = None
+    requote_count: int = 0
+    started_at: float = field(default_factory=time.time)
+
+    @property
+    def is_filled(self) -> bool:
+        return self.filled_qty >= self.qty
+
+    @property
+    def remaining_qty(self) -> float:
+        return max(0.0, self.qty - self.filled_qty)
+
+    @property
+    def side_label(self) -> str:
+        return "buy" if self.side == 1 else "sell"
+
+
+class LimitFillManager:
+    """
+    Manages fill detection and requoting for a set of limit-order legs.
+
+    Lifecycle:
+      1. Caller creates the manager with an executor + params.
+      2. ``place_all(legs)`` places initial orders for every leg.
+      3. Each tick, caller invokes ``check()`` which:
+         a. Polls order status for every unfilled leg.
+         b. If all filled → returns ``"filled"``.
+         c. If timeout elapsed → cancels stale orders, re-places at
+            fresh aggressive prices → returns ``"requoted"``.
+         d. If max requote rounds exhausted → returns ``"failed"``.
+         e. Otherwise → returns ``"pending"``.
+      4. ``cancel_all()`` cancels any outstanding orders (for cleanup).
+      5. ``filled_legs`` returns the final fill details.
+
+    This class does NOT own the TradeLifecycle state machine — it is a
+    helper that trade_lifecycle drives via its tick loop.
+    """
+
+    def __init__(self, executor: "TradeExecutor", params: Optional[ExecutionParams] = None):
+        self._executor = executor
+        self._params = params or ExecutionParams()
+        self._legs: List[_LegFillState] = []
+        self._round_started_at: float = time.time()
+
+    # -- Public API -----------------------------------------------------------
+
+    def place_all(self, legs: List[Dict[str, Any]]) -> bool:
         """
-        Execute a trade with limit order, requoting at the top of the book every N seconds,
-        handling partial fills and retrying on errors, then market if not filled within timeout_seconds.
+        Place initial limit orders for all legs.
 
         Args:
-            symbol: Option symbol
-            qty: Quantity
-            side: 1 for buy, 2 for sell
-            timeout_seconds: Time to try filling the limit order before going to market
-            requote_interval: Seconds between requote attempts
+            legs: List of dicts with keys: symbol, qty, side, order_id (out).
+                  Each dict is a TradeLeg-like object (duck-typed).
 
         Returns:
-            Order result dict or None if failed
+            True if all orders placed successfully.
+            On failure, already-placed orders are cancelled.
         """
-        try:
-            start_time = time.time()
-            remaining_qty = qty
-            order_id = None
-            total_filled = 0.0
+        self._legs = []
+        self._round_started_at = time.time()
 
-            while time.time() - start_time < timeout_seconds and remaining_qty > 0:
-                # Get current orderbook
-                try:
-                    depth = get_option_orderbook(symbol)
-                    if not depth:
-                        logger.error(f"Could not get orderbook for {symbol}")
-                        time.sleep(requote_interval)
-                        continue
+        for leg in legs:
+            symbol = leg.symbol if hasattr(leg, 'symbol') else leg['symbol']
+            qty = leg.qty if hasattr(leg, 'qty') else leg['qty']
+            side = leg.side if hasattr(leg, 'side') else leg['side']
 
-                    # Orderbook response has top-level bids/asks arrays:
-                    #   {"bids": [{"price": "50", "size": "18.18"}], "asks": [...]}
-                    if side == 1:  # buy
-                        if not depth.get('asks') or len(depth['asks']) == 0:
-                            logger.error(f"No asks available in orderbook for {symbol}")
-                            time.sleep(requote_interval)
-                            continue
-                        price = float(depth['asks'][0]['price'])
-                    else:  # sell
-                        if not depth.get('bids') or len(depth['bids']) == 0:
-                            logger.error(f"No bids available in orderbook for {symbol}")
-                            time.sleep(requote_interval)
-                            continue
-                        price = float(depth['bids'][0]['price'])
+            price = self._get_aggressive_price(symbol, side)
+            if price is None:
+                side_label = "buy" if side == 1 else "sell"
+                logger.error(f"LimitFillManager: no orderbook price for {symbol} ({side_label})")
+                self.cancel_all()
+                return False
 
-                except Exception as e:
-                    logger.error(f"Error getting orderbook for {symbol}: {e}")
-                    time.sleep(requote_interval)
-                    continue
+            result = self._executor.place_order(
+                symbol=symbol, qty=qty, side=side, order_type=1, price=price,
+            )
+            if not result:
+                logger.error(f"LimitFillManager: failed to place order for {symbol}")
+                self.cancel_all()
+                return False
 
-                # Cancel existing order if any
-                if order_id:
-                    try:
-                        self.cancel_order(order_id)
-                        logger.info(f"Cancelled order {order_id} for requoting")
-                    except Exception as e:
-                        logger.warning(f"Failed to cancel order {order_id}: {e}")
+            state = _LegFillState(
+                symbol=symbol, qty=qty, side=side,
+                order_id=str(result.get('orderId', '')),
+            )
+            self._legs.append(state)
 
-                # Place new limit order for remaining quantity
-                try:
-                    order = self.place_order(symbol, remaining_qty, side, order_type=1, price=price)
-                    if order:
-                        order_id = order.get('orderId')
-                        logger.info(f"Placed limit order {order_id} for {symbol}, qty {remaining_qty}, side {side}, price {price}")
-                except Exception as e:
-                    logger.error(f"Failed to place order for {symbol}: {e}")
-                    time.sleep(requote_interval)
-                    continue
+            # Write order_id back to the caller's leg object
+            if hasattr(leg, 'order_id'):
+                leg.order_id = state.order_id
+            side_label = state.side_label
+            logger.info(
+                f"LimitFillManager: placed {side_label} {qty}x {symbol} @ ${price} "
+                f"(order {state.order_id})"
+            )
 
-                # Wait before next requote
-                time.sleep(requote_interval)
+        logger.info(f"LimitFillManager: all {len(self._legs)} orders placed, awaiting fills")
+        return True
 
-                # Check order status and update fills
-                if order_id:
-                    try:
-                        order_info = self.get_order_status(order_id)
-                        if order_info:
-                            executed_qty = float(order_info.get('executedQty', 0))
-                            if executed_qty > total_filled:
-                                additional_fill = executed_qty - total_filled
-                                total_filled = executed_qty
-                                remaining_qty -= additional_fill
-                                logger.info(f"Order {order_id} filled: {executed_qty} (additional: {additional_fill})")
-                            
-                            if order_info.get('state') == 2:  # Filled
-                                logger.info(f"Order fully filled: {order_id}, total filled {total_filled}")
-                                return order_info
-                    except Exception as e:
-                        logger.warning(f"Failed to check order status for {order_id}: {e}")
-
-            # Timeout reached, if remaining > 0, try aggressive phase
-            if remaining_qty > 0:
-                logger.info(f"Timeout on requoting, attempting aggressive fill for remaining {remaining_qty} of {symbol}")
-                return self._aggressive_fill_phase(symbol, remaining_qty, side, order_id, timeout_seconds=30)
-            else:
-                return self.get_order_status(order_id) if order_id else None
-
-        except Exception as e:
-            logger.error(f"Error executing trade for {symbol}: {e}")
-            return None
-
-    def _aggressive_fill_phase(
-        self,
-        symbol: str,
-        qty: float,
-        side: int,
-        existing_order_id: Optional[str] = None,
-        timeout_seconds: int = 30
-    ) -> Optional[Dict[str, Any]]:
+    def check(self) -> str:
         """
-        Aggressively attempt to fill remaining quantity by crossing the spread
-        
-        Args:
-            symbol: Option symbol
-            qty: Remaining quantity to fill
-            side: 1 for buy, 2 for sell
-            existing_order_id: Order to cancel before aggressive fill
-            timeout_seconds: Max time for aggressive fill attempts
-            
+        Poll fills and handle timeouts.  Call once per tick.
+
         Returns:
-            Order result dict or None if failed
+            "filled"   — all legs filled
+            "requoted" — timeout hit, unfilled orders cancelled and re-placed
+            "failed"   — max requote rounds exhausted or unrecoverable error
+            "pending"  — still waiting for fills
         """
-        start_time = time.time()
-        remaining_qty = qty
-        order_id = None
-
-        while time.time() - start_time < timeout_seconds and remaining_qty > 0:
+        # 1. Poll each unfilled leg
+        for ls in self._legs:
+            if ls.is_filled or not ls.order_id:
+                continue
             try:
-                # Get current orderbook
-                depth = get_option_orderbook(symbol)
-                if not depth or 'data' not in depth:
-                    logger.error(f"Could not get orderbook for aggressive phase {symbol}")
-                    time.sleep(5)
-                    continue
-
-                orderbook_data = depth['data']
-
-                if side == 1:  # buy - cross the ask
-                    if not orderbook_data.get('asks') or len(orderbook_data['asks']) == 0:
-                        logger.error(f"No asks in aggressive phase {symbol}")
-                        time.sleep(5)
-                        continue
-                    price = float(orderbook_data['asks'][0]['price'])
-                else:  # sell - cross the bid
-                    if not orderbook_data.get('bids') or len(orderbook_data['bids']) == 0:
-                        logger.error(f"No bids in aggressive phase {symbol}")
-                        time.sleep(5)
-                        continue
-                    price = float(orderbook_data['bids'][0]['price'])
-
-                # Cancel previous order if exists
-                if order_id or existing_order_id:
-                    self.cancel_order(order_id or existing_order_id)
-
-                # Place aggressive limit order
-                order = self.place_order(symbol, remaining_qty, side, order_type=1, price=price)
-                if order:
-                    order_id = order.get('orderId')
-                    logger.info(f"Aggressive order {order_id} for {symbol}, qty {remaining_qty}, price {price}")
-
-                # Wait less time in aggressive phase
-                time.sleep(5)
-
-                # Check fills
-                if order_id:
-                    order_info = self.get_order_status(order_id)
-                    if order_info:
-                        executed_qty = float(order_info.get('executedQty', 0))
-                        remaining_qty = float(order_info.get('unfilledQty', 0))
-                        
-                        if order_info.get('state') == 2:  # Filled
-                            logger.info(f"Aggressive order fully filled: {order_id}")
-                            return order_info
-
+                info = self._executor.get_order_status(ls.order_id)
+                if info:
+                    executed = float(info.get('fillQty', 0))
+                    if executed > ls.filled_qty:
+                        ls.filled_qty = executed
+                        ls.fill_price = float(info.get('avgPrice', 0)) or ls.fill_price
+                        logger.info(
+                            f"LimitFillManager: {ls.symbol} filled "
+                            f"{ls.filled_qty}/{ls.qty} @ {ls.fill_price}"
+                        )
+                    # Detect externally-cancelled orders
+                    state_code = info.get('state')
+                    if state_code == 3 and not ls.is_filled:
+                        logger.warning(
+                            f"LimitFillManager: {ls.symbol} order {ls.order_id} was cancelled externally "
+                            f"(filled {ls.filled_qty}/{ls.qty})"
+                        )
             except Exception as e:
-                logger.error(f"Error in aggressive fill phase: {e}")
-                time.sleep(5)
+                logger.error(f"LimitFillManager: error checking {ls.order_id}: {e}")
 
-        logger.error(f"Could not fill remaining {remaining_qty} for {symbol} even with aggressive attempts")
-        return None
+        # 2. All filled?
+        if all(ls.is_filled for ls in self._legs):
+            return "filled"
 
-    def execute_multiple_trades(self, trades: List[Tuple[str, float, int, int]]) -> List[Optional[Dict[str, Any]]]:
-        """
-        Execute multiple trades concurrently using threading
+        # 3. Timeout check → requote
+        elapsed = time.time() - self._round_started_at
+        if elapsed > self._params.fill_timeout_seconds:
+            # Check if any leg has exhausted requote rounds
+            unfilled = [ls for ls in self._legs if not ls.is_filled]
+            if any(ls.requote_count >= self._params.max_requote_rounds for ls in unfilled):
+                logger.error(
+                    f"LimitFillManager: max requote rounds "
+                    f"({self._params.max_requote_rounds}) exhausted"
+                )
+                return "failed"
 
-        Args:
-            trades: List of tuples (symbol, qty, side, timeout_seconds)
+            logger.warning(
+                f"LimitFillManager: timeout ({elapsed:.0f}s > "
+                f"{self._params.fill_timeout_seconds}s) — requoting unfilled legs"
+            )
+            self._requote_unfilled()
+            return "requoted"
 
-        Returns:
-            List of order results
-        """
-        results = []
-        with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
-            futures = {
-                executor.submit(self.execute_trade, symbol, qty, side, timeout): (symbol, qty, side, timeout)
-                for symbol, qty, side, timeout in trades
-            }
-            
-            for future in concurrent.futures.as_completed(futures):
+        return "pending"
+
+    def cancel_all(self) -> None:
+        """Cancel any outstanding unfilled orders."""
+        for ls in self._legs:
+            if ls.order_id and not ls.is_filled:
                 try:
-                    result = future.result()
-                    results.append(result)
+                    self._executor.cancel_order(ls.order_id)
+                    logger.info(f"LimitFillManager: cancelled {ls.order_id} for {ls.symbol}")
                 except Exception as e:
-                    logger.error(f"Trade execution failed: {e}")
-                    results.append(None)
+                    logger.warning(f"LimitFillManager: cancel failed for {ls.order_id}: {e}")
 
-        return results
+    @property
+    def all_filled(self) -> bool:
+        return all(ls.is_filled for ls in self._legs)
+
+    @property
+    def filled_legs(self) -> List[_LegFillState]:
+        """Read-only access to leg states (for extracting fill details)."""
+        return list(self._legs)
+
+    @property
+    def partially_filled_legs(self) -> List[_LegFillState]:
+        """Legs that have some but not all qty filled."""
+        return [ls for ls in self._legs if ls.filled_qty > 0 and not ls.is_filled]
+
+    @property
+    def unfilled_legs(self) -> List[_LegFillState]:
+        """Legs with zero fills."""
+        return [ls for ls in self._legs if ls.filled_qty == 0]
+
+    # -- Internal -------------------------------------------------------------
+
+    def _requote_unfilled(self) -> None:
+        """Cancel stale orders and re-place at fresh aggressive prices."""
+        self._round_started_at = time.time()  # reset timeout for next round
+
+        for ls in self._legs:
+            if ls.is_filled:
+                continue
+            if not ls.order_id:
+                continue
+
+            # Cancel stale order
+            try:
+                self._executor.cancel_order(ls.order_id)
+                logger.info(f"LimitFillManager: cancelled stale order {ls.order_id} for {ls.symbol}")
+            except Exception as e:
+                logger.warning(f"LimitFillManager: cancel failed for {ls.order_id}: {e}")
+
+            # Re-place at fresh price
+            try:
+                price = self._get_aggressive_price(ls.symbol, ls.side)
+                if price is None:
+                    logger.error(f"LimitFillManager: no price for {ls.symbol} on requote")
+                    continue
+                result = self._executor.place_order(
+                    symbol=ls.symbol,
+                    qty=ls.remaining_qty,
+                    side=ls.side,
+                    order_type=1,
+                    price=price,
+                )
+                if result:
+                    ls.order_id = str(result.get('orderId', ''))
+                    ls.requote_count += 1
+                    logger.info(
+                        f"LimitFillManager: requoted {ls.side_label} "
+                        f"{ls.remaining_qty}x {ls.symbol} @ ${price} "
+                        f"(round {ls.requote_count})"
+                    )
+                else:
+                    logger.error(f"LimitFillManager: requote failed for {ls.symbol}")
+            except Exception as e:
+                logger.error(f"LimitFillManager: requote exception for {ls.symbol}: {e}")
+
+    def _get_aggressive_price(self, symbol: str, side: int) -> Optional[float]:
+        """Fetch best bid/ask and apply aggressive buffer."""
+        try:
+            ob = get_option_orderbook(symbol)
+            if not ob:
+                return None
+
+            buffer = 1 + (self._params.aggressive_buffer_pct / 100.0)
+
+            if side == 1 and ob.get('asks'):
+                raw = float(ob['asks'][0]['price'])
+                return round(raw * buffer, 2)
+            elif side == 2 and ob.get('bids'):
+                raw = float(ob['bids'][0]['price'])
+                return round(raw / buffer, 2)
+
+            return None
+        except Exception as e:
+            logger.error(f"LimitFillManager: error fetching price for {symbol}: {e}")
+            return None
 
 
 # Global instance
@@ -354,13 +434,3 @@ def cancel_order(order_id: str) -> bool:
 def get_order_status(order_id: str) -> Optional[Dict[str, Any]]:
     """Get order status"""
     return trade_executor.get_order_status(order_id)
-
-
-def execute_trade(symbol: str, qty: float, side: int, timeout_seconds: int = 60) -> Optional[Dict[str, Any]]:
-    """Execute a trade with requoting"""
-    return trade_executor.execute_trade(symbol, qty, side, timeout_seconds)
-
-
-def execute_multiple_trades(trades: List[Tuple[str, float, int, int]]) -> List[Optional[Dict[str, Any]]]:
-    """Execute multiple trades concurrently"""
-    return trade_executor.execute_multiple_trades(trades)

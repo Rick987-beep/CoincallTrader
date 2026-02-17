@@ -55,8 +55,10 @@ def main():
     # Opens a 0.15Δ strangle (buy), holds ~10s, closes, repeats once, then stops.
 
     from option_selection import strangle
-    from trade_lifecycle import profit_target, time_exit, max_hold_hours
-    from strategy import time_window, min_available_margin_pct
+    from strategy import (
+        profit_target, time_exit, max_hold_hours,
+        time_window, min_available_margin_pct,
+    )
 
     live_strangle = StrategyConfig(
         name="live_strangle_test",

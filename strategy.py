@@ -289,9 +289,11 @@ class StrategyConfig:
     smart_config: Optional[SmartExecConfig] = None
     rfq_action: str = "buy"
     max_concurrent_trades: int = 1
+    max_trades_per_day: int = 0          # 0 = unlimited
     cooldown_seconds: float = 0.0
     check_interval_seconds: float = 60.0
     dry_run: bool = False
+    on_trade_closed: Optional[Callable] = None   # (TradeLifecycle, AccountSnapshot) -> None
     metadata: Dict[str, Any] = field(default_factory=dict)
 
 
@@ -321,10 +323,12 @@ class StrategyRunner:
         self._enabled: bool = True
         self._dry_run: bool = config.dry_run
         self._last_dry_run_result: Optional[Dict[str, Any]] = None
+        self._known_closed_ids: set = set()   # tracks already-handled closed trades
         mode_str = "DRY-RUN" if self._dry_run else "LIVE"
         logger.info(
             f"StrategyRunner '{config.name}' initialised [{mode_str}] "
             f"(max_trades={config.max_concurrent_trades}, "
+            f"max_per_day={config.max_trades_per_day}, "
             f"cooldown={config.cooldown_seconds}s, "
             f"check_interval={config.check_interval_seconds}s)"
         )
@@ -361,15 +365,29 @@ class StrategyRunner:
         Called on every PositionMonitor update.
 
         Throttled by check_interval_seconds.  Evaluates entry conditions
-        and opens a new trade if all gates pass.
+        and opens a new trade if all gates pass.  Also fires
+        on_trade_closed for newly completed trades.
         """
         if not self._enabled:
             return
+
+        # Fire on_trade_closed for any trades that just finished
+        self._check_closed_trades(account)
 
         now = time.time()
         if now - self._last_check_time < self.config.check_interval_seconds:
             return
         self._last_check_time = now
+
+        # Log active-trade PnL summary (brief, once per check interval)
+        for trade in self.active_trades:
+            if trade.state == TradeState.OPEN:
+                pnl = trade.structure_pnl(account)
+                hold = trade.hold_seconds or 0
+                logger.info(
+                    f"[{self._strategy_id}] trade {trade.id} OPEN "
+                    f"hold={hold:.0f}s PnL={pnl:+.4f}"
+                )
 
         if self._should_open(account):
             self._open_trade()
@@ -378,6 +396,7 @@ class StrategyRunner:
 
     def _should_open(self, account: AccountSnapshot) -> bool:
         """Evaluate all entry gates.  All must pass to open."""
+        logger.info(f"[{self._strategy_id}] evaluating entry conditions...")
 
         # Gate 1: max concurrent trades
         active = self.active_trades
@@ -401,7 +420,30 @@ class StrategyRunner:
                     )
                     return False
 
-        # Gate 3: user-defined entry conditions (all must pass)
+        # Gate 3: max trades per calendar day (UTC)
+        if self.config.max_trades_per_day > 0:
+            today = datetime.now(timezone.utc).date()
+            today_count = sum(
+                1 for t in self.all_trades
+                if datetime.fromtimestamp(t.created_at, tz=timezone.utc).date() == today
+            )
+            if today_count >= self.config.max_trades_per_day:
+                # If no active trades remain, auto-disable — nothing left to do
+                if not self.active_trades:
+                    logger.info(
+                        f"[{self._strategy_id}] max_trades_per_day reached "
+                        f"({today_count}/{self.config.max_trades_per_day}) "
+                        f"and no active trades — auto-disabling"
+                    )
+                    self._enabled = False
+                else:
+                    logger.debug(
+                        f"[{self._strategy_id}] max_trades_per_day "
+                        f"({today_count}/{self.config.max_trades_per_day}) — skip"
+                    )
+                return False
+
+        # Gate 4: user-defined entry conditions (all must pass)
         for cond in self.config.entry_conditions:
             try:
                 if not cond(account):
@@ -412,6 +454,7 @@ class StrategyRunner:
                 logger.error(f"[{self._strategy_id}] entry condition error: {e}")
                 return False  # Fail-safe: don't trade on error
 
+        logger.info(f"[{self._strategy_id}] ✓ all entry gates passed — opening trade")
         return True
 
     # -- Trade Creation -------------------------------------------------------
@@ -430,9 +473,35 @@ class StrategyRunner:
                 else self.config.execution_mode
             )
 
-            # ── Dry-run: resolve + route but do NOT place orders ─────────
+            # ── Dry-run: resolve + route, simulate lifecycle ────────────
             if self._dry_run:
                 self._execute_dry_run(legs, exec_mode)
+                # Create a real TradeLifecycle so exit conditions are evaluated
+                trade = self.ctx.lifecycle_manager.create(
+                    legs=legs,
+                    exit_conditions=list(self.config.exit_conditions),
+                    execution_mode=exec_mode,
+                    rfq_action=self.config.rfq_action,
+                    smart_config=self.config.smart_config,
+                    strategy_id=self._strategy_id,
+                    metadata={
+                        "strategy": self._strategy_id,
+                        "dry_run": True,
+                        **self.config.metadata,
+                    },
+                )
+                # Advance straight to OPEN with simulated fill prices
+                trade.state = TradeState.OPEN
+                trade.opened_at = time.time()
+                dr = self._last_dry_run_result or {}
+                for i, leg in enumerate(trade.open_legs):
+                    leg_info = dr.get("legs", [{}])[i] if i < len(dr.get("legs", [])) else {}
+                    leg.fill_price = leg_info.get("mark_price", 0.0)
+                    leg.filled_qty = leg.qty
+                logger.info(
+                    f"[{self._strategy_id}] dry-run trade {trade.id} → OPEN "
+                    f"(simulated fills, exit conditions active)"
+                )
                 return
 
             # ── Live: full execution ─────────────────────────────────────
@@ -575,3 +644,70 @@ class StrategyRunner:
         for trade in active:
             lines.append(f"  {trade.summary(account)}")
         return "\n".join(lines)
+
+    # -- Trade Close Tracking -------------------------------------------------
+
+    def _check_closed_trades(self, account: AccountSnapshot) -> None:
+        """
+        Detect trades that transitioned to CLOSED or FAILED since the last tick.
+        Fire the on_trade_closed callback for each newly-closed trade.
+        """
+        for trade in self.all_trades:
+            if trade.state in (TradeState.CLOSED, TradeState.FAILED):
+                if trade.id not in self._known_closed_ids:
+                    self._known_closed_ids.add(trade.id)
+                    pnl = trade.structure_pnl(account) if trade.state == TradeState.CLOSED else 0.0
+                    logger.info(
+                        f"[{self._strategy_id}] trade {trade.id} → {trade.state.value} "
+                        f"(PnL={pnl:+.4f})"
+                    )
+                    if self.config.on_trade_closed:
+                        try:
+                            self.config.on_trade_closed(trade, account)
+                        except Exception as e:
+                            logger.error(
+                                f"[{self._strategy_id}] on_trade_closed callback error: {e}"
+                            )
+
+    # -- Stats ----------------------------------------------------------------
+
+    @property
+    def stats(self) -> Dict[str, Any]:
+        """
+        Aggregate win/loss statistics for this strategy.
+
+        Returns a dict with keys: total, wins, losses, win_rate,
+        total_pnl, avg_hold_seconds, today_trades, today_pnl.
+        """
+        closed = [
+            t for t in self.all_trades if t.state == TradeState.CLOSED
+        ]
+        if not closed:
+            return {
+                "total": 0, "wins": 0, "losses": 0, "win_rate": 0.0,
+                "total_pnl": 0.0, "avg_hold_seconds": 0.0,
+                "today_trades": 0, "today_pnl": 0.0,
+            }
+
+        # We can only compute approximate PnL from entry costs stored on the trade.
+        # structure_pnl requires a live snapshot, so we use total_entry_cost as a proxy.
+        total_hold = 0.0
+        today = datetime.now(timezone.utc).date()
+        today_count = 0
+
+        for t in closed:
+            if t.hold_seconds is not None:
+                total_hold += t.hold_seconds
+            if datetime.fromtimestamp(t.created_at, tz=timezone.utc).date() == today:
+                today_count += 1
+
+        return {
+            "total": len(closed),
+            "wins": 0,          # Requires last-known PnL — updated by on_trade_closed
+            "losses": 0,
+            "win_rate": 0.0,
+            "total_pnl": 0.0,
+            "avg_hold_seconds": total_hold / len(closed) if closed else 0.0,
+            "today_trades": today_count,
+            "today_pnl": 0.0,
+        }

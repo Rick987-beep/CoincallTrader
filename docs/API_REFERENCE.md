@@ -51,12 +51,43 @@ ctx.position_monitor.on_update(runner.tick)
 ctx.position_monitor.start()
 ```
 
+### Quick Start — Daily 0DTE Straddle (using structure templates)
+```python
+from strategy import build_context, StrategyConfig, StrategyRunner
+from strategy import time_window, min_available_margin_pct
+from option_selection import straddle
+from trade_lifecycle import profit_target, time_exit
+
+ctx = build_context()
+
+config = StrategyConfig(
+    name="daily_0dte_straddle",
+    legs=straddle(qty=0.1, dte=0, side=1),       # Buy ATM call + put, 0DTE
+    entry_conditions=[
+        time_window(9, 10),                        # Open 09:00-09:59 UTC
+        min_available_margin_pct(30),
+    ],
+    exit_conditions=[
+        profit_target(50),                         # Close at +50% of entry cost
+        time_exit(19, 0),                          # Hard close at 19:00 UTC
+    ],
+    max_concurrent_trades=1,
+    max_trades_per_day=1,                          # One trade per calendar day
+    check_interval_seconds=30,
+    dry_run=True,
+)
+
+runner = StrategyRunner(config, ctx)
+ctx.position_monitor.on_update(runner.tick)
+ctx.position_monitor.start()
+```
+
 ### Key Classes
 | Class | Purpose |
 |-------|---------|
 | `TradingContext` | DI container: auth, market_data, executor, rfq_executor, smart_executor, account_manager, position_monitor, lifecycle_manager |
-| `StrategyConfig` | Declarative definition: name, legs, entry/exit conditions, execution_mode, max_concurrent, cooldown, dry_run |
-| `StrategyRunner` | Tick-driven executor: checks entries, resolves legs, creates trades, delegates to LifecycleManager |
+| `StrategyConfig` | Declarative definition: name, legs, entry/exit conditions, execution_mode, max_concurrent, max_trades_per_day, cooldown, on_trade_closed, dry_run |
+| `StrategyRunner` | Tick-driven executor: checks entries, resolves legs, creates trades, delegates to LifecycleManager. Exposes `stats` property. |
 
 ### Entry Condition Factories
 | Factory | Signature | Description |
@@ -68,6 +99,20 @@ ctx.position_monitor.start()
 | `max_account_delta(limit)` | `float → EntryCondition` | Block if account delta exceeds threshold |
 | `max_margin_utilization(pct)` | `float → EntryCondition` | IM/equity ceiling |
 | `no_existing_position_in(symbols)` | `list[str] → EntryCondition` | Block if already positioned in given symbols |
+
+### Structure Templates
+| Helper | Signature | Description |
+|--------|-----------|-------------|
+| `straddle(qty, dte, side, underlying)` | `→ list[LegSpec]` | ATM call + ATM put (same strike). `dte=0` for 0DTE, `side=1` buy / `side=2` sell |
+| `strangle(qty, call_delta, put_delta, dte, side, underlying)` | `→ list[LegSpec]` | OTM call + OTM put by delta targets. Default: 0.25 / -0.25, sell |
+
+### DTE-Based Expiry Selection
+In addition to `{"symbol": "28MAR26"}` and `{"minExp": N, "maxExp": N}`, LegSpec now supports:
+```python
+expiry_criteria={"dte": 0}           # 0DTE — today's expiry
+expiry_criteria={"dte": 1}           # Tomorrow's expiry
+expiry_criteria={"dte": 3, "dte_min": 0, "dte_max": 7}  # 0-7 day range, prefer 3
+```
 
 ### LegSpec Dataclass
 | Field | Type | Default | Description |
@@ -148,12 +193,14 @@ Set `dry_run=True` in `StrategyConfig` to:
 
 ### StrategyRunner Lifecycle
 1. `tick(snapshot)` is called on each PositionMonitor update
-2. Entry conditions checked — all must return `True`
-3. `resolve_legs()` converts `LegSpec` list to concrete `TradeLeg` list
-4. `LifecycleManager.create()` creates trade with exit conditions
-5. `LifecycleManager.open()` begins execution
-6. Subsequent ticks advance lifecycle (fill checks, exit evaluations)
-7. `runner.stop()` for graceful shutdown
+2. `_check_closed_trades()` fires `on_trade_closed` for newly finished trades
+3. Entry conditions checked — all must return `True`
+4. `resolve_legs()` converts `LegSpec` list to concrete `TradeLeg` list
+5. `LifecycleManager.create()` creates trade with exit conditions
+6. `LifecycleManager.open()` begins execution
+7. Subsequent ticks advance lifecycle (fill checks, exit evaluations)
+8. `runner.stop()` for graceful shutdown
+9. `runner.stats` for win/loss/hold-time aggregates
 
 ---
 
@@ -202,6 +249,7 @@ lifecycle_manager.force_close(trade.trade_id)
 | `profit_target(pct)` | `float → Callable` | Close when structure PnL ≥ pct of entry cost |
 | `max_loss(pct)` | `float → Callable` | Close when structure loss ≥ pct of entry cost |
 | `max_hold_hours(hours)` | `float → Callable` | Close after N hours |
+| `time_exit(hour, minute)` | `int, int → Callable` | Close at or after a specific UTC wall-clock time (e.g., `time_exit(19, 0)`) |
 | `account_delta_limit(thr)` | `float → Callable` | Close when account delta exceeds threshold |
 | `structure_delta_limit(thr)` | `float → Callable` | Close when structure delta exceeds threshold |
 | `leg_greek_limit(idx, greek, op, val)` | `... → Callable` | Close when a specific leg's Greek crosses a limit |

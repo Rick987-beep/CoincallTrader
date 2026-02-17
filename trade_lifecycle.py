@@ -281,6 +281,36 @@ def max_hold_hours(hours: float) -> ExitCondition:
     return _check
 
 
+def time_exit(hour: int, minute: int = 0) -> ExitCondition:
+    """
+    Close the trade at or after a specific UTC wall-clock time.
+
+    Useful for daily strategies that must close by end-of-session
+    regardless of P&L (e.g., "close at 19:00 UTC").
+
+    Args:
+        hour: UTC hour (0-23).
+        minute: UTC minute (0-59), default 0.
+
+    Example:
+        time_exit(19, 0)  → close at or after 19:00 UTC
+    """
+    from datetime import datetime, timezone
+
+    def _check(account: AccountSnapshot, trade: TradeLifecycle) -> bool:
+        now = datetime.now(timezone.utc)
+        cutoff = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        triggered = now >= cutoff
+        if triggered:
+            logger.info(
+                f"[{trade.id}] time_exit({hour:02d}:{minute:02d} UTC) triggered: "
+                f"now={now.strftime('%H:%M:%S')}"
+            )
+        return triggered
+    _check.__name__ = f"time_exit({hour:02d}:{minute:02d} UTC)"
+    return _check
+
+
 def account_delta_limit(threshold: float) -> ExitCondition:
     """Close when account-wide absolute delta exceeds threshold."""
     def _check(account: AccountSnapshot, trade: TradeLifecycle) -> bool:
@@ -731,6 +761,30 @@ class LifecycleManager:
             logger.error(f"Trade {trade_id} not closeable (is {trade.state.value})")
             return False
 
+        # ── Dry-run trades: skip order placement, simulate close ─────────
+        if trade.metadata.get("dry_run"):
+            trade.close_legs = [
+                TradeLeg(
+                    symbol=leg.symbol,
+                    qty=leg.filled_qty if leg.filled_qty > 0 else leg.qty,
+                    side=leg.close_side,
+                )
+                for leg in trade.open_legs
+            ]
+            # Simulate fills at current mark prices
+            for cleg, oleg in zip(trade.close_legs, trade.open_legs):
+                cleg.fill_price = oleg.fill_price  # approximate
+                cleg.filled_qty = cleg.qty
+            trade.state = TradeState.CLOSED
+            trade.closed_at = time.time()
+            hold = trade.hold_seconds or 0
+            logger.info(
+                f"\n{'='*60}\n"
+                f"DRY-RUN — trade {trade.id} CLOSED (held {hold:.0f}s)\n"
+                f"{'='*60}"
+            )
+            return True
+
         logger.info(f"Closing trade {trade_id} via {trade.execution_mode}")
 
         # Build close legs (reverse of open)
@@ -850,28 +904,42 @@ class LifecycleManager:
                 except Exception as e:
                     logger.warning(f"Failed to cancel orphaned order {leg.order_id}: {e}")
 
-    def _get_orderbook_price(self, symbol: str, side: int) -> Optional[float]:
-        """Fetch best bid or ask from orderbook.
+    def _get_orderbook_price(self, symbol: str, side: int, aggressive: bool = True) -> Optional[float]:
+        """Fetch best bid or ask from orderbook with optional aggressive buffer.
 
         The orderbook endpoint returns::
 
             {"bids": [{"price": "50", "size": "18.18"}, ...],
              "asks": [{"price": "95", "size": "18.18"}, ...]}
 
+        When aggressive=True (default), adds a 2% buffer beyond the best
+        level to improve fill probability on illiquid options:
+          - Buy  → ask * 1.02 (willing to pay a bit more)
+          - Sell → bid * 0.98 (willing to receive a bit less)
+
         Returns:
-            The best ask price if side==1 (buy), best bid if side==2 (sell),
-            or None if unavailable.
+            The (possibly buffered) price, or None if unavailable.
         """
         try:
             ob = get_option_orderbook(symbol)
             if not ob:
                 return None
 
+            BUFFER = 1.02 if aggressive else 1.00
+
             # Orderbook endpoint returns nested bids/asks arrays
             if side == 1 and ob.get('asks'):
-                return float(ob['asks'][0]['price'])
+                raw = float(ob['asks'][0]['price'])
+                price = round(raw * BUFFER, 2)
+                if aggressive and price != raw:
+                    logger.debug(f"{symbol}: ask={raw} → aggressive buy @ {price}")
+                return price
             elif side == 2 and ob.get('bids'):
-                return float(ob['bids'][0]['price'])
+                raw = float(ob['bids'][0]['price'])
+                price = round(raw / BUFFER, 2)  # sell slightly below best bid
+                if aggressive and price != raw:
+                    logger.debug(f"{symbol}: bid={raw} → aggressive sell @ {price}")
+                return price
 
             return None
         except Exception as e:
@@ -882,8 +950,17 @@ class LifecycleManager:
     # Fill Checking
     # -------------------------------------------------------------------------
 
+    # Maximum seconds to wait for all open/close legs to fill before requoting
+    FILL_TIMEOUT_SECONDS = 30
+
     def _check_open_fills(self, trade: TradeLifecycle) -> None:
-        """Poll order status for open legs. Transition to OPEN when all filled."""
+        """Poll order status for open legs. Transition to OPEN when all filled.
+
+        If fills haven't completed within FILL_TIMEOUT_SECONDS, cancel
+        unfilled orders and requote them at fresh orderbook prices.
+        If any legs already filled and the requote still fails, those
+        positions are unwound (closed) and the trade moves to FAILED.
+        """
         all_filled = True
         for leg in trade.open_legs:
             if leg.is_filled:
@@ -922,9 +999,62 @@ class LifecycleManager:
             trade.state = TradeState.OPEN
             trade.opened_at = time.time()
             logger.info(f"Trade {trade.id}: all open legs filled → OPEN")
+            return
+
+        # --- Timeout: requote unfilled legs -----------------------------------
+        open_start = trade.metadata.get("_open_started_at", trade.created_at)
+        elapsed = time.time() - open_start
+        if elapsed > self.FILL_TIMEOUT_SECONDS:
+            logger.warning(
+                f"Trade {trade.id}: OPENING timeout ({elapsed:.0f}s > "
+                f"{self.FILL_TIMEOUT_SECONDS}s) — requoting unfilled legs"
+            )
+            trade.metadata["_open_started_at"] = time.time()  # reset for next round
+            self._requote_unfilled_legs(trade, trade.open_legs)
+
+    def _requote_unfilled_legs(self, trade: TradeLifecycle, legs: List[TradeLeg]) -> None:
+        """Cancel unfilled orders and replace them at fresh prices."""
+        for leg in legs:
+            if leg.is_filled:
+                continue
+            if not leg.order_id:
+                continue
+            # Cancel the stale order
+            try:
+                self._executor.cancel_order(leg.order_id)
+                logger.info(f"Trade {trade.id}: cancelled stale order {leg.order_id} for {leg.symbol}")
+            except Exception as e:
+                logger.warning(f"Trade {trade.id}: cancel failed for {leg.order_id}: {e}")
+
+            # Place a fresh order at current best price (aggressive)
+            try:
+                price = self._get_orderbook_price(leg.symbol, leg.side, aggressive=True)
+                if price is None:
+                    logger.error(f"Trade {trade.id}: no price for {leg.symbol} on requote")
+                    continue
+                result = self._executor.place_order(
+                    symbol=leg.symbol,
+                    qty=leg.qty - leg.filled_qty,
+                    side=leg.side,
+                    order_type=1,
+                    price=price,
+                )
+                if result:
+                    leg.order_id = str(result.get('orderId', ''))
+                    logger.info(
+                        f"Trade {trade.id}: requoted {leg.side_label} "
+                        f"{leg.qty - leg.filled_qty}x {leg.symbol} @ ${price}"
+                    )
+                else:
+                    logger.error(f"Trade {trade.id}: requote failed for {leg.symbol}")
+            except Exception as e:
+                logger.error(f"Trade {trade.id}: requote exception for {leg.symbol}: {e}")
 
     def _check_close_fills(self, trade: TradeLifecycle) -> None:
-        """Poll order status for close legs. Transition to CLOSED when all filled."""
+        """Poll order status for close legs. Transition to CLOSED when all filled.
+
+        Also applies the same requote timeout as open fills.
+        """
         all_filled = True
         for leg in trade.close_legs:
             if leg.is_filled:
@@ -955,6 +1085,20 @@ class LifecycleManager:
             trade.state = TradeState.CLOSED
             trade.closed_at = time.time()
             logger.info(f"Trade {trade.id}: all close legs filled → CLOSED")
+            return
+
+        # --- Timeout: requote unfilled close legs ----------------------------
+        close_start = trade.metadata.get("_close_started_at")
+        if close_start is None:
+            trade.metadata["_close_started_at"] = time.time()
+        elif time.time() - close_start > self.FILL_TIMEOUT_SECONDS:
+            logger.warning(
+                f"Trade {trade.id}: CLOSING timeout "
+                f"({time.time() - close_start:.0f}s > {self.FILL_TIMEOUT_SECONDS}s) "
+                f"— requoting unfilled close legs"
+            )
+            trade.metadata["_close_started_at"] = time.time()  # reset for next round
+            self._requote_unfilled_legs(trade, trade.close_legs)
 
     # -------------------------------------------------------------------------
     # Exit Evaluation
@@ -997,6 +1141,14 @@ class LifecycleManager:
                     self._check_open_fills(trade)
 
                 elif trade.state == TradeState.OPEN:
+                    is_dry = trade.metadata.get("dry_run", False)
+                    pnl = 0.0 if is_dry else trade.structure_pnl(account)
+                    hold = trade.hold_seconds or 0
+                    tag = " [DRY-RUN]" if is_dry else ""
+                    logger.info(
+                        f"Trade {trade.id}: OPEN{tag} hold={hold:.0f}s PnL={pnl:+.4f} "
+                        f"— checking exit conditions"
+                    )
                     self._evaluate_exits(trade, account)
 
                 elif trade.state == TradeState.PENDING_CLOSE:
@@ -1018,40 +1170,88 @@ class LifecycleManager:
 
     def force_close(self, trade_id: str) -> bool:
         """
-        Force a trade into PENDING_CLOSE regardless of exit conditions.
-        Useful for manual intervention or emergency close.
+        Force a trade closed regardless of exit conditions or current state.
+
+        Handles every active state:
+          - OPEN          → PENDING_CLOSE (next tick places close orders)
+          - PENDING_CLOSE  → no-op (already queued for close)
+          - OPENING        → cancel unfilled open orders, unwind filled legs
+          - CLOSING        → cancel unfilled close orders, requote
+          - PENDING_OPEN   → cancel (no orders placed yet)
         """
         trade = self._trades.get(trade_id)
         if not trade:
             return False
-        if trade.state == TradeState.OPEN:
-            logger.info(f"Trade {trade.id}: forced close by user")
+
+        state = trade.state
+
+        if state == TradeState.OPEN:
+            logger.info(f"Trade {trade.id}: forced close (was OPEN)")
             trade.state = TradeState.PENDING_CLOSE
             return True
-        logger.warning(f"Trade {trade.id}: cannot force close in state {trade.state.value}")
+
+        if state == TradeState.PENDING_CLOSE:
+            logger.info(f"Trade {trade.id}: already PENDING_CLOSE")
+            return True
+
+        if state in (TradeState.PENDING_OPEN, TradeState.OPENING):
+            # Cancel unfilled orders and unwind any filled legs
+            return self.cancel(trade_id)
+
+        if state == TradeState.CLOSING:
+            # Cancel unfilled close orders so next tick re-queues them
+            self._cancel_placed_orders(trade.close_legs)
+            trade.state = TradeState.PENDING_CLOSE
+            logger.info(f"Trade {trade.id}: forced re-close (was CLOSING)")
+            return True
+
+        logger.warning(f"Trade {trade.id}: cannot force close in state {state.value}")
         return False
 
     def cancel(self, trade_id: str) -> bool:
         """
         Cancel a trade that hasn't fully opened yet.
-        Cancels any outstanding orders and marks as FAILED.
+
+        Cancels any outstanding open orders.  If some legs already filled
+        (partial open), those positions are unwound by placing close orders
+        at aggressive best-bid prices and the trade transitions to
+        PENDING_CLOSE → CLOSING → CLOSED via normal tick processing.
         """
         trade = self._trades.get(trade_id)
         if not trade:
             return False
-        if trade.state in (TradeState.PENDING_OPEN, TradeState.OPENING):
-            for leg in trade.open_legs:
-                if leg.order_id and not leg.is_filled:
-                    try:
-                        self._executor.cancel_order(leg.order_id)
-                    except Exception as e:
-                        logger.warning(f"Failed to cancel order {leg.order_id}: {e}")
-            trade.state = TradeState.FAILED
-            trade.error = "Cancelled by user"
-            logger.info(f"Trade {trade.id}: cancelled")
+        if trade.state not in (TradeState.PENDING_OPEN, TradeState.OPENING):
+            logger.warning(f"Trade {trade.id}: cannot cancel in state {trade.state.value}")
+            return False
+
+        # 1. Cancel any unfilled open orders
+        for leg in trade.open_legs:
+            if leg.order_id and not leg.is_filled:
+                try:
+                    self._executor.cancel_order(leg.order_id)
+                    logger.info(f"Trade {trade.id}: cancelled open order {leg.order_id} for {leg.symbol}")
+                except Exception as e:
+                    logger.warning(f"Trade {trade.id}: cancel failed for {leg.order_id}: {e}")
+
+        # 2. Check if any legs DID fill — those need unwinding
+        filled_legs = [l for l in trade.open_legs if l.is_filled]
+        if filled_legs:
+            logger.info(
+                f"Trade {trade.id}: {len(filled_legs)} legs already filled "
+                f"— unwinding via close orders"
+            )
+            # Remove unfilled legs from the trade so close() only reverses filled ones
+            trade.open_legs = filled_legs
+            trade.state = TradeState.OPEN
+            trade.opened_at = time.time()
+            trade.state = TradeState.PENDING_CLOSE  # next tick will call close()
             return True
-        logger.warning(f"Trade {trade.id}: cannot cancel in state {trade.state.value}")
-        return False
+
+        # 3. Nothing filled — just mark FAILED
+        trade.state = TradeState.FAILED
+        trade.error = "Cancelled by user"
+        logger.info(f"Trade {trade.id}: cancelled (no fills)")
+        return True
 
     # -------------------------------------------------------------------------
     # Persistence

@@ -43,49 +43,50 @@ def main():
     logger.info("CoincallTrader starting")
     logger.info("=" * 60)
 
-    # Build service context
-    ctx = build_context()
+    # Build service context (poll every 2s for fast test cycle)
+    ctx = build_context(poll_interval=2)
     logger.info(f"Context built — {ctx.auth.base_url}")
 
     # =========================================================================
     # Register strategies below
     # =========================================================================
-    #
-    # Example — uncomment and customise:
-    #
-    # from option_selection import LegSpec
-    # from trade_lifecycle import profit_target, max_loss, max_hold_hours
-    # from strategy import time_window, weekday_filter, min_available_margin_pct
-    #
-    # config = StrategyConfig(
-    #     name="short_strangle_daily",
-    #     legs=[
-    #         LegSpec("C", side=2, qty=0.1,
-    #                 strike_criteria={"type": "delta", "value": 0.25},
-    #                 expiry_criteria={"symbol": "28MAR26"}),
-    #         LegSpec("P", side=2, qty=0.1,
-    #                 strike_criteria={"type": "delta", "value": -0.25},
-    #                 expiry_criteria={"symbol": "28MAR26"}),
-    #     ],
-    #     entry_conditions=[
-    #         time_window(8, 20),
-    #         weekday_filter(["mon", "tue", "wed", "thu"]),
-    #         min_available_margin_pct(50),
-    #     ],
-    #     exit_conditions=[
-    #         profit_target(50),
-    #         max_loss(100),
-    #         max_hold_hours(24),
-    #     ],
-    #     max_concurrent_trades=1,
-    #     cooldown_seconds=3600,
-    #     check_interval_seconds=60,
-    # )
-    # runner = StrategyRunner(config, ctx)
-    # ctx.position_monitor.on_update(runner.tick)
-    # runners.append(runner)
+
+    # --- LIVE TEST: Buy strangle, 2 cycles ------------------------------------
+    # Opens a 0.15Δ strangle (buy), holds ~10s, closes, repeats once, then stops.
+
+    from option_selection import strangle
+    from trade_lifecycle import profit_target, time_exit, max_hold_hours
+    from strategy import time_window, min_available_margin_pct
+
+    live_strangle = StrategyConfig(
+        name="live_strangle_test",
+        legs=strangle(                                     # Buy OTM strangle
+            qty=0.01,                                      # Smallest contract size
+            call_delta=0.15,
+            put_delta=-0.15,
+            dte="next",
+            side=1,                                        # Buy
+        ),
+        entry_conditions=[
+            min_available_margin_pct(30),                   # Require 30% margin headroom
+        ],
+        exit_conditions=[
+            max_hold_hours(10 / 3600),                     # Close after ~10 seconds in OPEN
+        ],
+        max_concurrent_trades=1,
+        max_trades_per_day=2,                              # Exactly 2 cycles, then stop
+        cooldown_seconds=10,                               # 10s pause between cycles
+        check_interval_seconds=5,                          # First check after 5s
+        dry_run=False,                                     # ← LIVE TRADING
+    )
 
     runners: list = []
+
+    runner = StrategyRunner(live_strangle, ctx)
+    ctx.position_monitor.on_update(runner.tick)
+    runners.append(runner)
+
+    # --- Add more strategies here ------------------------------------------
 
     # =========================================================================
     # Start

@@ -25,6 +25,7 @@ Also exports:
 import time
 import logging
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Dict, List, Optional
 from market_data import get_option_instruments, get_option_details, get_btc_futures_price
 
@@ -155,11 +156,70 @@ def _filter_by_expiry(options_list, expiry_criteria, option_type):
     Returns:
         list: Filtered options
     """
-    # Two expiry matching modes supported:
+    # Three expiry matching modes supported:
     # - symbol: match by symbolName substring like '-4FEB26-' (preferred, no ms math)
+    # - dte: dynamic days-to-expiry (0 = today, 1 = tomorrow, etc.)
     # - minExp/maxExp: legacy days-based matching using expirationTimestamp
 
-    if isinstance(expiry_criteria, dict) and 'symbol' in expiry_criteria:
+    if isinstance(expiry_criteria, dict) and 'dte' in expiry_criteria:
+        dte = expiry_criteria['dte']
+        now_ms = time.time() * 1000
+        today_start_ms = _utc_day_start_ms()
+
+        if dte == "next":
+            # "next" — pick the nearest available expiry that hasn't expired yet
+            valid_options = [
+                opt for opt in options_list
+                if opt.get('expirationTimestamp', 0) > now_ms
+                and opt['symbolName'].endswith('-' + option_type)
+            ]
+            if not valid_options:
+                logging.error(f"No unexpired options for type {option_type}")
+                return []
+
+            # Find the soonest expiry timestamp
+            nearest_ts = min(opt['expirationTimestamp'] for opt in valid_options)
+            expiry_options = [
+                opt for opt in valid_options
+                if opt['expirationTimestamp'] == nearest_ts
+            ]
+            days_away = (nearest_ts - now_ms) / 86400_000
+            logging.info(
+                f"DTE='next': selected expiry {expiry_options[0]['symbolName'].split('-')[1]} "
+                f"({days_away:.1f} days away, {len(expiry_options)} strikes)"
+            )
+            return expiry_options
+
+        # Numeric DTE matching
+        dte_min = expiry_criteria.get('dte_min', dte)
+        dte_max = expiry_criteria.get('dte_max', dte)
+
+        min_expiry_ms = today_start_ms + dte_min * 86400_000
+        # max is end-of-day for dte_max
+        max_expiry_ms = today_start_ms + (dte_max + 1) * 86400_000 - 1
+
+        valid_options = [
+            opt for opt in options_list
+            if min_expiry_ms <= opt.get('expirationTimestamp', 0) <= max_expiry_ms
+            and opt['symbolName'].endswith('-' + option_type)
+        ]
+        if not valid_options:
+            logging.error(
+                f"No options with DTE in [{dte_min}, {dte_max}] and type {option_type}"
+            )
+            return []
+
+        # Collapse to the single nearest-DTE expiry
+        target_ms = today_start_ms + dte * 86400_000 + 43200_000  # noon of target day
+        closest = min(valid_options, key=lambda x: abs(x['expirationTimestamp'] - target_ms))
+        expiry_ts = closest['expirationTimestamp']
+        expiry_options = [
+            opt for opt in valid_options
+            if opt['expirationTimestamp'] == expiry_ts
+        ]
+        return expiry_options
+
+    elif isinstance(expiry_criteria, dict) and 'symbol' in expiry_criteria:
         sym = expiry_criteria['symbol']
         # Match symbolName containing the expiry token and option type
         expiry_options = [opt for opt in options_list if (f"-{sym}-" in opt.get('symbolName', '')) and opt['symbolName'].endswith('-' + option_type)]
@@ -228,6 +288,10 @@ def _select_by_strike_criteria(options_list, strike_criteria):
 
     if criteria_type == 'closestStrike':
         target_strike = strike_criteria['value']
+        if target_strike == 0:
+            # 0 means "ATM" — use current spot price
+            target_strike = get_btc_futures_price()
+            logging.info(f"closestStrike: value=0 → using spot price ${target_strike:.0f} as ATM")
         return min(options_list, key=lambda x: abs(x['strike'] - target_strike))
 
     elif criteria_type == 'delta':
@@ -580,6 +644,13 @@ def _find_filter_delta(options: list, delta: dict) -> list:
     return result
 
 
+def _utc_day_start_ms() -> int:
+    """Return millisecond timestamp for the start of today (00:00 UTC)."""
+    now = datetime.now(timezone.utc)
+    midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    return int(midnight.timestamp() * 1000)
+
+
 def _find_rank(options: list, delta: dict, rank_by: str, index_price: float, option_type: str):
     """
     Pick the single best option from the surviving candidates.
@@ -624,3 +695,90 @@ def _find_rank(options: list, delta: dict, rank_by: str, index_price: float, opt
         d_max = delta.get("max", 0)
         midpoint = (d_min + d_max) / 2 if (d_min or d_max) else 0
         return min(options, key=lambda o: abs(o.get("delta", 0) - midpoint))
+
+
+# =============================================================================
+# Structure Templates — convenience builders that return List[LegSpec]
+# =============================================================================
+
+def straddle(
+    qty: float,
+    dte = "next",
+    side: int = 1,
+    underlying: str = "BTC",
+) -> List[LegSpec]:
+    """
+    ATM straddle — buy (or sell) a call and a put at the same ATM strike.
+
+    Args:
+        qty: Contract quantity per leg.
+        dte: Days to expiry (0 = today / 0DTE).
+        side: 1 = buy, 2 = sell.
+        underlying: Underlying asset.
+
+    Returns:
+        List of two LegSpec objects [ATM call, ATM put].
+    """
+    expiry = {"dte": dte}
+    strike = {"type": "closestStrike", "value": 0}  # 0 → resolved to spot price
+    return [
+        LegSpec(
+            option_type="C",
+            side=side,
+            qty=qty,
+            strike_criteria=strike,
+            expiry_criteria=expiry,
+            underlying=underlying,
+        ),
+        LegSpec(
+            option_type="P",
+            side=side,
+            qty=qty,
+            strike_criteria=strike,
+            expiry_criteria=expiry,
+            underlying=underlying,
+        ),
+    ]
+
+
+def strangle(
+    qty: float,
+    call_delta: float = 0.25,
+    put_delta: float = -0.25,
+    dte = "next",
+    side: int = 2,
+    underlying: str = "BTC",
+) -> List[LegSpec]:
+    """
+    OTM strangle — sell (or buy) an OTM call and an OTM put.
+
+    Args:
+        qty: Contract quantity per leg.
+        call_delta: Target delta for the call leg (positive).
+        put_delta: Target delta for the put leg (negative).
+        dte: Days to expiry (0 = today / 0DTE).
+        side: 1 = buy, 2 = sell.
+        underlying: Underlying asset.
+
+    Returns:
+        List of two LegSpec objects [OTM call, OTM put].
+    """
+    expiry = {"dte": dte}
+    return [
+        LegSpec(
+            option_type="C",
+            side=side,
+            qty=qty,
+            strike_criteria={"type": "delta", "value": call_delta},
+            expiry_criteria=expiry,
+            underlying=underlying,
+        ),
+        LegSpec(
+            option_type="P",
+            side=side,
+            qty=qty,
+            strike_criteria={"type": "delta", "value": put_delta},
+            expiry_criteria=expiry,
+            underlying=underlying,
+        ),
+    ]

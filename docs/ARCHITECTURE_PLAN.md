@@ -1,8 +1,8 @@
 # CoincallTrader Architecture & Development Plan
 
-**Version:** 1.6  
+**Version:** 1.7  
 **Date:** February 17, 2026  
-**Status:** Phase 4 Complete (Strategy Framework) + Compound Option Selection
+**Status:** Phase 5 (Strategy Layer) + Structure Templates + DTE Selection
 
 ---
 
@@ -12,19 +12,22 @@ This document outlines the transformation of CoincallTrader from a simple option
 
 ---
 
-## Current State (Phase 4 complete)
+## Current State (Phase 5 complete)
 
 ### Implemented
 - ✅ **Authentication** — HMAC-SHA256 signing (`auth.py`), JSON + form-urlencoded
 - ✅ **Configuration** — Environment switching via `.env`, strategy params in code (`config.py`)
 - ✅ **Market data** — Option chains, orderbooks, BTC price, option details (`market_data.py`)
-- ✅ **Option selection** — Expiry/strike/delta filtering + `LegSpec` declarative resolution + compound `find_option()` with multi-constraint support (`option_selection.py`)
+- ✅ **Option selection** — Expiry/strike/delta filtering + `LegSpec` declarative resolution + compound `find_option()` with multi-constraint support + **DTE-based expiry** (`option_selection.py`)
+- ✅ **Structure templates** — `straddle()`, `strangle()` → return `List[LegSpec]` for plug-in to `StrategyConfig` (`option_selection.py`)
 - ✅ **Order execution** — Limit orders, get/cancel/status queries (`trade_execution.py`)
 - ✅ **RFQ execution** — Block trades for $50k+ notional multi-leg structures (`rfq.py`)
 - ✅ **Smart orderbook execution** — Chunked quoting with aggressive fallback (`multileg_orderbook.py`)
 - ✅ **Trade lifecycle** — State machine (PENDING_OPEN → … → CLOSED), exit conditions, multi-leg native (`trade_lifecycle.py`)
+- ✅ **Exit conditions** — `profit_target`, `max_loss`, `max_hold_hours`, **`time_exit`** (absolute clock), `account_delta_limit`, `structure_delta_limit`, `leg_greek_limit` (`trade_lifecycle.py`)
 - ✅ **Position monitoring** — Background polling, `AccountSnapshot`/`PositionSnapshot`, live Greeks (`account_manager.py`)
 - ✅ **Strategy framework** — `TradingContext` DI, `StrategyConfig`, `StrategyRunner`, 7 entry condition factories, dry-run mode (`strategy.py`)
+- ✅ **Strategy lifecycle** — `max_trades_per_day` gate, `on_trade_closed` callback, `stats` property (`strategy.py`)
 - ✅ **Scheduling** — `time_window()`, `weekday_filter()` as entry conditions
 - ✅ **Account info** — Equity, available margin, IM/MM amounts, margin utilisation, aggregated Greeks
 - ✅ **Logging** — File + console logging to `logs/trading.log` (audit trail)
@@ -72,9 +75,9 @@ CoincallTrader/
 ├── config.py               # Environment config (.env loading)
 ├── auth.py                 # HMAC-SHA256 API authentication
 ├── market_data.py          # Option chains, orderbooks, BTC price
-├── option_selection.py     # LegSpec, resolve_legs(), select_option(), find_option()
+├── option_selection.py     # LegSpec, resolve_legs(), select_option(), find_option(), straddle(), strangle()
 ├── trade_execution.py      # Order placement, cancellation, status queries
-├── trade_lifecycle.py      # TradeState machine, TradeLeg, LifecycleManager, exit conditions
+├── trade_lifecycle.py      # TradeState machine, TradeLeg, LifecycleManager, exit conditions (incl. time_exit)
 ├── multileg_orderbook.py   # Smart chunked multi-leg execution
 ├── rfq.py                  # RFQ block-trade execution ($50k+ notional)
 ├── account_manager.py      # AccountSnapshot, PositionMonitor, margin/equity queries
@@ -85,6 +88,7 @@ CoincallTrader/
 │   └── API_REFERENCE.md
 ├── tests/
 │   ├── test_strategy_framework.py   # 72/72 unit assertions
+│   ├── test_strategy_layer.py       # 51/51 strategy layer assertions
 │   ├── test_live_dry_run.py         # 27/27 integration assertions
 │   └── test_complex_option_selection.py  # 32/32 compound selection assertions
 ├── logs/                   # Runtime logs (gitignored)
@@ -120,7 +124,7 @@ CoincallTrader/
 |-------------|----------|-------------|
 | REQ-SC-01 | ✅ **Done** | Time-of-day triggers (e.g., "open position at 08:00 UTC") |
 | REQ-SC-02 | ✅ **Done** | Weekday filters (e.g., "no new positions on Friday") |
-| REQ-SC-03 | High | Expiry awareness (close before expiry, roll positions) |
+| REQ-SC-03 | ✅ **Done** | Expiry awareness — DTE-based expiry selection (`{"dte": 0}`) + `time_exit()` absolute close |
 | REQ-SC-04 | Medium | Month-end logic (e.g., rebalancing triggers) |
 | REQ-SC-05 | Medium | Calendar awareness (exchange holidays) |
 | REQ-SC-06 | Low | Cron-like arbitrary scheduling expressions |

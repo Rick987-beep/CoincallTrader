@@ -617,19 +617,19 @@ class LifecycleManager:
 
         logger.info(f"Closing trade {trade_id} via {trade.execution_mode}")
 
-        # Build close legs (reverse of open)
-        trade.close_legs = [
-            TradeLeg(
-                symbol=leg.symbol,
-                qty=leg.filled_qty if leg.filled_qty > 0 else leg.qty,
-                side=leg.close_side,
-            )
-            for leg in trade.open_legs
-        ]
-
         if trade.execution_mode == "rfq":
+            # RFQ needs close_legs built upfront (atomic execution)
+            trade.close_legs = [
+                TradeLeg(
+                    symbol=leg.symbol,
+                    qty=leg.filled_qty if leg.filled_qty > 0 else leg.qty,
+                    side=leg.close_side,
+                )
+                for leg in trade.open_legs
+            ]
             return self._close_rfq(trade)
         else:
+            # _close_limit rebuilds close_legs itself (handles retries)
             return self._close_limit(trade)
 
     def _close_rfq(self, trade: TradeLifecycle) -> bool:
@@ -679,9 +679,38 @@ class LifecycleManager:
         Creates a fill manager for close legs, places aggressive limit
         orders, and stores the manager for tick-based fill checking.
 
-        On failure, reverts to PENDING_CLOSE so the next tick retries.
+        If this is a retry (previous close attempt failed/was force-closed),
+        we rebuild close_legs from open_legs to clear stale order IDs and
+        account for any partial close fills.
         """
         trade.state = TradeState.CLOSING
+
+        # Rebuild close legs fresh — prevents double-ordering on retry.
+        # Each close leg's qty = remaining open qty minus any already-closed qty.
+        old_close_filled = {}
+        if trade.close_legs:
+            for cl in trade.close_legs:
+                if cl.filled_qty > 0:
+                    old_close_filled[cl.symbol] = cl.filled_qty
+
+        trade.close_legs = [
+            TradeLeg(
+                symbol=leg.symbol,
+                qty=(leg.filled_qty if leg.filled_qty > 0 else leg.qty)
+                    - old_close_filled.get(leg.symbol, 0.0),
+                side=leg.close_side,
+            )
+            for leg in trade.open_legs
+            if (leg.filled_qty if leg.filled_qty > 0 else leg.qty)
+               - old_close_filled.get(leg.symbol, 0.0) > 0
+        ]
+
+        if not trade.close_legs:
+            # Everything already closed from a previous partial close
+            trade.state = TradeState.CLOSED
+            trade.closed_at = time.time()
+            logger.info(f"Trade {trade.id}: all close legs already filled → CLOSED")
+            return True
 
         params = trade.metadata.get("execution_params") or ExecutionParams()
         mgr = LimitFillManager(self._executor, params)
@@ -804,6 +833,11 @@ class LifecycleManager:
 
         elif result == "failed":
             logger.error(f"Trade {trade.id}: close fill manager exhausted requote rounds")
+            # Sync partial fills back before reverting
+            for ls, leg in zip(mgr.filled_legs, trade.close_legs):
+                leg.filled_qty = ls.filled_qty
+                leg.fill_price = ls.fill_price
+                leg.order_id = ls.order_id
             mgr.cancel_all()
             # Revert to PENDING_CLOSE so next tick retries
             trade.state = TradeState.PENDING_CLOSE
@@ -916,8 +950,17 @@ class LifecycleManager:
             return self.cancel(trade_id)
 
         if state == TradeState.CLOSING:
-            # Cancel unfilled close orders so next tick re-queues them
-            self._cancel_placed_orders(trade.close_legs)
+            # Cancel via fill manager (has latest order IDs after requotes)
+            mgr: Optional[LimitFillManager] = trade.metadata.get("_close_fill_mgr")
+            if mgr is not None:
+                # Sync fill data back before reverting
+                for ls, leg in zip(mgr.filled_legs, trade.close_legs):
+                    leg.order_id = ls.order_id
+                    leg.filled_qty = ls.filled_qty
+                    leg.fill_price = ls.fill_price
+                mgr.cancel_all()
+            else:
+                self._cancel_placed_orders(trade.close_legs)
             trade.state = TradeState.PENDING_CLOSE
             logger.info(f"Trade {trade.id}: forced re-close (was CLOSING)")
             return True
@@ -941,14 +984,25 @@ class LifecycleManager:
             logger.warning(f"Trade {trade.id}: cannot cancel in state {trade.state.value}")
             return False
 
-        # 1. Cancel any unfilled open orders
-        for leg in trade.open_legs:
-            if leg.order_id and not leg.is_filled:
-                try:
-                    self._executor.cancel_order(leg.order_id)
-                    logger.info(f"Trade {trade.id}: cancelled open order {leg.order_id} for {leg.symbol}")
-                except Exception as e:
-                    logger.warning(f"Trade {trade.id}: cancel failed for {leg.order_id}: {e}")
+        # 1. Cancel unfilled orders — prefer the fill manager (has latest
+        #    order IDs after requotes), fall back to leg-based cancel.
+        mgr: Optional[LimitFillManager] = trade.metadata.get("_open_fill_mgr")
+        if mgr is not None:
+            # Sync latest fill state back before inspecting legs
+            for ls, leg in zip(mgr.filled_legs, trade.open_legs):
+                leg.order_id = ls.order_id
+                leg.filled_qty = ls.filled_qty
+                leg.fill_price = ls.fill_price
+            mgr.cancel_all()
+            logger.info(f"Trade {trade.id}: cancelled unfilled orders via fill manager")
+        else:
+            for leg in trade.open_legs:
+                if leg.order_id and not leg.is_filled:
+                    try:
+                        self._executor.cancel_order(leg.order_id)
+                        logger.info(f"Trade {trade.id}: cancelled open order {leg.order_id} for {leg.symbol}")
+                    except Exception as e:
+                        logger.warning(f"Trade {trade.id}: cancel failed for {leg.order_id}: {e}")
 
         # 2. Check if any legs DID fill — those need unwinding
         filled_legs = [l for l in trade.open_legs if l.is_filled]

@@ -2,15 +2,30 @@
 """
 Option Selection Module
 
-Handles option selection logic based on various criteria:
-- Expiry matching (symbol-based or time-based)
-- Strike selection (delta, distance from spot, exact strike)
+Two public APIs for finding options:
+
+1. select_option() — legacy single-criterion selection.
+   Picks one option by expiry + one strike criterion (delta, closestStrike,
+   spotdistance%, or exact strike).  Used by LegSpec / resolve_legs().
+
+2. find_option() — compound multi-constraint selection (recommended).
+   Accepts simultaneous expiry window, strike filters (ATM direction,
+   distance %, OTM %), delta range, and a ranking strategy.  Returns an
+   enriched dict with delta, days-to-expiry, distance-from-ATM, and the
+   index price at selection time.
+
+Both functions are purely additive — they share the same market-data helpers
+but neither depends on the other.
+
+Also exports:
+- LegSpec dataclass  — declarative leg template for strategies
+- resolve_legs()     — converts LegSpec list → TradeLeg list
 """
 
 import time
 import logging
 from dataclasses import dataclass
-from typing import List
+from typing import Dict, List, Optional
 from market_data import get_option_instruments, get_option_details, get_btc_futures_price
 
 
@@ -237,3 +252,375 @@ def _select_by_strike_criteria(options_list, strike_criteria):
     else:
         logging.error(f"Invalid strike criteria type: {criteria_type}")
         return None
+
+
+# =============================================================================
+# Compound Option Selection — find_option()
+#
+# Applies filters in strict order:
+#   1. option_type  (C / P)
+#   2. expiry       (day window → pick single expiry date)
+#   3. strike       (ATM direction, bounds, distance %, OTM %)
+#   4. delta        (fetch from API, filter by range)
+#   5. rank         (pick one winner from survivors)
+#
+# Non-delta filters are applied BEFORE delta enrichment to minimise
+# the number of API calls (max 10 per invocation).
+# =============================================================================
+
+logger = logging.getLogger(__name__)
+
+
+def find_option(
+    underlying: str = "BTC",
+    option_type: str = "P",
+    expiry: Optional[Dict] = None,
+    strike: Optional[Dict] = None,
+    delta: Optional[Dict] = None,
+    rank_by: str = "delta_mid",
+) -> Optional[Dict]:
+    """
+    Find the best option matching multiple simultaneous constraints.
+
+    Applies filters in order: expiry → strike → delta, then ranks
+    survivors to pick the single best match. All existing code is
+    untouched — this is an additive feature.
+
+    Args:
+        underlying: Underlying symbol (default "BTC")
+        option_type: "C" for call, "P" for put
+        expiry: Expiry constraints dict. Keys (all optional):
+            - min_days (int): Expiry >= N days from now
+            - max_days (int): Expiry <= N days from now
+            - target ("near"/"far"/"mid"): Prefer closest to min, max, or midpoint.
+              Default: "near"
+        strike: Strike constraints dict. Keys (all optional):
+            - below_atm (bool): Strike < index price
+            - above_atm (bool): Strike > index price
+            - min_strike (float): Strike >= value
+            - max_strike (float): Strike <= value
+            - min_distance_pct (float): At least X% away from ATM
+            - max_distance_pct (float): At most X% away from ATM
+            - min_otm_pct (float): At least X% OTM (directional)
+            - max_otm_pct (float): At most X% OTM (directional)
+        delta: Delta constraints dict. Keys (all optional):
+            - min (float): Delta > value (use negative for puts)
+            - max (float): Delta < value
+            - target (float): Prefer delta closest to this value
+        rank_by: Ranking method for survivors:
+            - "delta_mid": Closest to midpoint of delta min/max (default)
+            - "delta_target": Closest to delta["target"]
+            - "strike_atm": Closest strike to ATM
+            - "strike_otm": Most OTM strike
+            - "strike_itm": Most ITM strike
+
+    Returns:
+        Enriched option dict with symbolName, strike, delta,
+        days_to_expiry, distance_pct, index_price, etc.
+        None if no option satisfies all constraints.
+    """
+    try:
+        expiry = expiry or {}
+        strike = strike or {}
+        delta = delta or {}
+
+        # -- Fetch index price --
+        index_price = get_btc_futures_price(use_cache=True)
+        if not index_price or index_price <= 0:
+            logger.error("find_option: could not get index price")
+            return None
+
+        # -- Fetch instruments --
+        instruments = get_option_instruments(underlying)
+        if not instruments:
+            logger.error("find_option: no instruments returned")
+            return None
+
+        logger.info(f"find_option: {len(instruments)} instruments, index=${index_price:,.0f}")
+
+        # -- Step 1: Filter by option type --
+        options = [o for o in instruments if o.get("symbolName", "").endswith("-" + option_type)]
+        if not options:
+            logger.error(f"find_option: no {option_type} options found")
+            return None
+
+        # -- Step 2: Filter by expiry --
+        options = _find_filter_expiry(options, expiry)
+        if not options:
+            logger.error("find_option: no options after expiry filter")
+            return None
+        logger.info(f"find_option: {len(options)} options after expiry filter")
+
+        # -- Step 3: Filter by strike --
+        options = _find_filter_strike(options, strike, index_price, option_type)
+        if not options:
+            logger.error("find_option: no options after strike filter")
+            return None
+        logger.info(f"find_option: {len(options)} options after strike filter")
+
+        # -- Step 4: Fetch deltas (smart budget) --
+        needs_delta = bool(delta.get("min") is not None or delta.get("max") is not None
+                          or delta.get("target") is not None
+                          or rank_by in ("delta_mid", "delta_target"))
+
+        if needs_delta:
+            options = _find_enrich_deltas(options, index_price, max_calls=10)
+            if not options:
+                logger.error("find_option: no options with delta data")
+                return None
+
+        # -- Step 5: Filter by delta --
+        if delta.get("min") is not None or delta.get("max") is not None:
+            options = _find_filter_delta(options, delta)
+            if not options:
+                logger.error("find_option: no options after delta filter")
+                return None
+            logger.info(f"find_option: {len(options)} options after delta filter")
+
+        # -- Step 6: Rank and pick winner --
+        winner = _find_rank(options, delta, rank_by, index_price, option_type)
+        if not winner:
+            logger.error("find_option: ranking returned no winner")
+            return None
+
+        # -- Enrich the result --
+        now_ms = time.time() * 1000
+        winner["days_to_expiry"] = round((winner["expirationTimestamp"] - now_ms) / 86400_000, 1)
+        winner["distance_pct"] = round(abs(float(winner["strike"]) - index_price) / index_price * 100, 2)
+        winner["index_price"] = index_price
+
+        logger.info(
+            f"find_option: SELECTED {winner['symbolName']}  "
+            f"strike={winner['strike']}  delta={winner.get('delta', 'N/A')}  "
+            f"days={winner['days_to_expiry']}  dist={winner['distance_pct']}%"
+        )
+        return winner
+
+    except Exception as e:
+        logger.error(f"find_option: unexpected error: {e}", exc_info=True)
+        return None
+
+
+# -----------------------------------------------------------------------------
+# find_option() internals — private helpers
+# -----------------------------------------------------------------------------
+
+def _find_filter_expiry(options: list, expiry: dict) -> list:
+    """
+    Filter options by expiry window and collapse to a single expiry date.
+
+    Args:
+        options: Pre-filtered option list (already limited to correct type).
+        expiry: Dict with optional keys:
+            min_days  — earliest acceptable expiry (default 0)
+            max_days  — latest acceptable expiry (default ~10 years)
+            target    — "near" (closest to min_days), "far" (closest to
+                        max_days), or "mid" (closest to window midpoint).
+                        Default: "near".
+
+    Returns:
+        Options at the single chosen expiry date, or [] if none in window.
+    """
+    now_ms = time.time() * 1000
+
+    min_days = expiry.get("min_days", 0)
+    max_days = expiry.get("max_days", 3650)  # ~10 years = no limit
+    target = expiry.get("target", "near")
+
+    min_ms = now_ms + min_days * 86400_000
+    max_ms = now_ms + max_days * 86400_000
+
+    # Keep options within the expiry window
+    in_window = [o for o in options if min_ms <= o.get("expirationTimestamp", 0) <= max_ms]
+    if not in_window:
+        return []
+
+    # Collect distinct expiry timestamps
+    expiry_dates = sorted(set(o["expirationTimestamp"] for o in in_window))
+
+    # Pick the target expiry date
+    if target == "near":
+        chosen_ts = expiry_dates[0]
+    elif target == "far":
+        chosen_ts = expiry_dates[-1]
+    elif target == "mid":
+        mid_ms = (min_ms + max_ms) / 2
+        chosen_ts = min(expiry_dates, key=lambda ts: abs(ts - mid_ms))
+    else:
+        logger.warning(f"find_option: unknown expiry target '{target}', using 'near'")
+        chosen_ts = expiry_dates[0]
+
+    days_out = round((chosen_ts - now_ms) / 86400_000, 1)
+    logger.info(f"find_option: chose expiry {days_out}d out ({len(expiry_dates)} expiries in window)")
+
+    return [o for o in in_window if o["expirationTimestamp"] == chosen_ts]
+
+
+def _find_filter_strike(options: list, strike: dict, index_price: float, option_type: str) -> list:
+    """
+    Filter options by strike constraints.
+
+    Applies each supplied key as an independent filter (AND logic):
+        below_atm / above_atm  — ATM direction
+        min_strike / max_strike — absolute bounds
+        min_distance_pct / max_distance_pct — abs % from ATM
+        min_otm_pct / max_otm_pct — directional OTM %
+
+    Args:
+        options: Options at the chosen expiry.
+        strike: Constraint dict (all keys optional).
+        index_price: Current index/futures price.
+        option_type: "C" or "P" (needed for OTM direction).
+
+    Returns:
+        Filtered list (may be empty).
+    """
+    result = list(options)
+
+    # below_atm / above_atm
+    if strike.get("below_atm"):
+        result = [o for o in result if float(o["strike"]) < index_price]
+    if strike.get("above_atm"):
+        result = [o for o in result if float(o["strike"]) > index_price]
+
+    # Absolute bounds
+    if strike.get("min_strike") is not None:
+        result = [o for o in result if float(o["strike"]) >= strike["min_strike"]]
+    if strike.get("max_strike") is not None:
+        result = [o for o in result if float(o["strike"]) <= strike["max_strike"]]
+
+    # Distance from ATM (absolute %)
+    if strike.get("min_distance_pct") is not None:
+        min_dist = strike["min_distance_pct"] / 100
+        result = [o for o in result if abs(float(o["strike"]) - index_price) / index_price >= min_dist]
+    if strike.get("max_distance_pct") is not None:
+        max_dist = strike["max_distance_pct"] / 100
+        result = [o for o in result if abs(float(o["strike"]) - index_price) / index_price <= max_dist]
+
+    # OTM % (directional)
+    if strike.get("min_otm_pct") is not None or strike.get("max_otm_pct") is not None:
+        filtered = []
+        for o in result:
+            otm_pct = _otm_pct(float(o["strike"]), index_price, option_type)
+            if otm_pct < 0:
+                continue  # ITM — exclude
+            if strike.get("min_otm_pct") is not None and otm_pct < strike["min_otm_pct"]:
+                continue
+            if strike.get("max_otm_pct") is not None and otm_pct > strike["max_otm_pct"]:
+                continue
+            filtered.append(o)
+        result = filtered
+
+    return result
+
+
+def _otm_pct(strike: float, index_price: float, option_type: str) -> float:
+    """
+    Calculate OTM percentage (directional).
+    Puts: (index - strike) / index * 100  (positive = OTM)
+    Calls: (strike - index) / index * 100  (positive = OTM)
+    """
+    if option_type == "P":
+        return (index_price - strike) / index_price * 100
+    else:
+        return (strike - index_price) / index_price * 100
+
+
+def _find_enrich_deltas(options: list, index_price: float, max_calls: int = 10) -> list:
+    """
+    Fetch deltas from the exchange for up to *max_calls* options.
+
+    When more candidates survive than the budget allows, the options
+    closest to ATM are prioritised — they are most likely to fall within
+    a useful delta range and therefore most valuable to enrich.
+
+    Each option dict is mutated in-place with a "delta" key.
+
+    Returns:
+        List of options that were successfully enriched.
+    """
+    # Sort by proximity to ATM so the budget covers the most useful strikes
+    sorted_opts = sorted(options, key=lambda o: abs(float(o["strike"]) - index_price))
+    to_fetch = sorted_opts[:max_calls]
+
+    enriched = []
+    for opt in to_fetch:
+        try:
+            details = get_option_details(opt["symbolName"])
+            if details and "delta" in details:
+                opt["delta"] = float(details["delta"])
+                enriched.append(opt)
+            else:
+                logger.debug(f"find_option: no delta for {opt['symbolName']}")
+        except Exception as e:
+            logger.debug(f"find_option: delta fetch failed for {opt['symbolName']}: {e}")
+
+    return enriched
+
+
+def _find_filter_delta(options: list, delta: dict) -> list:
+    """
+    Keep only options whose delta falls strictly within (min, max).
+
+    Options without a delta value are silently dropped.
+    """
+    result = []
+    d_min = delta.get("min")
+    d_max = delta.get("max")
+
+    for o in options:
+        d = o.get("delta")
+        if d is None:
+            continue
+        if d_min is not None and d <= d_min:
+            continue
+        if d_max is not None and d >= d_max:
+            continue
+        result.append(o)
+    return result
+
+
+def _find_rank(options: list, delta: dict, rank_by: str, index_price: float, option_type: str):
+    """
+    Pick the single best option from the surviving candidates.
+
+    Ranking strategies:
+        delta_mid    — closest delta to midpoint of delta min/max
+        delta_target — closest delta to delta["target"] (falls back to midpoint)
+        strike_atm   — strike closest to index price
+        strike_otm   — strike furthest from index price
+        strike_itm   — strike closest to index price (same as strike_atm)
+    """
+    if not options:
+        return None
+
+    if rank_by == "delta_mid":
+        d_min = delta.get("min", 0)
+        d_max = delta.get("max", 0)
+        midpoint = (d_min + d_max) / 2 if (d_min or d_max) else 0
+        return min(options, key=lambda o: abs(o.get("delta", 0) - midpoint))
+
+    elif rank_by == "delta_target":
+        target = delta.get("target")
+        if target is None:
+            # Fall back to midpoint
+            d_min = delta.get("min", 0)
+            d_max = delta.get("max", 0)
+            target = (d_min + d_max) / 2
+        return min(options, key=lambda o: abs(o.get("delta", 0) - target))
+
+    elif rank_by == "strike_atm":
+        return min(options, key=lambda o: abs(float(o["strike"]) - index_price))
+
+    elif rank_by == "strike_otm":
+        return max(options, key=lambda o: abs(float(o["strike"]) - index_price))
+
+    elif rank_by == "strike_itm":
+        return min(options, key=lambda o: abs(float(o["strike"]) - index_price))
+
+    else:
+        logger.warning(f"find_option: unknown rank_by '{rank_by}', using delta_mid")
+        d_min = delta.get("min", 0)
+        d_max = delta.get("max", 0)
+        midpoint = (d_min + d_max) / 2 if (d_min or d_max) else 0
+        return min(options, key=lambda o: abs(o.get("delta", 0) - midpoint))

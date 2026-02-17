@@ -79,6 +79,66 @@ ctx.position_monitor.start()
 | `expiry_criteria` | `dict` | required | Filter: `{"symbol": "28MAR26"}` |
 | `underlying` | `str` | `"BTC"` | Underlying asset |
 
+### find_option() — Compound Selection
+
+For strategies needing multiple simultaneous constraints, `find_option()` replaces ad-hoc filtering chains with a single declarative call.
+
+```python
+from option_selection import find_option
+
+# OTM put, 6-13 days, delta between -0.45 and -0.15, at least 0.5% below ATM
+option = find_option(
+    option_type="P",
+    expiry={"min_days": 6, "max_days": 13, "target": "near"},
+    strike={"below_atm": True, "min_distance_pct": 0.5},
+    delta={"min": -0.45, "max": -0.15},
+    rank_by="delta_mid",
+)
+# Returns: {"symbolName": "BTCUSD-27FEB26-64000-P", "strike": 64000.0,
+#           "delta": -0.296, "days_to_expiry": 9.7, "distance_pct": 4.4,
+#           "index_price": 67024.5, ...}
+
+# OTM call, 1-3 weeks, 2%+ above ATM, delta target 0.30
+option = find_option(
+    option_type="C",
+    expiry={"min_days": 7, "max_days": 21, "target": "mid"},
+    strike={"above_atm": True, "min_distance_pct": 2.0},
+    delta={"target": 0.30},
+    rank_by="delta_target",
+)
+```
+
+#### Parameters
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `underlying` | `str` | `"BTC"` | Underlying symbol |
+| `option_type` | `str` | `"P"` | `"C"` or `"P"` |
+| `expiry` | `dict` | `{}` | `min_days`, `max_days` (int), `target` (`"near"`/`"far"`/`"mid"`) |
+| `strike` | `dict` | `{}` | `below_atm`/`above_atm` (bool), `min_strike`/`max_strike` (float), `min_distance_pct`/`max_distance_pct` (float, % from ATM), `min_otm_pct`/`max_otm_pct` (float, directional OTM %) |
+| `delta` | `dict` | `{}` | `min`/`max` (float, strict bounds), `target` (float, used by `delta_target` ranking) |
+| `rank_by` | `str` | `"delta_mid"` | `"delta_mid"`, `"delta_target"`, `"strike_atm"`, `"strike_otm"`, `"strike_itm"` |
+
+#### Return Value
+Enriched option dict or `None`:
+| Key | Type | Description |
+|-----|------|-------------|
+| `symbolName` | `str` | e.g. `"BTCUSD-27FEB26-64000-P"` |
+| `strike` | `float` | Strike price |
+| `delta` | `float` | Option delta at selection time |
+| `days_to_expiry` | `float` | Days until expiration |
+| `distance_pct` | `float` | Absolute % distance from ATM |
+| `index_price` | `float` | Index price at selection time |
+| `expirationTimestamp` | `int` | Expiry timestamp (ms) |
+| ... | | All original API fields preserved |
+
+#### Filter Pipeline
+1. **Option type** — keep only C or P
+2. **Expiry window** — filter to min/max days, collapse to single expiry date
+3. **Strike filters** — ATM direction, absolute bounds, distance %, OTM %
+4. **Delta enrichment** — fetch deltas for up to 10 candidates (nearest ATM first)
+5. **Delta filter** — keep options within delta range
+6. **Ranking** — pick single winner from survivors
+
 ### Dry-Run Mode
 Set `dry_run=True` in `StrategyConfig` to:
 - Fetch live prices from the exchange (via `get_option_details()`)

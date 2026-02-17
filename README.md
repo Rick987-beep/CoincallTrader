@@ -91,7 +91,7 @@ CoincallTrader/
 ├── config.py               # Environment & global config (.env loading)
 ├── auth.py                 # HMAC-SHA256 API authentication
 ├── market_data.py          # Market data (option chains, orderbooks, BTC price)
-├── option_selection.py     # LegSpec, resolve_legs(), select_option()
+├── option_selection.py     # LegSpec, resolve_legs(), select_option(), find_option()
 ├── trade_execution.py      # Order placement, cancellation, status queries
 ├── trade_lifecycle.py      # TradeState machine, TradeLeg, LifecycleManager, exit conditions
 ├── multileg_orderbook.py   # Smart chunked multi-leg execution
@@ -133,7 +133,8 @@ CoincallTrader/
    │ selection │ │ lifecycle.py   │
    │ LegSpec → │ │ TradeState FSM │
    │ TradeLeg  │ │ exit conditions│
-   └───────────┘ └──────┬─────────┘
+   │ find_     │ └──────┬─────────┘
+   │ option()  │
                         │
          ┌──────────────┼──────────────┐
          │              │              │
@@ -171,6 +172,33 @@ CoincallTrader/
 | `expiry_criteria` | `dict` | `{"symbol": "28MAR26"}` |
 | `underlying` | `str` | Default `"BTC"` |
 
+### find_option() — Compound Selection
+
+For strategies that need multiple simultaneous constraints, use `find_option()` instead of `LegSpec` + `select_option()`:
+
+```python
+from option_selection import find_option
+
+# OTM put, 6-13 days, 0.5%+ below ATM, delta between -0.45 and -0.15
+option = find_option(
+    option_type="P",
+    expiry={"min_days": 6, "max_days": 13, "target": "near"},
+    strike={"below_atm": True, "min_distance_pct": 0.5},
+    delta={"min": -0.45, "max": -0.15},
+    rank_by="delta_mid",
+)
+# Returns enriched dict: symbolName, strike, delta, days_to_expiry, distance_pct, index_price
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `underlying` | `str` | Default `"BTC"` |
+| `option_type` | `str` | `"C"` or `"P"` |
+| `expiry` | `dict` | `min_days`, `max_days`, `target` (`"near"`/`"far"`/`"mid"`) |
+| `strike` | `dict` | `below_atm`, `above_atm`, `min_strike`, `max_strike`, `min_distance_pct`, `max_distance_pct`, `min_otm_pct`, `max_otm_pct` |
+| `delta` | `dict` | `min`, `max`, `target` |
+| `rank_by` | `str` | `"delta_mid"`, `"delta_target"`, `"strike_atm"`, `"strike_otm"`, `"strike_itm"` |
+
 ### Entry condition factories
 
 | Factory | Description |
@@ -191,6 +219,9 @@ python -m pytest tests/test_strategy_framework.py -v
 
 # Integration tests — dry-run + micro-trade (27 assertions)
 python -m pytest tests/test_live_dry_run.py -v
+
+# Compound option selection test (32 assertions, hits live API)
+python3 tests/test_complex_option_selection.py
 ```
 
 ## Documentation

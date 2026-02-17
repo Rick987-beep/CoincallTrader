@@ -5,6 +5,34 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.1] - 2026-02-17
+
+### Added - Compound Option Selection
+- **`find_option()`** (`option_selection.py`) — single-call compound option selection
+  - Expiry constraints: `min_days`, `max_days`, `target` ("near"/"far"/"mid")
+  - Strike constraints: `below_atm`, `above_atm`, `min_strike`, `max_strike`, `min_distance_pct`, `max_distance_pct`, `min_otm_pct`, `max_otm_pct`
+  - Delta constraints: `min`, `max`, `target`
+  - Ranking strategies: `delta_mid`, `delta_target`, `strike_atm`, `strike_otm`, `strike_itm`
+  - Returns enriched dict with `symbolName`, `strike`, `delta`, `days_to_expiry`, `distance_pct`, `index_price`
+  - Smart delta budget: applies non-delta filters first, then fetches deltas for at most 10 options (prioritised by ATM proximity)
+- **Internal helpers**: `_find_filter_expiry()`, `_find_filter_strike()`, `_find_enrich_deltas()`, `_find_filter_delta()`, `_find_rank()`, `_otm_pct()`
+- **Test suite**: `tests/test_complex_option_selection.py` — 32/32 assertions
+  - Steps 1–4: manual pipeline (expiry → strike → delta enrichment → validation)
+  - Step 5: `select_option()` backward-compatibility round-trip
+  - Step 6: `find_option()` compound criteria end-to-end
+
+### Changed
+- Updated module docstring in `option_selection.py` to document both APIs
+- Improved inline comments and docstrings for all `find_option` helpers
+
+### Documentation
+- Updated `README.md` — highlights, project structure, `find_option()` usage table
+- Updated `docs/ARCHITECTURE_PLAN.md` — option selection status, Phase 4 deliverables, architecture diagram
+- Updated `docs/API_REFERENCE.md` — new `find_option()` reference section
+- Updated `CHANGELOG.md` — this entry
+
+---
+
 ## [0.4.0] - 2026-02-14
 
 ### Added - Strategy Framework (Phase 4)

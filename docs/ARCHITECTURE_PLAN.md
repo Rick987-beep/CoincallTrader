@@ -1,8 +1,8 @@
 # CoincallTrader Architecture & Development Plan
 
-**Version:** 1.5  
-**Date:** February 13, 2026  
-**Status:** Phase 4 Complete (Strategy Framework)
+**Version:** 1.6  
+**Date:** February 17, 2026  
+**Status:** Phase 4 Complete (Strategy Framework) + Compound Option Selection
 
 ---
 
@@ -18,7 +18,7 @@ This document outlines the transformation of CoincallTrader from a simple option
 - ✅ **Authentication** — HMAC-SHA256 signing (`auth.py`), JSON + form-urlencoded
 - ✅ **Configuration** — Environment switching via `.env`, strategy params in code (`config.py`)
 - ✅ **Market data** — Option chains, orderbooks, BTC price, option details (`market_data.py`)
-- ✅ **Option selection** — Expiry/strike/delta filtering + `LegSpec` declarative resolution (`option_selection.py`)
+- ✅ **Option selection** — Expiry/strike/delta filtering + `LegSpec` declarative resolution + compound `find_option()` with multi-constraint support (`option_selection.py`)
 - ✅ **Order execution** — Limit orders, get/cancel/status queries (`trade_execution.py`)
 - ✅ **RFQ execution** — Block trades for $50k+ notional multi-leg structures (`rfq.py`)
 - ✅ **Smart orderbook execution** — Chunked quoting with aggressive fallback (`multileg_orderbook.py`)
@@ -72,7 +72,7 @@ CoincallTrader/
 ├── config.py               # Environment config (.env loading)
 ├── auth.py                 # HMAC-SHA256 API authentication
 ├── market_data.py          # Option chains, orderbooks, BTC price
-├── option_selection.py     # LegSpec, resolve_legs(), select_option()
+├── option_selection.py     # LegSpec, resolve_legs(), select_option(), find_option()
 ├── trade_execution.py      # Order placement, cancellation, status queries
 ├── trade_lifecycle.py      # TradeState machine, TradeLeg, LifecycleManager, exit conditions
 ├── multileg_orderbook.py   # Smart chunked multi-leg execution
@@ -85,7 +85,8 @@ CoincallTrader/
 │   └── API_REFERENCE.md
 ├── tests/
 │   ├── test_strategy_framework.py   # 72/72 unit assertions
-│   └── test_live_dry_run.py         # 27/27 integration assertions
+│   ├── test_live_dry_run.py         # 27/27 integration assertions
+│   └── test_complex_option_selection.py  # 32/32 compound selection assertions
 ├── logs/                   # Runtime logs (gitignored)
 └── archive/                # Legacy code (gitignored)
 ```
@@ -105,7 +106,7 @@ CoincallTrader/
 
 | Requirement | Priority | Description |
 |-------------|----------|-------------|
-| REQ-TL-01 | ✅ **Done** | Dynamic instrument selection based on criteria (expiry, strike, delta) — `LegSpec` + `resolve_legs()` |
+| REQ-TL-01 | ✅ **Done** | Dynamic instrument selection based on criteria (expiry, strike, delta) — `LegSpec` + `resolve_legs()` + compound `find_option()` |
 | REQ-TL-02 | ✅ **Done** | Order placement with execution mode selection (limit, RFQ, smart) — 3 modes in `LifecycleManager` |
 | REQ-TL-03 | ✅ **Done** | RFQ execution for multi-leg options trades |
 | REQ-TL-04 | ✅ **Done** | Position tracking: link orders → fills → positions |
@@ -411,12 +412,13 @@ smart_config = SmartExecConfig(
 
 **Deliverables:**
 - [x] `strategy.py` — TradingContext, StrategyConfig, StrategyRunner, entry conditions, build_context()
-- [x] `option_selection.py` updates — LegSpec dataclass, resolve_legs()
+- [x] `option_selection.py` updates — LegSpec dataclass, resolve_legs(), find_option() compound selection
 - [x] `trade_lifecycle.py` updates — strategy_id, _get_orderbook_price(), per-strategy queries
 - [x] `trade_execution.py` fixes — correct endpoint, field names, state codes
 - [x] `main.py` rewrite — DI wiring, strategy registration, signal handling
 - [x] `tests/test_strategy_framework.py` — 72/72 unit test assertions
 - [x] `tests/test_live_dry_run.py` — 27/27 integration test assertions
+- [x] `tests/test_complex_option_selection.py` — 32/32 compound option selection assertions
 - [x] Workspace cleanup — 6 legacy files moved to archive/
 
 ---

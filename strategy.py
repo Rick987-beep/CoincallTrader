@@ -425,7 +425,6 @@ class StrategyConfig:
         max_concurrent_trades: Maximum active trades for this strategy
         cooldown_seconds: Minimum seconds between trade opens
         check_interval_seconds: How often to evaluate entry conditions
-        dry_run: If True, run full pipeline but stop before placing orders
         metadata: Arbitrary context passed to each trade
     """
     name: str
@@ -439,7 +438,6 @@ class StrategyConfig:
     max_trades_per_day: int = 0          # 0 = unlimited
     cooldown_seconds: float = 0.0
     check_interval_seconds: float = 60.0
-    dry_run: bool = False
     on_trade_closed: Optional[Callable] = None   # (TradeLifecycle, AccountSnapshot) -> None
     metadata: Dict[str, Any] = field(default_factory=dict)
 
@@ -468,12 +466,9 @@ class StrategyRunner:
         self._strategy_id: str = config.name
         self._last_check_time: float = 0.0
         self._enabled: bool = True
-        self._dry_run: bool = config.dry_run
-        self._last_dry_run_result: Optional[Dict[str, Any]] = None
         self._known_closed_ids: set = set()   # tracks already-handled closed trades
-        mode_str = "DRY-RUN" if self._dry_run else "LIVE"
         logger.info(
-            f"StrategyRunner '{config.name}' initialised [{mode_str}] "
+            f"StrategyRunner '{config.name}' initialised "
             f"(max_trades={config.max_concurrent_trades}, "
             f"max_per_day={config.max_trades_per_day}, "
             f"cooldown={config.cooldown_seconds}s, "
@@ -485,15 +480,6 @@ class StrategyRunner:
     @property
     def strategy_id(self) -> str:
         return self._strategy_id
-
-    @property
-    def dry_run(self) -> bool:
-        return self._dry_run
-
-    @property
-    def last_dry_run_result(self) -> Optional[Dict[str, Any]]:
-        """Result from the most recent dry-run evaluation (None if never run)."""
-        return self._last_dry_run_result
 
     @property
     def active_trades(self) -> List[TradeLifecycle]:
@@ -607,7 +593,7 @@ class StrategyRunner:
     # -- Trade Creation -------------------------------------------------------
 
     def _open_trade(self) -> None:
-        """Resolve leg specs to concrete symbols and create a trade."""
+        """Resolve leg specs to concrete symbols and open a trade."""
         try:
             legs = resolve_legs(self.config.legs)
             logger.info(
@@ -620,38 +606,6 @@ class StrategyRunner:
                 else self.config.execution_mode
             )
 
-            # ── Dry-run: resolve + route, simulate lifecycle ────────────
-            if self._dry_run:
-                self._execute_dry_run(legs, exec_mode)
-                # Create a real TradeLifecycle so exit conditions are evaluated
-                trade = self.ctx.lifecycle_manager.create(
-                    legs=legs,
-                    exit_conditions=list(self.config.exit_conditions),
-                    execution_mode=exec_mode,
-                    rfq_action=self.config.rfq_action,
-                    smart_config=self.config.smart_config,
-                    strategy_id=self._strategy_id,
-                    metadata={
-                        "strategy": self._strategy_id,
-                        "dry_run": True,
-                        **self.config.metadata,
-                    },
-                )
-                # Advance straight to OPEN with simulated fill prices
-                trade.state = TradeState.OPEN
-                trade.opened_at = time.time()
-                dr = self._last_dry_run_result or {}
-                for i, leg in enumerate(trade.open_legs):
-                    leg_info = dr.get("legs", [{}])[i] if i < len(dr.get("legs", [])) else {}
-                    leg.fill_price = leg_info.get("mark_price", 0.0)
-                    leg.filled_qty = leg.qty
-                logger.info(
-                    f"[{self._strategy_id}] dry-run trade {trade.id} → OPEN "
-                    f"(simulated fills, exit conditions active)"
-                )
-                return
-
-            # ── Live: full execution ─────────────────────────────────────
             trade = self.ctx.lifecycle_manager.create(
                 legs=legs,
                 exit_conditions=list(self.config.exit_conditions),
@@ -667,91 +621,6 @@ class StrategyRunner:
 
         except Exception as e:
             logger.error(f"[{self._strategy_id}] failed to open trade: {e}")
-
-    # -- Dry-Run Execution ----------------------------------------------------
-
-    def _execute_dry_run(self, legs: list, exec_mode: Optional[str]) -> None:
-        """
-        Full pipeline minus actual order placement.
-
-        Fetches orderbook for each leg, determines execution mode via
-        notional routing, and logs exactly what *would* happen.
-        Stores result in self._last_dry_run_result for programmatic access.
-        """
-        from market_data import get_option_orderbook, get_option_details
-
-        result: Dict[str, Any] = {
-            "strategy": self._strategy_id,
-            "timestamp": time.time(),
-            "legs": [],
-            "total_notional": 0.0,
-            "execution_mode": None,
-            "would_open": True,
-        }
-
-        total_notional = 0.0
-        for leg in legs:
-            leg_info: Dict[str, Any] = {
-                "symbol": leg.symbol,
-                "side": leg.side,
-                "side_label": "buy" if leg.side == 1 else "sell",
-                "qty": leg.qty,
-            }
-            try:
-                # get_option_details has top-level bid/ask/markPrice
-                details = get_option_details(leg.symbol)
-                if details:
-                    mark = float(details.get('markPrice', 0))
-                    best_bid = float(details.get('bid', 0))
-                    best_ask = float(details.get('ask', 0))
-                    leg_info["mark_price"] = mark
-                    leg_info["best_bid"] = best_bid
-                    leg_info["best_ask"] = best_ask
-                    leg_info["notional"] = mark * leg.qty
-                    total_notional += leg_info["notional"]
-                else:
-                    leg_info["error"] = "no option details"
-            except Exception as e:
-                leg_info["error"] = str(e)
-
-            result["legs"].append(leg_info)
-
-        result["total_notional"] = total_notional
-
-        # Determine execution mode via the same routing logic
-        if exec_mode:
-            routed_mode = exec_mode
-        elif len(legs) == 1:
-            routed_mode = "limit"
-        elif total_notional >= self.ctx.lifecycle_manager.rfq_notional_threshold:
-            routed_mode = "rfq"
-        elif total_notional >= self.ctx.lifecycle_manager.smart_notional_threshold:
-            routed_mode = "smart"
-        else:
-            routed_mode = "limit"
-        result["execution_mode"] = routed_mode
-
-        self._last_dry_run_result = result
-
-        # Pretty log
-        logger.info(f"\n{'='*60}")
-        logger.info(f"DRY-RUN — strategy '{self._strategy_id}'")
-        logger.info(f"{'='*60}")
-        for linfo in result["legs"]:
-            err = linfo.get("error")
-            if err:
-                logger.info(f"  {linfo['side_label'].upper()} {linfo['qty']}x {linfo['symbol']}  ⚠ {err}")
-            else:
-                logger.info(
-                    f"  {linfo['side_label'].upper()} {linfo['qty']}x {linfo['symbol']}  "
-                    f"mark=${linfo['mark_price']:.2f}  "
-                    f"bid=${linfo['best_bid']:.2f}  ask=${linfo['best_ask']:.2f}  "
-                    f"notional=${linfo['notional']:.2f}"
-                )
-        logger.info(f"  Total notional: ${total_notional:.2f}")
-        logger.info(f"  Routed mode: {routed_mode}")
-        logger.info(f"  ACTION: would open trade — orders NOT placed (dry-run)")
-        logger.info(f"{'='*60}")
 
     # -- Controls -------------------------------------------------------------
 

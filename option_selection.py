@@ -29,6 +29,8 @@ from datetime import datetime, timezone
 from typing import Dict, List, Optional
 from market_data import get_option_instruments, get_option_details, get_btc_futures_price
 
+logger = logging.getLogger(__name__)
+
 
 # =============================================================================
 # Leg Specification — Declarative Leg Templates
@@ -92,7 +94,7 @@ def resolve_legs(specs: List[LegSpec]) -> list:
                 f"strike={spec.strike_criteria} expiry={spec.expiry_criteria}"
             )
         resolved.append(TradeLeg(symbol=symbol, qty=spec.qty, side=spec.side))
-        logging.info(f"Resolved leg {i}: {spec.option_type} {spec.strike_criteria} -> {symbol}")
+        logger.info(f"Resolved leg {i}: {spec.option_type} {spec.strike_criteria} -> {symbol}")
 
     return resolved
 
@@ -134,13 +136,13 @@ def select_option(expiry_criteria, strike_criteria, option_type='C', underlying=
 
         if selected_option:
             delta_info = f", delta: {selected_option.get('delta', 'N/A')}"
-            logging.info(f"Selected option: {selected_option['symbolName']} (strike: {selected_option['strike']}{delta_info})")
+            logger.info(f"Selected option: {selected_option['symbolName']} (strike: {selected_option['strike']}{delta_info})")
             return selected_option['symbolName']
 
         return None
 
     except Exception as e:
-        logging.error(f"Error selecting option: {e}")
+        logger.error(f"Error selecting option: {e}")
         return None
 
 
@@ -174,7 +176,7 @@ def _filter_by_expiry(options_list, expiry_criteria, option_type):
                 and opt['symbolName'].endswith('-' + option_type)
             ]
             if not valid_options:
-                logging.error(f"No unexpired options for type {option_type}")
+                logger.error(f"No unexpired options for type {option_type}")
                 return []
 
             # Find the soonest expiry timestamp
@@ -184,7 +186,7 @@ def _filter_by_expiry(options_list, expiry_criteria, option_type):
                 if opt['expirationTimestamp'] == nearest_ts
             ]
             days_away = (nearest_ts - now_ms) / 86400_000
-            logging.info(
+            logger.info(
                 f"DTE='next': selected expiry {expiry_options[0]['symbolName'].split('-')[1]} "
                 f"({days_away:.1f} days away, {len(expiry_options)} strikes)"
             )
@@ -204,7 +206,7 @@ def _filter_by_expiry(options_list, expiry_criteria, option_type):
             and opt['symbolName'].endswith('-' + option_type)
         ]
         if not valid_options:
-            logging.error(
+            logger.error(
                 f"No options with DTE in [{dte_min}, {dte_max}] and type {option_type}"
             )
             return []
@@ -224,7 +226,7 @@ def _filter_by_expiry(options_list, expiry_criteria, option_type):
         # Match symbolName containing the expiry token and option type
         expiry_options = [opt for opt in options_list if (f"-{sym}-" in opt.get('symbolName', '')) and opt['symbolName'].endswith('-' + option_type)]
         if not expiry_options:
-            logging.error(f"No options matching symbol expiry {sym} and type {option_type}")
+            logger.error(f"No options matching symbol expiry {sym} and type {option_type}")
             return []
     else:
         # Legacy time-based matching
@@ -235,7 +237,7 @@ def _filter_by_expiry(options_list, expiry_criteria, option_type):
         # Filter options by expiry range and type
         valid_options = [opt for opt in options_list if min_expiry <= opt['expirationTimestamp'] <= max_expiry and opt['symbolName'].endswith('-' + option_type)]
         if not valid_options:
-            logging.error(f"No options within expiry range {expiry_criteria} and type {option_type}")
+            logger.error(f"No options within expiry range {expiry_criteria} and type {option_type}")
             return []
 
         # Find closest expiry and filter to that expiry
@@ -266,9 +268,9 @@ def _add_delta_to_options(options_list):
                 opt['delta'] = delta
                 options_with_delta.append(opt)
             else:
-                logging.warning(f"Could not get delta details for {opt['symbolName']}: {details}")
+                logger.warning(f"Could not get delta details for {opt['symbolName']}: {details}")
         except Exception as e:
-            logging.warning(f"Could not get delta for {opt['symbolName']}: {e}")
+            logger.warning(f"Could not get delta for {opt['symbolName']}: {e}")
 
     return options_with_delta
 
@@ -291,7 +293,7 @@ def _select_by_strike_criteria(options_list, strike_criteria):
         if target_strike == 0:
             # 0 means "ATM" — use current spot price
             target_strike = get_btc_futures_price()
-            logging.info(f"closestStrike: value=0 → using spot price ${target_strike:.0f} as ATM")
+            logger.info(f"closestStrike: value=0 → using spot price ${target_strike:.0f} as ATM")
         return min(options_list, key=lambda x: abs(x['strike'] - target_strike))
 
     elif criteria_type == 'delta':
@@ -309,12 +311,12 @@ def _select_by_strike_criteria(options_list, strike_criteria):
         target_strike = strike_criteria['value']
         exact_matches = [opt for opt in options_list if float(opt.get('strike', 0)) == float(target_strike)]
         if not exact_matches:
-            logging.error(f"No exact strike {target_strike} found in expiry options")
+            logger.error(f"No exact strike {target_strike} found in expiry options")
             return None
         return exact_matches[0]
 
     else:
-        logging.error(f"Invalid strike criteria type: {criteria_type}")
+        logger.error(f"Invalid strike criteria type: {criteria_type}")
         return None
 
 
@@ -331,8 +333,6 @@ def _select_by_strike_criteria(options_list, strike_criteria):
 # Non-delta filters are applied BEFORE delta enrichment to minimise
 # the number of API calls (max 10 per invocation).
 # =============================================================================
-
-logger = logging.getLogger(__name__)
 
 
 def find_option(

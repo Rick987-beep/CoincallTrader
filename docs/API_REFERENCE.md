@@ -43,7 +43,6 @@ config = StrategyConfig(
     max_concurrent_trades=1,
     cooldown_seconds=3600,
     check_interval_seconds=60,
-    dry_run=False,  # set True for simulated execution
 )
 
 runner = StrategyRunner(config, ctx)

@@ -19,9 +19,9 @@ The environment is controlled via config.py.
 import logging
 import time
 import threading
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Dict, List, Any, Optional, Callable
-from config import BASE_URL, API_KEY, API_SECRET, ENVIRONMENT
+from config import BASE_URL, API_KEY, API_SECRET
 from auth import CoincallAuth
 
 logger = logging.getLogger(__name__)
@@ -111,7 +111,6 @@ class AccountManager:
     def __init__(self):
         """Initialize account manager with authenticated API client"""
         self.auth = CoincallAuth(API_KEY, API_SECRET, BASE_URL)
-        self.environment = ENVIRONMENT
         self.last_update = None
         
         # Cache for account data
@@ -543,38 +542,3 @@ class PositionMonitor:
                 if not self._running:
                     return
                 time.sleep(0.1)
-
-
-# =============================================================================
-# Global instances & convenience functions
-# =============================================================================
-
-account_manager = AccountManager()
-position_monitor = PositionMonitor()
-
-
-def get_account_balance() -> float:
-    """Get current available balance"""
-    info = account_manager.get_account_info()
-    return info.get('available_margin', 0) if info else 0
-
-
-def get_account_equity() -> float:
-    """Get current account equity"""
-    info = account_manager.get_account_info()
-    return info.get('equity', 0) if info else 0
-
-
-def get_open_positions() -> List[Dict[str, Any]]:
-    """Get current open positions"""
-    return account_manager.get_positions()
-
-
-def get_account_summary() -> Dict[str, Any]:
-    """Get comprehensive account summary"""
-    return account_manager.get_account_summary()
-
-
-def get_risk_metrics() -> Dict[str, Any]:
-    """Get risk metrics"""
-    return account_manager.get_risk_metrics()

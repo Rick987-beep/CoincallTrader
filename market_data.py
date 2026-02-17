@@ -98,8 +98,6 @@ class MarketData:
             # Try the correct endpoint as a public request (no auth)
             endpoint = f'/open/option/getInstruments/{underlying}'
             logger.debug(f"Trying public endpoint: {endpoint}")
-            
-            import requests
             url = f"{self.auth.base_url}{endpoint}"
             logger.debug(f"Full URL: {url}")
             response = requests.get(url, timeout=10)
@@ -158,7 +156,6 @@ class MarketData:
                 logger.debug(f"Option details endpoint failed for {symbol}: {response.get('msg')}")
                 
                 # Try as public request
-                import requests
                 url = f"{self.auth.base_url}/open/option/detail/v1/{symbol}"
                 response = requests.get(url, timeout=10)
                 

@@ -30,7 +30,7 @@ import logging
 import time
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Dict, List, Optional, Any, Tuple
+from typing import Dict, List, Optional, Any
 
 from market_data import get_option_orderbook
 from trade_execution import TradeExecutor
@@ -123,22 +123,18 @@ class LegChunkState:
         total_qty: Total quantity for this leg in this chunk
         filled_qty: Quantity filled IN THIS CHUNK (incremental, not total position)
         starting_position: Position size when chunk started (for calculating incremental fills)
-        active_order_id: Current order ID (if any)
         current_order_id: Current active order ID
         current_order_price: Price of current active order
         fill_times: List of times when partial fills occurred
-        target_price: Target quote price for this leg
     """
     symbol: str
     side: int
     total_qty: float
     filled_qty: float = 0.0
     starting_position: float = 0.0
-    active_order_id: Optional[str] = None
     current_order_id: Optional[str] = None
     current_order_price: Optional[float] = None
     fill_times: List[float] = field(default_factory=list)
-    target_price: Optional[float] = None
 
     @property
     def remaining_qty(self) -> float:
@@ -161,7 +157,6 @@ class ChunkState:
         legs_state: Per-leg state (symbol -> LegChunkState)
         start_time: Unix timestamp when chunk execution started
         phase: Current phase (QUOTING, FALLBACK, COMPLETED)
-        filled_qty: Total quantity filled across all legs
         status_message: Human-readable status
     """
     chunk_idx: int
@@ -224,7 +219,7 @@ class SmartOrderbookExecutor:
             TradeLeg(symbol="BTCUSD-28FEB26-100000-C", qty=1.0, side=1),
             TradeLeg(symbol="BTCUSD-28FEB26-105000-P", qty=1.0, side=2),
         ]
-        config = SmartExecConfig(chunk_count=5, quoting_duration_a=30)
+        config = SmartExecConfig(chunk_count=5, time_per_chunk=30)
         result = executor.execute_smart_multi_leg(legs, config)
     """
 
@@ -407,41 +402,6 @@ class SmartOrderbookExecutor:
                 execution_time=execution_time,
                 message=f"Smart execution failed: {e}"
             )
-
-    def _calculate_chunks(
-        self,
-        legs: List[Any],
-        chunk_count: int
-    ) -> List[List[Any]]:
-        """
-        Split multi-leg order proportionally into chunks.
-        
-        Args:
-            legs: List of TradeLeg objects
-            chunk_count: Number of chunks to create
-            
-        Returns:
-            List of chunks, each containing proportional legs
-        """
-        chunks = [[] for _ in range(chunk_count)]
-        
-        for leg in legs:
-            chunk_qty = leg.qty / chunk_count
-            for chunk_idx in range(chunk_count):
-                # Create a copy-like structure with proportional qty
-                chunk_leg = type('ChunkLeg', (), {
-                    'symbol': leg.symbol,
-                    'qty': chunk_qty,
-                    'side': leg.side,
-                    'order_id': None,
-                    'fill_price': None,
-                    'filled_qty': 0.0,
-                    'position_id': None
-                })()
-                chunks[chunk_idx].append(chunk_leg)
-        
-        logger.info(f"Calculated {chunk_count} chunks: {[len(c) for c in chunks]}")
-        return chunks
 
     def _execute_chunk(
         self,
@@ -962,71 +922,3 @@ class SmartOrderbookExecutor:
                         
         except Exception as e:
             logger.debug(f"Could not check fills via positions: {e}")
-    
-    def _check_and_update_fills(
-        self,
-        chunk_state: ChunkState,
-        chunk_legs: List[Any]
-    ) -> None:
-        """
-        Check for order fills and update chunk state.
-        
-        Placeholder for backward compatibility.
-        
-        Args:
-            chunk_state: Current chunk state
-            chunk_legs: Legs in this chunk
-        """
-        # Legacy method - now using _check_order_fills with active_orders
-        pass
-
-
-# =============================================================================
-# Factory Functions
-# =============================================================================
-
-def create_smart_config(
-    chunk_count: int = 5,
-    time_per_chunk: float = 600.0,
-    quoting_strategy: str = "top_of_book",
-    spread_pct: float = 0.5,
-    reprice_interval: float = 10.0,
-    reprice_price_threshold: float = 0.1,
-    min_order_qty: float = 0.01,
-    aggressive_attempts: int = 10,
-    aggressive_wait_seconds: float = 5.0,
-    aggressive_retry_pause: float = 1.0,
-    iv_adjustments: Optional[Dict[str, float]] = None,
-) -> SmartExecConfig:
-    """
-    Convenience factory for creating SmartExecConfig.
-    
-    Args:
-        chunk_count: Number of chunks (default 5)
-        time_per_chunk: Time allowed per chunk in seconds (default 600 = 10 minutes)
-        quoting_strategy: "top_of_book", "top_of_book_offset_pct", "mid", or "mark" (default "top_of_book")
-        spread_pct: Spread % if using offset strategy (default 0.5)
-        reprice_interval: Reprice interval in seconds (default 10, minimum 10)
-        reprice_price_threshold: Minimum price change to trigger repricing (default 0.1)
-        min_order_qty: Minimum order size to submit (default 0.01)
-        aggressive_attempts: Number of aggressive fill attempts per chunk (default 10)
-        aggressive_wait_seconds: Max wait per aggressive attempt (default 5.0)
-        aggressive_retry_pause: Pause between aggressive attempts (default 1.0)
-        iv_adjustments: Per-leg IV tweaks (default none)
-        
-    Returns:
-        SmartExecConfig instance
-    """
-    return SmartExecConfig(
-        chunk_count=chunk_count,
-        time_per_chunk=time_per_chunk,
-        quoting_strategy=quoting_strategy,
-        spread_pct=spread_pct,
-        reprice_interval=reprice_interval,
-        reprice_price_threshold=reprice_price_threshold,
-        min_order_qty=min_order_qty,
-        aggressive_attempts=aggressive_attempts,
-        aggressive_wait_seconds=aggressive_wait_seconds,
-        aggressive_retry_pause=aggressive_retry_pause,
-        iv_adjustments=iv_adjustments or {},
-    )

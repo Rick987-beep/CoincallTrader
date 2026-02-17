@@ -28,9 +28,9 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional
 
-from account_manager import AccountSnapshot, PositionMonitor, PositionSnapshot
+from account_manager import AccountSnapshot, PositionSnapshot
 from trade_execution import TradeExecutor, LimitFillManager, ExecutionParams
 from rfq import RFQExecutor, OptionLeg, RFQResult
 from multileg_orderbook import SmartOrderbookExecutor, SmartExecConfig
@@ -219,17 +219,6 @@ class TradeLifecycle:
             greeks = self.structure_greeks(account)
             s += f" | PnL={pnl:+.4f} Δ={greeks['delta']:+.4f}"
         return s
-
-
-# =============================================================================
-# NOTE: Exit condition factories have moved to strategy.py.
-#
-# Import them from there:
-#   from strategy import profit_target, max_loss, max_hold_hours, time_exit
-#   from strategy import account_delta_limit, structure_delta_limit, leg_greek_limit
-#
-# The ExitCondition type alias is also now in strategy.py.
-# =============================================================================
 
 
 # =============================================================================
@@ -591,30 +580,6 @@ class LifecycleManager:
             logger.error(f"Trade {trade_id} not closeable (is {trade.state.value})")
             return False
 
-        # ── Dry-run trades: skip order placement, simulate close ─────────
-        if trade.metadata.get("dry_run"):
-            trade.close_legs = [
-                TradeLeg(
-                    symbol=leg.symbol,
-                    qty=leg.filled_qty if leg.filled_qty > 0 else leg.qty,
-                    side=leg.close_side,
-                )
-                for leg in trade.open_legs
-            ]
-            # Simulate fills at current mark prices
-            for cleg, oleg in zip(trade.close_legs, trade.open_legs):
-                cleg.fill_price = oleg.fill_price  # approximate
-                cleg.filled_qty = cleg.qty
-            trade.state = TradeState.CLOSED
-            trade.closed_at = time.time()
-            hold = trade.hold_seconds or 0
-            logger.info(
-                f"\n{'='*60}\n"
-                f"DRY-RUN — trade {trade.id} CLOSED (held {hold:.0f}s)\n"
-                f"{'='*60}"
-            )
-            return True
-
         logger.info(f"Closing trade {trade_id} via {trade.execution_mode}")
 
         if trade.execution_mode == "rfq":
@@ -892,12 +857,10 @@ class LifecycleManager:
                     self._check_open_fills(trade)
 
                 elif trade.state == TradeState.OPEN:
-                    is_dry = trade.metadata.get("dry_run", False)
-                    pnl = 0.0 if is_dry else trade.structure_pnl(account)
+                    pnl = trade.structure_pnl(account)
                     hold = trade.hold_seconds or 0
-                    tag = " [DRY-RUN]" if is_dry else ""
                     logger.info(
-                        f"Trade {trade.id}: OPEN{tag} hold={hold:.0f}s PnL={pnl:+.4f} "
+                        f"Trade {trade.id}: OPEN hold={hold:.0f}s PnL={pnl:+.4f} "
                         f"— checking exit conditions"
                     )
                     self._evaluate_exits(trade, account)
@@ -1069,8 +1032,4 @@ class LifecycleManager:
         return "\n".join(lines)
 
 
-# =============================================================================
-# Global Instance
-# =============================================================================
 
-lifecycle_manager = LifecycleManager()

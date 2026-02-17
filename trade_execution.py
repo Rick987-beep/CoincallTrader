@@ -414,23 +414,3 @@ class LimitFillManager:
         except Exception as e:
             logger.error(f"LimitFillManager: error fetching price for {symbol}: {e}")
             return None
-
-
-# Global instance
-trade_executor = TradeExecutor()
-
-
-# Convenience functions
-def place_order(symbol: str, qty: float, side: int, order_type: int = 1, price: Optional[float] = None, client_order_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
-    """Place an order"""
-    return trade_executor.place_order(symbol, qty, side, order_type, price, client_order_id)
-
-
-def cancel_order(order_id: str) -> bool:
-    """Cancel an order"""
-    return trade_executor.cancel_order(order_id)
-
-
-def get_order_status(order_id: str) -> Optional[Dict[str, Any]]:
-    """Get order status"""
-    return trade_executor.get_order_status(order_id)

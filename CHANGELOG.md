@@ -5,6 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2026-02-17
+
+### Changed - Architecture Cleanup
+- **Strategies module**: Moved strategy definitions to `strategies/` package — each strategy is a standalone factory function
+- **main.py**: Slimmed to a pure launcher — loads `STRATEGIES` list, wires context, starts monitor
+- **Removed dry-run mode**: `dry_run` field removed from `StrategyConfig` and all dry-run execution logic removed from `StrategyRunner`
+- **Removed module-level globals**: No more auto-instantiation on import (`trade_executor`, `account_manager`, `position_monitor`, `rfq_executor`, `lifecycle_manager`)
+- **Removed convenience functions**: `place_order()`, `cancel_order()`, `get_order_status()`, `execute_rfq()`, `create_strangle_legs()`, `create_spread_legs()`, etc. — use class methods directly
+- **Cleaned config.py**: Removed 9 dead config dicts (`WS_OPTIONS`, `ENDPOINTS`, `ACCOUNT_CONFIG`, `RISK_CONFIG`, `TRADING_CONFIG`, `OPEN_POSITION_CONDITIONS`, `CLOSE_POSITION_CONDITIONS`, `POSITION_CONFIG`, `LOGGING_CONFIG`)
+- **Cleaned multileg_orderbook.py**: Removed dead fields (`active_order_id`, `target_price`), dead methods (`_calculate_chunks()`, `_check_and_update_fills()`), dead factory (`create_smart_config()`)
+- **Cleaned rfq.py**: Removed `TakerAction` enum, `execute_with_fallback()`, `__main__` block
+- **Unified logging**: `option_selection.py` now uses `logger` throughout (was mixing `logging.*` and `logger.*`)
+- **Removed redundant imports**: Cleaned inline `import requests` in `market_data.py`
+- **Updated docstrings**: Fixed stale attribute docs and usage examples
+
+### Fixed (pre-cleanup, committed in 301f2af)
+- Cancel stale order IDs: no longer tries to cancel already-resolved orders
+- Close retry double-order: prevents duplicate close orders on retry
+- force_close() CLOSING state: properly handles trades stuck in CLOSING
+- _check_close_fills fill sync: correctly syncs fill data on close
+
+---
+
 ## [0.4.1] - 2026-02-17
 
 ### Added - Compound Option Selection

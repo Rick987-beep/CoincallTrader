@@ -19,10 +19,13 @@ Key Concepts:
   - Accept/Cancel endpoints require form-urlencoded data
 
 Usage:
-    from rfq import RFQExecutor, OptionLeg, create_strangle_legs
+    from rfq import RFQExecutor, OptionLeg
 
     # Open a long strangle (BUY both legs)
-    legs = create_strangle_legs('28FEB26', 100000, 90000, 0.5)
+    legs = [
+        OptionLeg(symbol='BTCUSD-28FEB26-100000-C', qty=0.5, side='BUY'),
+        OptionLeg(symbol='BTCUSD-28FEB26-90000-P',  qty=0.5, side='BUY'),
+    ]
     rfq = RFQExecutor()
     result = rfq.execute(legs, action='buy', timeout_seconds=60)
 
@@ -86,12 +89,6 @@ class RFQState(Enum):
     CANCELLED = "CANCELLED"  # Cancelled by user
     EXPIRED = "EXPIRED"      # Timed out without execution
     TRADED_AWAY = "TRADED_AWAY"  # Another quote was accepted (maker perspective)
-
-
-class TakerAction(Enum):
-    """What we (the taker) want to do with the structure"""
-    BUY = "buy"    # Open long / buy the structure
-    SELL = "sell"  # Close long / sell the structure
 
 
 @dataclass
@@ -644,184 +641,3 @@ class RFQExecutor:
             logger.warning(f"RFQ {request_id} failed: {result.message}")
         
         return result
-    
-    def execute_with_fallback(
-        self,
-        legs: List[OptionLeg],
-        rfq_timeout_seconds: int = 60,
-        min_improvement_pct: float = 0.0,
-        fallback_to_orderbook: bool = True
-    ) -> RFQResult:
-        """
-        Execute RFQ with fallback to individual orderbook trades.
-        
-        If RFQ fails or no suitable quote is received, optionally execute
-        each leg individually on the orderbook.
-        
-        Args:
-            legs: List of OptionLeg objects
-            rfq_timeout_seconds: Time to wait for RFQ quotes
-            min_improvement_pct: Minimum improvement to accept RFQ
-            fallback_to_orderbook: If True, execute on orderbook if RFQ fails
-            
-        Returns:
-            RFQResult with execution details
-        """
-        # Try RFQ first
-        result = self.execute(
-            legs=legs,
-            timeout_seconds=rfq_timeout_seconds,
-            min_improvement_pct=min_improvement_pct
-        )
-        
-        if result.success:
-            return result
-        
-        # Fallback to orderbook if enabled
-        if fallback_to_orderbook:
-            logger.info("RFQ unsuccessful, falling back to orderbook execution")
-            
-            # Import here to avoid circular dependency
-            from trade_execution import trade_executor
-            
-            try:
-                placed_orders = []
-                all_placed = True
-                for leg in legs:
-                    side = 1 if leg.side == "BUY" else 2
-                    order = trade_executor.place_order(
-                        symbol=leg.instrument,
-                        qty=leg.qty,
-                        side=side,
-                        order_type=1,  # limit
-                    )
-                    if order:
-                        placed_orders.append(order)
-                    else:
-                        all_placed = False
-                        break
-                
-                if all_placed and placed_orders:
-                    result.success = True
-                    result.state = RFQState.FILLED
-                    result.message = "Executed on orderbook (RFQ fallback)"
-                    result.improvement_pct = 0.0
-                else:
-                    result.message = "Partial execution on orderbook fallback"
-                    
-            except Exception as e:
-                logger.error(f"Orderbook fallback failed: {e}")
-                result.message = f"RFQ and orderbook fallback both failed: {e}"
-        
-        return result
-
-
-# =============================================================================
-# Convenience Functions
-# =============================================================================
-
-# Global instance
-rfq_executor = RFQExecutor()
-
-
-def execute_rfq(
-    legs: List[OptionLeg],
-    action: str = "buy",
-    timeout_seconds: int = 60
-) -> RFQResult:
-    """
-    Execute an RFQ with default settings.
-    
-    Args:
-        legs: List of OptionLeg objects
-        action: "buy" or "sell" - what WE want to do with the structure
-        timeout_seconds: Max wait time for quotes
-        
-    Returns:
-        RFQResult with execution details
-    """
-    return rfq_executor.execute(legs, action=action, timeout_seconds=timeout_seconds)
-
-
-def create_strangle_legs(
-    expiry: str,
-    call_strike: float,
-    put_strike: float,
-    qty: float,
-    side: str = "BUY",
-    underlying: str = "BTCUSD"
-) -> List[OptionLeg]:
-    """
-    Helper to create strangle leg definitions.
-    
-    Args:
-        expiry: Expiry date string (e.g., "28FEB26")
-        call_strike: Call strike price
-        put_strike: Put strike price  
-        qty: Quantity per leg
-        side: "BUY" or "SELL" for both legs
-        underlying: Underlying symbol (default: BTCUSD)
-        
-    Returns:
-        List of two OptionLeg objects
-    """
-    call_instrument = f"{underlying}-{expiry}-{int(call_strike)}-C"
-    put_instrument = f"{underlying}-{expiry}-{int(put_strike)}-P"
-    
-    return [
-        OptionLeg(instrument=call_instrument, side=side, qty=qty),
-        OptionLeg(instrument=put_instrument, side=side, qty=qty),
-    ]
-
-
-def create_spread_legs(
-    expiry: str,
-    long_strike: float,
-    short_strike: float,
-    qty: float,
-    option_type: str = "C",
-    underlying: str = "BTCUSD"
-) -> List[OptionLeg]:
-    """
-    Helper to create vertical spread leg definitions.
-    
-    Args:
-        expiry: Expiry date string
-        long_strike: Strike to buy
-        short_strike: Strike to sell
-        qty: Quantity per leg
-        option_type: "C" for call spread, "P" for put spread
-        underlying: Underlying symbol
-        
-    Returns:
-        List of two OptionLeg objects
-    """
-    long_instrument = f"{underlying}-{expiry}-{int(long_strike)}-{option_type}"
-    short_instrument = f"{underlying}-{expiry}-{int(short_strike)}-{option_type}"
-    
-    return [
-        OptionLeg(instrument=long_instrument, side="BUY", qty=qty),
-        OptionLeg(instrument=short_instrument, side="SELL", qty=qty),
-    ]
-
-
-if __name__ == "__main__":
-    # Example usage / quick test
-    import sys
-    
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-    )
-    
-    print("RFQ Module loaded successfully")
-    print("\nExample usage:")
-    print("  from rfq import RFQExecutor, OptionLeg, create_strangle_legs")
-    print("  ")
-    print("  # Define a strangle")
-    print("  legs = create_strangle_legs('28FEB26', 100000, 90000, 0.5)")
-    print("  ")
-    print("  # Execute RFQ")
-    print("  rfq = RFQExecutor()")
-    print("  result = rfq.execute(legs, timeout_seconds=120)")
-    print("  print(result)")

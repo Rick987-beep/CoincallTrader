@@ -3,17 +3,17 @@
 A strategy-driven options trading system for the [Coincall](https://www.coincall.com/) exchange.  
 Strategies are declared as configuration — not coded as classes — and the framework handles entry checks, leg resolution, execution, lifecycle management, and exits automatically.
 
-**Current version:** 0.5.0 — Refactored Architecture
+**Current version:** 0.5.1 — RFQ Comparison Fix + Endurance Testing
 
 ## Highlights
 
 - **Declarative strategy framework**: Define _what_ to trade, _when_ to enter, _when_ to exit, and _how_ to execute — all via `StrategyConfig` ✅
 - **Modular strategies**: Each strategy lives in `strategies/` as a standalone factory function ✅
 - **Dependency injection**: `TradingContext` wires every service; strategies and tests receive the same container ✅
-- **Entry conditions**: Composable factories — `time_window()`, `weekday_filter()`, `min_available_margin_pct()`, `min_equity()`, `max_account_delta()`, `max_margin_utilization()`, `no_existing_position_in()` ✅
+- **Entry conditions**: Composable factories — `time_window()`, `utc_time_window()`, `weekday_filter()`, `min_available_margin_pct()`, `min_equity()`, `max_account_delta()`, `max_margin_utilization()`, `no_existing_position_in()` ✅
 - **Leg specifications**: `LegSpec` dataclass resolves strike/expiry criteria into concrete symbols at runtime ✅
 - **Trade lifecycle**: Full open → manage → close state machine with automatic exit evaluation ✅
-- **Exit conditions**: `profit_target()`, `max_loss()`, `max_hold_hours()`, `account_delta_limit()`, `structure_delta_limit()`, `leg_greek_limit()` ✅
+- **Exit conditions**: `profit_target()`, `max_loss()`, `max_hold_hours()`, `time_exit()`, `utc_datetime_exit()`, `account_delta_limit()`, `structure_delta_limit()`, `leg_greek_limit()` ✅
 - **Three execution modes**: Limit orders (with LimitFillManager), RFQ block trades ($50 k+), and smart orderbook (chunked quoting with aggressive fallback) ✅
 - **LimitFillManager**: Fill detection, 30 s requote timeout, aggressive repricing, up to 10 requote rounds ✅
 - **Position monitoring**: Background polling with live Greeks, PnL, account snapshots, and tick-driven strategy execution ✅
@@ -79,7 +79,8 @@ CoincallTrader/
 ├── main.py                         # Entry point — loads strategies, wires context, starts monitor
 ├── strategies/
 │   ├── __init__.py                 # Re-exports strategy factories
-│   └── micro_strangle.py          # Micro strangle live test strategy
+│   ├── micro_strangle.py          # Micro strangle live test strategy
+│   └── rfq_endurance.py           # 3-cycle RFQ endurance test strategy
 ├── strategy.py                     # StrategyConfig, StrategyRunner, entry/exit condition factories
 ├── config.py                       # Environment & global config (.env loading)
 ├── auth.py                         # HMAC-SHA256 API authentication
@@ -95,7 +96,10 @@ CoincallTrader/
 │   └── API_REFERENCE.md            # Coincall API & internal module reference
 ├── tests/
 │   ├── test_strategy_framework.py  # Unit tests — config, context, conditions
-│   └── test_complex_option_selection.py  # Compound option selection tests
+│   ├── test_strategy_layer.py      # Strategy layer integration tests
+│   ├── test_complex_option_selection.py  # Compound option selection tests
+│   ├── test_rfq_comparison.py      # RFQ quote vs orderbook monitoring (strangle)
+│   └── test_rfq_iron_condor.py     # RFQ quote monitoring (iron condor)
 ├── logs/                           # Runtime logs (gitignored)
 ├── archive/                        # Legacy code (gitignored)
 ├── CHANGELOG.md
@@ -197,6 +201,7 @@ option = find_option(
 | Factory | Description |
 |---------|-------------|
 | `time_window(start_hour, end_hour)` | UTC hour window |
+| `utc_time_window(start, end)` | UTC time window with `datetime.time` precision |
 | `weekday_filter(days)` | e.g. `["mon", "tue", "wed", "thu"]` |
 | `min_available_margin_pct(pct)` | Minimum free margin % |
 | `min_equity(usd)` | Minimum account equity |
@@ -211,6 +216,8 @@ option = find_option(
 | `profit_target(usd)` | Close when profit ≥ threshold |
 | `max_loss(usd)` | Close when loss ≥ threshold |
 | `max_hold_hours(hours)` | Close after time limit |
+| `time_exit(hour, minute)` | Close at specific UTC time daily |
+| `utc_datetime_exit(dt)` | Close at specific UTC datetime |
 | `account_delta_limit(limit)` | Close if account delta exceeds limit |
 | `structure_delta_limit(limit)` | Close if structure delta exceeds limit |
 | `leg_greek_limit(greek, limit)` | Close if any leg Greek exceeds limit |
@@ -241,9 +248,10 @@ python3 tests/test_complex_option_selection.py
 5. ✅ Smart orderbook execution — chunked quoting with aggressive fallback
 6. ✅ Strategy framework — declarative configs, entry/exit conditions, DI
 7. ✅ **Architecture cleanup** — modular strategies, clean layering, dead code removal
-8. ⬜ Multi-instrument — futures, spot trading
-9. ⬜ Web dashboard — monitoring interface
-10. ⬜ Persistence & recovery — state persistence, crash recovery
+8. ✅ **RFQ comparison fix** — correct orderbook side selection, unified improvement formula
+9. ⬜ Multi-instrument — futures, spot trading
+10. ⬜ Web dashboard — monitoring interface
+11. ⬜ Persistence & recovery — state persistence, crash recovery
 
 ## Disclaimer
 

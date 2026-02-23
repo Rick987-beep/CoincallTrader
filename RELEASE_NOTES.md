@@ -1,3 +1,132 @@
+# Release Notes — v0.5.1 "RFQ Comparison Fix"
+
+**Release Date:** February 23, 2026  
+**Previous Version:** v0.5.0 (Architecture Cleanup)
+
+---
+
+## Overview
+
+v0.5.1 fixes a critical bug in the RFQ orderbook comparison logic and adds precise UTC scheduling conditions. The `get_orderbook_cost()` function was always using the wrong side of the orderbook when evaluating sell-direction trades, causing wildly inflated "improvement" metrics (+180%). After the fix, improvement percentages are realistic: BUY +0–4%, SELL +7–14%.
+
+This release also adds `utc_time_window()` and `utc_datetime_exit()` for precise UTC scheduling, the `rfq_endurance.py` strategy for multi-cycle testing, and two new RFQ validation tests.
+
+---
+
+## Key Fixes
+
+### 1. RFQ Orderbook Comparison (`rfq.py`)
+
+**Problem:** `get_orderbook_cost()` always used `leg.side` to pick ask/bid. For simple structures (strangles), all legs are BUY. When `action="sell"`, it should check bids (what we'd receive), not asks. This made sell-side comparison meaningless.
+
+**Fix:** Added `action` parameter. Now computes:
+```python
+effectively_buying = (leg.side == "BUY") == (action == "buy")
+# If effectively buying → use ASK
+# If effectively selling → use BID
+```
+
+### 2. Improvement Formula (`rfq.py`)
+
+**Problem:** `calculate_improvement()` had inverted formula for sell direction.
+
+**Fix:** Unified to single formula for both directions:
+```python
+improvement = (orderbook_cost - quote_cost) / abs(orderbook_cost) * 100
+```
+
+### 3. Stale Docstrings (`trade_lifecycle.py`)
+
+**Problem:** `_close_rfq()` said "legs as BUY (Coincall requirement)" — incorrect for mixed structures.
+
+**Fix:** Updated to "preserving each leg's side". Documented `rfq_min_improvement_pct` metadata key.
+
+---
+
+## New Features
+
+### 4. `utc_time_window(start, end)` — Entry Condition
+
+Accepts `datetime.time` objects for precise UTC scheduling (complements hour-based `time_window()`):
+```python
+from datetime import time
+from strategy import utc_time_window
+
+condition = utc_time_window(time(9, 30), time(10, 15))  # 09:30–10:15 UTC
+```
+
+### 5. `utc_datetime_exit(dt)` — Exit Condition
+
+Triggers at a specific UTC datetime (complements daily `time_exit()`):
+```python
+from datetime import datetime
+from strategy import utc_datetime_exit
+
+exit_cond = utc_datetime_exit(datetime(2026, 2, 23, 19, 0))  # Close at 19:00 UTC on Feb 23
+```
+
+### 6. `strategies/rfq_endurance.py`
+
+3-cycle endurance test strategy with UTC-scheduled open/close windows. Tests RFQ execution reliability over multiple consecutive cycles.
+
+---
+
+## Validation Results
+
+| Test | BUY Improvement | SELL Improvement | Status |
+|------|----------------|-----------------|--------|
+| Strangle (before fix) | 0–4% | **+180%** (broken) | ❌ |
+| Strangle (after fix) | 0–4% | 7–14% | ✅ |
+| Iron condor (mixed sides) | 2–5.5% | 6.2–6.3% | ✅ |
+| 3-cycle endurance | All filled | All filled | ✅ |
+
+---
+
+## File Changes
+
+| File | Change |
+|------|--------|
+| `rfq.py` | **Modified** — `get_orderbook_cost()` action param, unified `calculate_improvement()`, `execute()` passthrough |
+| `trade_lifecycle.py` | **Modified** — Fixed stale docstrings in `_open_rfq`/`_close_rfq` |
+| `strategy.py` | **Modified** — Added `utc_time_window()`, `utc_datetime_exit()` |
+| `strategies/rfq_endurance.py` | **NEW** — 3-cycle endurance test strategy |
+| `tests/test_rfq_comparison.py` | **NEW** — Strangle RFQ quote monitoring |
+| `tests/test_rfq_iron_condor.py` | **NEW** — Iron condor RFQ quote monitoring |
+
+---
+
+## Migration Guide
+
+No breaking changes. The `action` parameter in `get_orderbook_cost()` defaults to `"buy"`, preserving backward compatibility. All existing strategies continue to work unchanged.
+
+---
+
+## What's Next
+
+- **Phase 5:** Multi-instrument support (futures, spot)
+- **Phase 6:** Account alerts and monitoring
+- **Phase 7:** Web dashboard
+- **Phase 8:** Persistence and crash recovery
+
+See [docs/ARCHITECTURE_PLAN.md](docs/ARCHITECTURE_PLAN.md) for the complete roadmap.
+
+---
+
+## Project Statistics
+
+| Metric | Value |
+|--------|-------|
+| Version | 0.5.1 |
+| Release Date | February 23, 2026 |
+| Modules Changed | 3 (rfq.py, trade_lifecycle.py, strategy.py) |
+| New Files | 3 (rfq_endurance.py, test_rfq_comparison.py, test_rfq_iron_condor.py) |
+| Total Core Modules | 11 |
+| Python | 3.9+ |
+
+---
+
+---
+
 # Release Notes — v0.4.0 "Strategy Framework"
 
 **Release Date:** February 14, 2026  

@@ -1,8 +1,8 @@
 # CoincallTrader Architecture & Development Plan
 
-**Version:** 1.7  
-**Date:** February 17, 2026  
-**Status:** Phase 5 (Strategy Layer) + Structure Templates + DTE Selection
+**Version:** 1.8  
+**Date:** February 23, 2026  
+**Status:** Phase 5 (Strategy Layer) + Structure Templates + DTE Selection + RFQ Comparison Fix
 
 ---
 
@@ -21,14 +21,14 @@ This document outlines the transformation of CoincallTrader from a simple option
 - ✅ **Option selection** — Expiry/strike/delta filtering + `LegSpec` declarative resolution + compound `find_option()` with multi-constraint support + **DTE-based expiry** (`option_selection.py`)
 - ✅ **Structure templates** — `straddle()`, `strangle()` → return `List[LegSpec]` for plug-in to `StrategyConfig` (`option_selection.py`)
 - ✅ **Order execution** — Limit orders, get/cancel/status queries (`trade_execution.py`)
-- ✅ **RFQ execution** — Block trades for $50k+ notional multi-leg structures (`rfq.py`)
+- ✅ **RFQ execution** — Block trades for $50k+ notional multi-leg structures; **orderbook comparison fix** (correct side selection for buy/sell, unified improvement formula) (`rfq.py`)
 - ✅ **Smart orderbook execution** — Chunked quoting with aggressive fallback (`multileg_orderbook.py`)
 - ✅ **Trade lifecycle** — State machine (PENDING_OPEN → … → CLOSED), exit conditions, multi-leg native (`trade_lifecycle.py`)
-- ✅ **Exit conditions** — `profit_target`, `max_loss`, `max_hold_hours`, **`time_exit`** (absolute clock), `account_delta_limit`, `structure_delta_limit`, `leg_greek_limit` (`trade_lifecycle.py`)
+- ✅ **Exit conditions** — `profit_target`, `max_loss`, `max_hold_hours`, **`time_exit`** (absolute clock), **`utc_datetime_exit`** (specific datetime), `account_delta_limit`, `structure_delta_limit`, `leg_greek_limit` (`trade_lifecycle.py`, `strategy.py`)
 - ✅ **Position monitoring** — Background polling, `AccountSnapshot`/`PositionSnapshot`, live Greeks (`account_manager.py`)
 - ✅ **Strategy framework** — `TradingContext` DI, `StrategyConfig`, `StrategyRunner`, 7 entry condition factories, dry-run mode (`strategy.py`)
 - ✅ **Strategy lifecycle** — `max_trades_per_day` gate, `on_trade_closed` callback, `stats` property (`strategy.py`)
-- ✅ **Scheduling** — `time_window()`, `weekday_filter()` as entry conditions
+- ✅ **Scheduling** — `time_window()`, `utc_time_window()`, `weekday_filter()` as entry conditions; `utc_datetime_exit()` for precise close scheduling
 - ✅ **Account info** — Equity, available margin, IM/MM amounts, margin utilisation, aggregated Greeks
 - ✅ **Logging** — File + console logging to `logs/trading.log` (audit trail)
 
@@ -81,6 +81,10 @@ CoincallTrader/
 ├── multileg_orderbook.py   # Smart chunked multi-leg execution
 ├── rfq.py                  # RFQ block-trade execution ($50k+ notional)
 ├── account_manager.py      # AccountSnapshot, PositionMonitor, margin/equity queries
+├── strategies/
+│   ├── __init__.py
+│   ├── micro_strangle.py   # Micro strangle live test strategy
+│   └── rfq_endurance.py    # 3-cycle RFQ endurance test strategy
 ├── requirements.txt
 ├── .env                    # API keys (gitignored)
 ├── docs/
@@ -90,7 +94,9 @@ CoincallTrader/
 │   ├── test_strategy_framework.py   # 72/72 unit assertions
 │   ├── test_strategy_layer.py       # 51/51 strategy layer assertions
 │   ├── test_live_dry_run.py         # 27/27 integration assertions
-│   └── test_complex_option_selection.py  # 32/32 compound selection assertions
+│   ├── test_complex_option_selection.py  # 32/32 compound selection assertions
+│   ├── test_rfq_comparison.py       # RFQ quote vs orderbook (strangle)
+│   └── test_rfq_iron_condor.py      # RFQ quote vs orderbook (iron condor)
 ├── logs/                   # Runtime logs (gitignored)
 └── archive/                # Legacy code (gitignored)
 ```
@@ -424,6 +430,37 @@ smart_config = SmartExecConfig(
 - [x] `tests/test_live_dry_run.py` — 27/27 integration test assertions
 - [x] `tests/test_complex_option_selection.py` — 32/32 compound option selection assertions
 - [x] Workspace cleanup — 6 legacy files moved to archive/
+
+---
+
+### Phase 4.5: RFQ Comparison Fix + Endurance Testing ✅ COMPLETE (Feb 23, 2026)
+**Goal:** Fix critical bug in RFQ orderbook comparison and validate with live market data.
+
+**Bug Description:**
+`get_orderbook_cost()` always used `leg.side` to determine ask/bid, but for simple structures (strangles) all legs have `side="BUY"`. When `action="sell"`, it should check bids (what we'd receive), not asks. This made sell-side orderbook comparison meaningless — reporting +180% "improvement" because it was comparing against the wrong side of the book.
+
+**Fixes Applied to `rfq.py`:**
+1. **`get_orderbook_cost(legs, action="buy")`** — Added `action` parameter. Computes `effectively_buying = (leg.side == "BUY") == want_to_buy` to select correct orderbook side (ask for buying, bid for selling).
+2. **`calculate_improvement()`** — Unified to single formula `(orderbook - quote) / |orderbook| * 100` for both directions. Was previously inverted for sell side.
+3. **`execute()`** — Passes `action=action` through to `get_orderbook_cost()`.
+
+**Additional Changes:**
+- `_close_rfq()` docstring in `trade_lifecycle.py` — removed stale "legs as BUY" comment
+- Added `utc_time_window()` entry condition and `utc_datetime_exit()` exit condition to `strategy.py`
+- Created `strategies/rfq_endurance.py` — 3-cycle endurance test strategy
+
+**Validation Results:**
+- Strangle: BUY quotes +0 to +4%, SELL quotes +7 to +14% (was +180%)
+- Iron condor (mixed BUY/SELL legs): BUY +2 to +5.5%, SELL +6.2 to +6.3%
+- 3-cycle endurance test: all cycles completed, clean shutdown
+
+**Deliverables:**
+- [x] Fixed `get_orderbook_cost()`, `calculate_improvement()`, `execute()` in `rfq.py`
+- [x] Fixed stale docstrings in `trade_lifecycle.py`
+- [x] `utc_time_window()` and `utc_datetime_exit()` in `strategy.py`
+- [x] `strategies/rfq_endurance.py` — endurance test strategy
+- [x] `tests/test_rfq_comparison.py` — strangle RFQ quote monitoring
+- [x] `tests/test_rfq_iron_condor.py` — iron condor RFQ quote monitoring
 
 ---
 

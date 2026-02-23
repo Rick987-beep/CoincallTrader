@@ -335,6 +335,59 @@ def time_exit(hour: int, minute: int = 0) -> ExitCondition:
     return _check
 
 
+def utc_time_window(
+    start: "datetime",
+    end: "datetime",
+) -> EntryCondition:
+    """
+    Only allow entry when UTC time is within [start, end).
+
+    Unlike time_window() which uses hour-of-day, this uses full datetimes
+    so it works for minute-precision scheduled entries.
+
+    Args:
+        start: Earliest UTC datetime to allow entry.
+        end: Latest UTC datetime (exclusive) to allow entry.
+    """
+    def _check(account: AccountSnapshot) -> bool:
+        now = datetime.now(timezone.utc)
+        ok = start <= now < end
+        if not ok:
+            logger.debug(
+                f"utc_time_window({start.strftime('%H:%M')}-{end.strftime('%H:%M')}): "
+                f"now={now.strftime('%H:%M:%S')} — blocked"
+            )
+        return ok
+    _check.__name__ = (
+        f"utc_time_window({start.strftime('%H:%M')}-{end.strftime('%H:%M')})"
+    )
+    return _check
+
+
+def utc_datetime_exit(dt: "datetime") -> ExitCondition:
+    """
+    Close the trade at or after a specific UTC datetime.
+
+    Unlike time_exit() which uses hour-of-day, this uses a full datetime
+    so it is unambiguous across midnight boundaries and supports
+    minute-precision scheduling.
+
+    Args:
+        dt: UTC datetime at which to trigger exit.
+    """
+    def _check(account: AccountSnapshot, trade: "TradeLifecycle") -> bool:
+        now = datetime.now(timezone.utc)
+        triggered = now >= dt
+        if triggered:
+            logger.info(
+                f"[{trade.id}] utc_datetime_exit({dt.strftime('%H:%M')}) triggered: "
+                f"now={now.strftime('%H:%M:%S')}"
+            )
+        return triggered
+    _check.__name__ = f"utc_datetime_exit({dt.strftime('%Y-%m-%d %H:%M')})"
+    return _check
+
+
 def account_delta_limit(threshold: float) -> ExitCondition:
     """Close when account-wide absolute delta exceeds threshold."""
     def _check(account: AccountSnapshot, trade: "TradeLifecycle") -> bool:

@@ -1,7 +1,7 @@
 # Coincall API Reference
 
 **Official Documentation:** https://docs.coincall.com/  
-**Last Updated:** February 14, 2026
+**Last Updated:** February 23, 2026
 
 This document summarizes the key Coincall API endpoints and internal modules relevant to our trading system.
 
@@ -73,7 +73,6 @@ config = StrategyConfig(
     max_concurrent_trades=1,
     max_trades_per_day=1,                          # One trade per calendar day
     check_interval_seconds=30,
-    dry_run=True,
 )
 
 runner = StrategyRunner(config, ctx)
@@ -85,13 +84,14 @@ ctx.position_monitor.start()
 | Class | Purpose |
 |-------|---------|
 | `TradingContext` | DI container: auth, market_data, executor, rfq_executor, smart_executor, account_manager, position_monitor, lifecycle_manager |
-| `StrategyConfig` | Declarative definition: name, legs, entry/exit conditions, execution_mode, max_concurrent, max_trades_per_day, cooldown, on_trade_closed, dry_run |
+| `StrategyConfig` | Declarative definition: name, legs, entry/exit conditions, execution_mode, max_concurrent, max_trades_per_day, cooldown, on_trade_closed |
 | `StrategyRunner` | Tick-driven executor: checks entries, resolves legs, creates trades, delegates to LifecycleManager. Exposes `stats` property. |
 
 ### Entry Condition Factories
 | Factory | Signature | Description |
 |---------|-----------|-------------|
 | `time_window(start, end)` | `int, int → EntryCondition` | UTC hour window (e.g., 8–20) |
+| `utc_time_window(start, end)` | `time, time → EntryCondition` | UTC time window with `datetime.time` precision |
 | `weekday_filter(days)` | `list[str] → EntryCondition` | Weekday filter (e.g., `["mon","tue","wed","thu"]`) |
 | `min_available_margin_pct(pct)` | `float → EntryCondition` | Minimum available margin as % of equity |
 | `min_equity(usd)` | `float → EntryCondition` | Minimum account equity in USD |
@@ -183,13 +183,6 @@ Enriched option dict or `None`:
 5. **Delta filter** — keep options within delta range
 6. **Ranking** — pick single winner from survivors
 
-### Dry-Run Mode
-Set `dry_run=True` in `StrategyConfig` to:
-- Fetch live prices from the exchange (via `get_option_details()`)
-- Simulate entry/exit without placing real orders
-- Log estimated prices, PnL, and position details
-- Useful for validating strategies before committing capital
-
 ### StrategyRunner Lifecycle
 1. `tick(snapshot)` is called on each PositionMonitor update
 2. `_check_closed_trades()` fires `on_trade_closed` for newly finished trades
@@ -249,6 +242,7 @@ lifecycle_manager.force_close(trade.trade_id)
 | `max_loss(pct)` | `float → Callable` | Close when structure loss ≥ pct of entry cost |
 | `max_hold_hours(hours)` | `float → Callable` | Close after N hours |
 | `time_exit(hour, minute)` | `int, int → Callable` | Close at or after a specific UTC wall-clock time (e.g., `time_exit(19, 0)`) |
+| `utc_datetime_exit(dt)` | `datetime → Callable` | Close at or after a specific UTC datetime |
 | `account_delta_limit(thr)` | `float → Callable` | Close when account delta exceeds threshold |
 | `structure_delta_limit(thr)` | `float → Callable` | Close when structure delta exceeds threshold |
 | `leg_greek_limit(idx, greek, op, val)` | `... → Callable` | Close when a specific leg's Greek crosses a limit |
@@ -298,10 +292,13 @@ See [rfq.py](../rfq.py) for our RFQ execution implementation.
 
 ### Quick Start
 ```python
-from rfq import RFQExecutor, OptionLeg, create_strangle_legs
+from rfq import RFQExecutor, OptionLeg
 
 # Define a strangle structure
-legs = create_strangle_legs('28FEB26', 100000, 90000, qty=1.0)
+legs = [
+    OptionLeg('BTCUSD-28FEB26-100000-C', 'BUY', 1.0),
+    OptionLeg('BTCUSD-28FEB26-90000-P', 'BUY', 1.0),
+]
 
 # Open a long position (BUY the strangle)
 rfq = RFQExecutor()
@@ -319,12 +316,20 @@ if result.success:
 ### Key Concepts
 
 **Direction Logic:**
-- RFQs are always submitted with legs as "BUY" to the Coincall API
+- Legs specify their own `side` ("BUY" or "SELL") — simple structures have all BUY, but spreads/condors can have mixed sides
 - Market makers respond with two-way quotes (both BUY and SELL sides)
 - The quote's `side` field indicates the **market maker's** action, not ours:
   - MM `SELL` = they sell to us = **WE BUY** = positive cost (we pay)
   - MM `BUY` = they buy from us = **WE SELL** = negative cost (we receive)
 - Use the `action` parameter to filter: `'buy'` or `'sell'`
+
+**Orderbook Comparison (v0.5.1 fix):**
+- `get_orderbook_cost(legs, action)` now correctly selects ask/bid based on whether we're effectively buying or selling each leg
+- For each leg: `effectively_buying = (leg.side == "BUY") == (action == "buy")`
+  - If effectively buying → use orderbook ASK (what we'd pay)
+  - If effectively selling → use orderbook BID (what we'd receive)
+- `calculate_improvement()` uses unified formula: `(orderbook - quote) / |orderbook| * 100`
+- Positive = RFQ is cheaper than orderbook (good); negative = RFQ is more expensive
 
 **Requirements:**
 - Minimum notional: $50,000 (sum of strike values × quantity)
@@ -350,14 +355,13 @@ if result.success:
 | `RFQQuote` | Quote received from market maker (with `is_we_buy`, `is_we_sell` properties) |
 | `RFQResult` | Execution result with all details |
 | `RFQExecutor` | Main executor class |
-| `TakerAction` | Enum: BUY, SELL (what we want to do) |
 
-### Helper Functions
-| Function | Purpose |
-|----------|---------|
-| `create_strangle_legs()` | Create call+put legs for strangle |
-| `create_spread_legs()` | Create vertical spread legs |
-| `execute_rfq()` | Convenience function for quick execution |
+### Key Methods (RFQExecutor)
+| Method | Purpose |
+|--------|---------|
+| `execute(legs, action, timeout_seconds, min_improvement_pct)` | Execute RFQ with best-quote selection |
+| `get_orderbook_cost(legs, action)` | Calculate equivalent orderbook cost for comparison |
+| `calculate_improvement(quote_cost, orderbook_cost)` | Compute improvement percentage |
 
 ---
 
@@ -660,7 +664,7 @@ GET /open/account/summary/v1
 ## RFQ (Block Trades)
 
 **Important Notes:**
-- RFQs must always be submitted with legs as `"side": "BUY"` 
+- Legs specify their own `side` ("BUY" or "SELL") — simple structures use all BUY, but spreads/condors can have mixed sides
 - Market makers respond with two-way quotes (both BUY and SELL)
 - Minimum notional: $50,000 (sum of strike values)
 - Accept and Cancel endpoints require `application/x-www-form-urlencoded` content type

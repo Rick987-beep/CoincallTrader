@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.1] - 2026-02-23
+
+### Fixed - RFQ Orderbook Comparison Bug
+- **`get_orderbook_cost()`** (`rfq.py`) — Added `action` parameter. Previously always used `leg.side` to pick ask/bid, but legs are always BUY for simple structures. When `action="sell"`, we should check bids (what we'd receive), not asks. Now computes `effectively_buying = (leg.side == "BUY") == want_to_buy` to select the correct orderbook side.
+- **`calculate_improvement()`** (`rfq.py`) — Unified formula to `(orderbook - quote) / |orderbook| * 100` for both buy and sell directions. Sell-side formula was previously inverted, showing +180% "improvement" (nonsensical). After fix: BUY quotes +0 to +4%, SELL quotes +7 to +14% (realistic).
+- **`execute()`** (`rfq.py`) — Now passes `action=action` to `get_orderbook_cost()`.
+- **`_close_rfq()` docstring** (`trade_lifecycle.py`) — Removed stale "legs as BUY (Coincall requirement)" comment; now says "preserving each leg's side". Documented `rfq_min_improvement_pct` metadata key.
+
+### Added
+- **`utc_time_window(start, end)`** (`strategy.py`) — Entry condition accepting `datetime.time` objects for precise UTC scheduling (complements hour-based `time_window()`)
+- **`utc_datetime_exit(dt)`** (`strategy.py`) — Exit condition triggering at a specific UTC datetime (complements `time_exit()` which is daily)
+- **`strategies/rfq_endurance.py`** — 3-cycle RFQ endurance test strategy with UTC-scheduled open/close windows
+- **`tests/test_rfq_comparison.py`** — Strangle RFQ quote vs orderbook monitoring test (validates RFQ comparison fix)
+- **`tests/test_rfq_iron_condor.py`** — Iron condor RFQ quote monitoring test (validates mixed BUY/SELL legs)
+
+### Validated
+- 3-cycle endurance test: all cycles completed with clean shutdown, RFQ fill within 5 seconds
+- Strangle comparison: BUY quotes +0 to +4% improvement, SELL quotes +7 to +14% (no longer +180%)
+- Iron condor comparison: mixed BUY/SELL legs produce sensible improvement numbers
+
+---
+
 ## [0.5.0] - 2026-02-17
 
 ### Changed - Architecture Cleanup

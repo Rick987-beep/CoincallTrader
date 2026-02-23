@@ -129,7 +129,9 @@ def select_option(expiry_criteria, strike_criteria, option_type='C', underlying=
 
         # For delta selection, fetch delta for each option
         if strike_criteria.get('type') == 'delta':
-            expiry_options = _add_delta_to_options(expiry_options)
+            expiry_options = _add_delta_to_options(
+                expiry_options, target_delta=strike_criteria.get('value')
+            )
 
         # Select strike based on criteria
         selected_option = _select_by_strike_criteria(expiry_options, strike_criteria)
@@ -249,18 +251,43 @@ def _filter_by_expiry(options_list, expiry_criteria, option_type):
     return expiry_options
 
 
-def _add_delta_to_options(options_list):
+def _add_delta_to_options(options_list, target_delta: float = None):
     """
     Add delta values to option instruments by fetching details.
 
+    When a target_delta is provided the list is pre-sorted so that strikes
+    most likely to match the target are queried first (high strikes for
+    low call deltas, low strikes for low put deltas).  This lets us cap
+    API calls at a reasonable number without cutting off OTM options.
+
     Args:
         options_list (list): List of option instruments
+        target_delta (float|None): Target delta for pre-sorting heuristic
 
     Returns:
         list: Options with delta added
     """
+    MAX_API_CALLS = 50  # enough for any single expiry
+
+    # Pre-sort: order strikes so the region likely to contain target_delta
+    # is queried first.  For small positive deltas (far-OTM calls) we want
+    # high strikes first; for small negative deltas (far-OTM puts) we want
+    # low strikes first; otherwise sort ascending (ATM region first).
+    if target_delta is not None:
+        if 0 < target_delta < 0.25:
+            # Low call delta → high strikes first
+            sorted_options = sorted(options_list, key=lambda o: -o.get('strike', 0))
+        elif -0.25 < target_delta < 0:
+            # Low put delta → low strikes first
+            sorted_options = sorted(options_list, key=lambda o: o.get('strike', 0))
+        else:
+            # Near-ATM → sort ascending (default)
+            sorted_options = sorted(options_list, key=lambda o: o.get('strike', 0))
+    else:
+        sorted_options = list(options_list)
+
     options_with_delta = []
-    for opt in options_list[:10]:  # Limit to 10 to avoid too many API calls
+    for opt in sorted_options[:MAX_API_CALLS]:
         try:
             details = get_option_details(opt['symbolName'])
             if details and 'delta' in details:

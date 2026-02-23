@@ -1,6 +1,6 @@
 # CoincallTrader — Project Context & Knowledge Base
 
-**Last Updated:** 22 February 2026  
+**Last Updated:** 23 February 2026  
 **Maintainer:** Ulrik Deichsel
 
 This document captures important context, decisions, and setup information for continuity when working on different machines or with AI assistants.
@@ -31,7 +31,8 @@ This document captures important context, decisions, and setup information for c
 9. **trade_lifecycle.py** — Position monitoring and management
 
 ### Strategy Modules
-- **strategies/micro_strangle_test.py** — Current active strategy
+- **strategies/micro_strangle.py** — Micro strangle live test strategy
+- **strategies/rfq_endurance.py** — 3-cycle RFQ endurance test strategy with UTC scheduling
 
 ---
 
@@ -231,14 +232,17 @@ Get-Content logs\trading.log -Tail 20 -Wait
 
 ## 🎯 Active Strategies
 
-### micro_strangle_test
+### micro_strangle
 - **Status:** Active in testnet
-- **Module:** strategies/micro_strangle_test.py
-- **Description:** Test strategy for strangle options
-- **Risk Level:** Low (testnet only for now)
+- **Module:** strategies/micro_strangle.py
+- **Description:** Micro strangle with configurable delta targets
+- **Risk Level:** Low (small qty)
 
-### Future Strategies
-- [Add new strategies here as they're developed]
+### rfq_endurance
+- **Status:** Test/validation tool
+- **Module:** strategies/rfq_endurance.py
+- **Description:** 3-cycle scheduled RFQ strangle test with UTC time windows
+- **Risk Level:** Low (0.5 qty, short hold times)
 
 ---
 

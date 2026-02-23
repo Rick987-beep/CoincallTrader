@@ -16,7 +16,7 @@ import sys
 import time
 
 from strategy import build_context, StrategyRunner
-from strategies import micro_strangle_test
+from strategies import micro_strangle_test, rfq_endurance_test
 
 # =============================================================================
 # Logging
@@ -39,7 +39,8 @@ logger = logging.getLogger(__name__)
 # =============================================================================
 
 STRATEGIES = [
-    micro_strangle_test,
+    rfq_endurance_test,
+    # micro_strangle_test,
     # Add more strategy factories here, e.g.:
     # iron_condor_weekly,
 ]
@@ -62,11 +63,13 @@ def main():
     runners: list = []
 
     for factory in STRATEGIES:
-        config = factory()
-        runner = StrategyRunner(config, ctx)
-        ctx.position_monitor.on_update(runner.tick)
-        runners.append(runner)
-        logger.info(f"Strategy registered: {config.name}")
+        result = factory()
+        configs = result if isinstance(result, list) else [result]
+        for config in configs:
+            runner = StrategyRunner(config, ctx)
+            ctx.position_monitor.on_update(runner.tick)
+            runners.append(runner)
+            logger.info(f"Strategy registered: {config.name}")
 
     # ── Start ────────────────────────────────────────────────────────────
     ctx.position_monitor.start()
@@ -88,7 +91,14 @@ def main():
 
     try:
         while True:
-            time.sleep(1)
+            time.sleep(10)
+            # Auto-exit when every runner is disabled and has no active trades
+            if runners and all(
+                not r._enabled and not r.active_trades for r in runners
+            ):
+                logger.info("All strategies completed — auto-shutting down")
+                print("\n✓ All strategies completed — shutting down cleanly")
+                shutdown()
     except KeyboardInterrupt:
         shutdown()
 

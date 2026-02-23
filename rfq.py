@@ -380,22 +380,30 @@ class RFQExecutor:
     # Orderbook Comparison
     # -------------------------------------------------------------------------
     
-    def get_orderbook_cost(self, legs: List[OptionLeg]) -> Optional[float]:
+    def get_orderbook_cost(self, legs: List[OptionLeg], action: str = "buy") -> Optional[float]:
         """
-        Calculate the total cost to execute all legs on the orderbook.
+        Calculate the total cost to execute this structure on the orderbook.
         
-        For each leg:
-          - BUY: Take from asks (we pay the ask price)
-          - SELL: Hit bids (we receive the bid price)
+        The `action` parameter determines what WE want to do with the
+        structure.  Each leg's side defines the structure itself (e.g. a
+        strangle is two BUY legs).  The combination of action + leg side
+        determines which orderbook side to hit:
+        
+          action="buy"  + leg BUY  → we buy this leg  → pay the ask
+          action="buy"  + leg SELL → we sell this leg → hit the bid
+          action="sell" + leg BUY  → we sell this leg → hit the bid
+          action="sell" + leg SELL → we buy this leg  → pay the ask
         
         Args:
-            legs: List of OptionLeg objects
+            legs: List of OptionLeg objects defining the structure
+            action: "buy" or "sell" — what we want to do with the structure
             
         Returns:
-            Total cost (positive = we pay, negative = we receive net)
+            Total cost (positive = net debit, negative = net credit)
             None if orderbook data unavailable for any leg
         """
         total_cost = 0.0
+        want_to_buy = action.lower() == "buy"
         
         for leg in legs:
             try:
@@ -405,9 +413,13 @@ class RFQExecutor:
                     logger.warning(f"No orderbook data for {leg.instrument}")
                     return None
                 
-                # orderbook is the data dict directly (bids, asks)
-                if leg.side == "BUY":
-                    # Take from asks
+                # Determine effective direction for this leg
+                # "Effectively buying" = (leg is BUY and we buy the structure)
+                #                     OR (leg is SELL and we sell the structure)
+                effectively_buying = (leg.side == "BUY") == want_to_buy
+                
+                if effectively_buying:
+                    # We buy this leg → pay the ask
                     asks = orderbook.get('asks', [])
                     if not asks:
                         logger.warning(f"No asks for {leg.instrument}")
@@ -415,7 +427,7 @@ class RFQExecutor:
                     price = float(asks[0]['price'])
                     total_cost += price * leg.qty
                 else:
-                    # Hit bids
+                    # We sell this leg → hit the bid
                     bids = orderbook.get('bids', [])
                     if not bids:
                         logger.warning(f"No bids for {leg.instrument}")
@@ -437,11 +449,14 @@ class RFQExecutor:
         """
         Calculate percentage improvement of quote vs orderbook.
         
-        Improvement is positive when quote is better (we pay less or receive more).
+        Positive = quote is better than the book.
+        Works for both paying (positive cost) and receiving (negative cost):
+          - Paying  $110 vs book $115 → +4.3%  (we save money)
+          - Receiving $85 vs book $80  → +6.25% (we get more)
         
         Args:
-            quote_cost: Total cost from RFQ quote
-            orderbook_cost: Total cost on orderbook
+            quote_cost: Total cost from RFQ quote (positive=debit, negative=credit)
+            orderbook_cost: Total cost on orderbook (same sign convention)
             
         Returns:
             Improvement percentage (positive = quote is better)
@@ -449,16 +464,10 @@ class RFQExecutor:
         if orderbook_cost == 0:
             return 0.0
         
-        # If we're net paying (positive cost), lower is better
-        # If we're net receiving (negative cost), more negative is better
-        if orderbook_cost > 0:
-            # Paying: improvement = (orderbook - quote) / orderbook
-            improvement = (orderbook_cost - quote_cost) / abs(orderbook_cost) * 100
-        else:
-            # Receiving: improvement = (quote - orderbook) / |orderbook|
-            improvement = (quote_cost - orderbook_cost) / abs(orderbook_cost) * 100
-        
-        return improvement
+        # Unified formula: "how much better is the quote vs the book?"
+        # Paying less (lower positive) or receiving more (lower negative)
+        # both result in (book - quote) being positive → positive improvement.
+        return (orderbook_cost - quote_cost) / abs(orderbook_cost) * 100
     
     # -------------------------------------------------------------------------
     # High-Level Execution
@@ -509,8 +518,8 @@ class RFQExecutor:
         for leg in legs:
             logger.info(f"  {leg.qty} x {leg.instrument}")
         
-        # Step 1: Get orderbook baseline
-        orderbook_cost = self.get_orderbook_cost(legs)
+        # Step 1: Get orderbook baseline (must use same action direction)
+        orderbook_cost = self.get_orderbook_cost(legs, action=action)
         if orderbook_cost is not None:
             result.orderbook_cost = orderbook_cost
             logger.info(f"Orderbook cost baseline: {orderbook_cost:.2f}")

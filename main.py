@@ -16,7 +16,9 @@ import sys
 import time
 
 from strategy import build_context, StrategyRunner
-from strategies import micro_strangle_test, rfq_endurance_test
+from strategies import micro_strangle_test, rfq_endurance_test, reverse_iron_condor_live
+from persistence import TradeStatePersistence
+from health_check import HealthChecker
 
 # =============================================================================
 # Logging
@@ -39,7 +41,8 @@ logger = logging.getLogger(__name__)
 # =============================================================================
 
 STRATEGIES = [
-    rfq_endurance_test,
+    reverse_iron_condor_live,
+    # rfq_endurance_test,
     # micro_strangle_test,
     # Add more strategy factories here, e.g.:
     # iron_condor_weekly,
@@ -51,55 +54,147 @@ STRATEGIES = [
 # =============================================================================
 
 def main():
-    """Start the trading system."""
+    """Start the trading system with error isolation and graceful recovery."""
     logger.info("=" * 60)
     logger.info("CoincallTrader starting")
     logger.info("=" * 60)
 
-    ctx = build_context(poll_interval=2)
-    logger.info(f"Context built — {ctx.auth.base_url}")
+    try:
+        ctx = build_context(poll_interval=2)
+        logger.info(f"Context built — {ctx.auth.base_url}")
+    except Exception as e:
+        logger.error(f"Failed to build context: {e}", exc_info=True)
+        print(f"\n✗ FATAL: Could not initialize — {e}")
+        sys.exit(1)
+
+    # ── Initialize persistence and health check ──────────────────────────
+    persistence = TradeStatePersistence()
+    health_checker = HealthChecker(
+        check_interval=300,  # 5 minutes
+        account_snapshot_fn=lambda: ctx.position_monitor.snapshot()
+    )
 
     # ── Register strategies ──────────────────────────────────────────────
     runners: list = []
 
     for factory in STRATEGIES:
-        result = factory()
-        configs = result if isinstance(result, list) else [result]
-        for config in configs:
-            runner = StrategyRunner(config, ctx)
-            ctx.position_monitor.on_update(runner.tick)
-            runners.append(runner)
-            logger.info(f"Strategy registered: {config.name}")
+        try:
+            result = factory()
+            configs = result if isinstance(result, list) else [result]
+            for config in configs:
+                runner = StrategyRunner(config, ctx)
+                ctx.position_monitor.on_update(runner.tick)
+                runners.append(runner)
+                logger.info(f"Strategy registered: {config.name}")
+        except Exception as e:
+            logger.error(f"Failed to register strategy {factory.__name__}: {e}", exc_info=True)
+            print(f"✗ Warning: Could not load strategy {factory.__name__} — {e}")
+            # Don't exit — continue with other strategies
 
-    # ── Start ────────────────────────────────────────────────────────────
-    ctx.position_monitor.start()
-    logger.info(
-        f"Position monitor started (interval={ctx.position_monitor._poll_interval}s) "
-        f"— press Ctrl+C to stop"
-    )
+    if not runners:
+        logger.error("No strategies registered — exiting")
+        print("\n✗ FATAL: No valid strategies to run")
+        sys.exit(1)
+
+    # ── Start services ────────────────────────────────────────────────────
+    try:
+        ctx.position_monitor.start()
+        logger.info(
+            f"Position monitor started (interval={ctx.position_monitor._poll_interval}s) "
+            f"— press Ctrl+C to stop"
+        )
+        
+        health_checker.start()
+        logger.info("Health checker started (interval=5m)")
+    except Exception as e:
+        logger.error(f"Failed to start services: {e}", exc_info=True)
+        print(f"\n✗ FATAL: Could not start services — {e}")
+        sys.exit(1)
 
     def shutdown(sig=None, frame=None):
         logger.info("Shutting down...")
-        for r in runners:
-            r.stop()
-        ctx.position_monitor.stop()
-        logger.info("Shutdown complete")
+        try:
+            # Stop health checker first
+            health_checker.stop()
+            
+            # Close all strategies
+            for r in runners:
+                r.stop()
+            
+            # Save final trade state
+            all_active_trades = []
+            for r in runners:
+                all_active_trades.extend(r.active_trades)
+            if all_active_trades:
+                persistence.save_trades(all_active_trades)
+            
+            ctx.position_monitor.stop()
+            logger.info("Shutdown complete")
+        except Exception as e:
+            logger.error(f"Error during shutdown: {e}", exc_info=True)
         sys.exit(0)
 
     signal.signal(signal.SIGINT, shutdown)
     signal.signal(signal.SIGTERM, shutdown)
 
+    # ── Main Event Loop with Error Isolation ────────────────────────────
+    logger.info("Main event loop started — monitoring strategies")
+    consecutive_errors = 0
+    max_consecutive_errors = 10
+    last_persistence_save = time.time()
+
     try:
         while True:
-            time.sleep(10)
-            # Auto-exit when every runner is disabled and has no active trades
-            if runners and all(
-                not r._enabled and not r.active_trades for r in runners
-            ):
-                logger.info("All strategies completed — auto-shutting down")
-                print("\n✓ All strategies completed — shutting down cleanly")
-                shutdown()
+            try:
+                time.sleep(10)
+                
+                # Check if all strategies are complete
+                if runners and all(
+                    not r._enabled and not r.active_trades for r in runners
+                ):
+                    logger.info("All strategies completed — auto-shutting down")
+                    print("\n✓ All strategies completed — shutting down cleanly")
+                    shutdown()
+                
+                # Periodically save trade state (every 60 seconds)
+                now = time.time()
+                if now - last_persistence_save > 60:
+                    try:
+                        all_active_trades = []
+                        for r in runners:
+                            all_active_trades.extend(r.active_trades)
+                        if all_active_trades:
+                            persistence.save_trades(all_active_trades)
+                        last_persistence_save = now
+                    except Exception as e:
+                        logger.error(f"Failed to save trade state: {e}")
+                
+                # Log health status periodically
+                active_count = sum(1 for r in runners if r.active_trades)
+                if active_count > 0:
+                    logger.debug(f"Health check: {active_count} active trades")
+                
+                consecutive_errors = 0  # Reset on successful iteration
+                
+            except Exception as e:
+                consecutive_errors += 1
+                logger.error(
+                    f"Main loop error (iteration {consecutive_errors}/{max_consecutive_errors}): {e}",
+                    exc_info=True
+                )
+                
+                if consecutive_errors >= max_consecutive_errors:
+                    logger.error(
+                        f"Too many consecutive errors ({consecutive_errors}) — exiting"
+                    )
+                    print(f"\n✗ FATAL: Main loop failed {max_consecutive_errors} times — exiting")
+                    shutdown()
+                
+                # Back off slightly before retrying
+                time.sleep(5)
+    
     except KeyboardInterrupt:
+        logger.info("Interrupted by user")
         shutdown()
 
 

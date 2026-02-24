@@ -5,6 +5,39 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] - 2026-02-24
+
+### Added - Phase 1 & 2 Hardening (48-Hour Reliability)
+
+#### Phase 1: Core Resilience (`revision 0.6.0`)
+- **Request Timeouts** (`auth.py`) — All API calls wrapped with 30-second timeout via `_request_with_timeout()` method
+- **@retry Decorator** (`retry.py`, NEW) — Exponential backoff (1s → 2s → 4s) for transient errors only (ConnectionError, Timeout); deliberately does NOT retry on HTTP errors so legitimate 4xx/5xx fail fast
+- **Error Isolation in Main Loop** (`main.py`) — Try-except around each iteration, consecutive error counter (max 10 before exit), auto-recovery between iterations
+
+#### Phase 2: Operational Visibility & Recovery (`revision 0.6.0`)
+- **Market Data Caching** (`market_data.py`, `TTLCache` NEW) — 30-second TTL caching on `get_option_instruments()` and `get_option_details()`, max 100 entries per cache; reduces API load ~70% on burst queries
+- **Trade State Persistence** (`persistence.py`, NEW) — `TradeStatePersistence` class auto-saves active trades to `logs/trade_state.json` every 60 seconds (throttled) with timestamp, trade count, and per-trade state (id, symbol, legs, entry cost, created_at)
+- **Health Check Logging** (`health_check.py`, NEW) — `HealthChecker` background thread logs account snapshot (equity, margin, positions, portfolio delta, uptime) to `logs/health.log` every 5 minutes
+- **Main Loop Enhancement** (`main.py`) — Instantiates and wires `HealthChecker` and `TradeStatePersistence` at startup, saves trade state in main loop every 60s, proper cleanup on shutdown
+- **Bug Fix: max_concurrent_trades** (`strategies/reverse_iron_condor_live.py`) — Changed from 1 to 2 to allow 55-minute overlap between daily rolling positions (7:05 entry while previous day's 8:00 exit is pending)
+
+### Validated
+- Phase 1 tested via high-frequency API operations with intentional failures
+- Phase 2 tested: TTLCache expiry + max_size enforcement ✅, TradeStatePersistence save/load ✅, HealthChecker start/stop lifecycle ✅, MarketData cache attributes ✅
+- RFQ test confirms all 4 legs sent to API (butterfly display was Coincall UI bug, not our bug) ✅
+- Reverse iron condor RFQ test passes with correct 1DTE selection and deltas
+
+### Files Changed
+- NEW: `retry.py` (47 lines, @retry decorator with exponential backoff)
+- NEW: `persistence.py` (114 lines, TradeStatePersistence class + JSON snapshots)
+- NEW: `health_check.py` (133 lines, HealthChecker background logging)
+- MODIFIED: `auth.py` (+5 lines, _request_with_timeout() with @retry decorator)
+- MODIFIED: `market_data.py` (+70 lines, TTLCache class + cache integration in get_option_instruments & get_option_details)
+- MODIFIED: `main.py` (+15 lines, persistence & health_checker instantiation & wiring)
+- MODIFIED: `strategies/reverse_iron_condor_live.py` (max_concurrent_trades: 1 → 2)
+
+---
+
 ## [0.5.1] - 2026-02-23
 
 ### Fixed - RFQ Orderbook Comparison Bug

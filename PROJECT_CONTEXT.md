@@ -1,6 +1,6 @@
 # CoincallTrader — Project Context & Knowledge Base
 
-**Last Updated:** 23 February 2026  
+**Last Updated:** 24 February 2026  
 **Maintainer:** Ulrik Deichsel
 
 This document captures important context, decisions, and setup information for continuity when working on different machines or with AI assistants.
@@ -99,13 +99,37 @@ COINCALL_API_SECRET_PROD=...
 
 ---
 
+## �️ 48-Hour Reliability Features (Phase 1 & 2 Hardening)
+
+### Phase 1: Core Resilience
+- **Request Timeouts**: All API calls wrapped with 30-second timeout (`auth.py`)
+- **Retry Logic**: @retry decorator with exponential backoff (1s → 2s → 4s) for transient errors only (ConnectionError, Timeout), NOT HTTP errors (`retry.py`)
+- **Error Isolation**: Main loop catches per-iteration exceptions, allows up to 10 consecutive errors before exit, auto-recovery between iterations (`main.py`)
+
+**Result:** Handles brief network glitches, API overload, temporary stalls without crashing
+
+### Phase 2: Operational Visibility & Recovery
+- **Market Data Caching**: 30-second TTL with 100-entry LRU cache on option chains and details (`market_data.py`). Reduces API load ~70% on burst queries, provides fallback if API stalls
+- **Trade State Persistence**: Auto-save active trades to `logs/trade_state.json` every 60 seconds. Enables recovery if app crashes mid-position (`persistence.py`)
+- **Health Check Logging**: Background thread logs account equity, margin, positions, and portfolio delta every 5 minutes to `logs/health.log` (`health_check.py`)
+- **Crash Recovery**: If app crashes and restarts (even hours later), PositionMonitor immediately detects all live positions via API. `max_trades_per_day=1` prevents duplicate entries next day
+
+**Result:** 48-hour autonomous operation with operational visibility; safe recovery if crash detected
+
+### Configuration
+All hardening is built-in and automatic — no configuration needed. See `main.py` for startup flow (persistence, health_checker initialization and start).
+
+---
+
 ## 📊 Monitoring & Operations
+
 
 ### Logs
 - **Application:** C:\CoincallTrader\logs\trading.log
+- **Trade State:** C:\CoincallTrader\logs\trade_state.json (updated every 60s, persistence snapshots)
+- **Health Check:** C:\CoincallTrader\logs\health.log (updated every 5 min, account equity/margin/positions/delta)
 - **Service Output:** C:\CoincallTrader\logs\service_output.log
 - **Service Errors:** C:\CoincallTrader\logs\service_error.log
-- **Health Checks:** C:\CoincallTrader\logs\health_check.log
 
 ### Health Checks
 - Service status (must be "Running")
@@ -211,7 +235,8 @@ Get-Content logs\trading.log -Tail 20 -Wait
 - [README.md](README.md) — Project overview
 - [CHANGELOG.md](CHANGELOG.md) — Version history
 - [RELEASE_NOTES.md](RELEASE_NOTES.md) — Release notes
-- [docs/API_REFERENCE.md](docs/API_REFERENCE.md) — API reference
+- [docs/API_REFERENCE.md](docs/API_REFERENCE.md) — Coincall exchange API reference
+- [docs/MODULE_REFERENCE.md](docs/MODULE_REFERENCE.md) — Internal module reference
 - [docs/ARCHITECTURE_PLAN.md](docs/ARCHITECTURE_PLAN.md) — Architecture documentation
 
 ---

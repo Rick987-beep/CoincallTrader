@@ -8,26 +8,74 @@ Handles all market data retrieval including:
 - Option details and Greeks from Coincall
 - Option orderbook depth
 
+Includes LRU caching with TTL (30s) for option chains and details
+to reduce API load during burst queries and handle brief outages.
+
 Environment-agnostic - works the same for testnet and production.
 """
 
 import logging
 import requests
-from typing import Dict, List, Optional, Any
+import time
+from typing import Dict, List, Optional, Any, Tuple
 from config import BASE_URL, API_KEY, API_SECRET
 from auth import CoincallAuth
 
 logger = logging.getLogger(__name__)
 
 
+# Simple cache with TTL
+class TTLCache:
+    """Simple dict-based cache with time-to-live and max size."""
+
+    def __init__(self, ttl_seconds: int = 30, max_size: int = 100):
+        """
+        Initialize cache.
+
+        Args:
+            ttl_seconds: Time-to-live for entries (default 30s)
+            max_size: Maximum number of entries (default 100)
+        """
+        self.ttl_seconds = ttl_seconds
+        self.max_size = max_size
+        self._cache: Dict[str, Tuple[Any, float]] = {}
+
+    def get(self, key: str) -> Optional[Any]:
+        """Get cached value if it exists and hasn't expired."""
+        if key not in self._cache:
+            return None
+
+        value, timestamp = self._cache[key]
+        if time.time() - timestamp > self.ttl_seconds:
+            del self._cache[key]
+            return None
+
+        return value
+
+    def set(self, key: str, value: Any) -> None:
+        """Set cache entry, evicting oldest if at capacity."""
+        if len(self._cache) >= self.max_size:
+            # Evict oldest entry
+            oldest_key = min(self._cache.keys(), key=lambda k: self._cache[k][1])
+            del self._cache[oldest_key]
+
+        self._cache[key] = (value, time.time())
+
+    def clear(self) -> None:
+        """Clear all cache entries."""
+        self._cache.clear()
+
+
 class MarketData:
-    """Handles market data retrieval"""
+    """Handles market data retrieval with TTL caching for API resilience"""
 
     def __init__(self):
-        """Initialize market data client"""
+        """Initialize market data client with caching"""
         self.auth = CoincallAuth(API_KEY, API_SECRET, BASE_URL)
         self._price_cache = None
         self._price_cache_time = None
+        self._instruments_cache = TTLCache(ttl_seconds=30, max_size=10)
+        self._details_cache = TTLCache(ttl_seconds=30, max_size=200)
 
     def get_btc_futures_price(self, use_cache: bool = True) -> float:
         """
@@ -86,7 +134,7 @@ class MarketData:
 
     def get_option_instruments(self, underlying: str = 'BTC') -> Optional[List[Dict[str, Any]]]:
         """
-        Get available option instruments from Coincall
+        Get available option instruments from Coincall (cached for 30s).
 
         Args:
             underlying: Underlying symbol (BTC, ETH, etc.)
@@ -94,24 +142,28 @@ class MarketData:
         Returns:
             List of option instruments or None if failed
         """
+        # Check cache first
+        cache_key = f"instruments_{underlying}"
+        cached = self._instruments_cache.get(cache_key)
+        if cached is not None:
+            logger.debug(f"Using cached instruments for {underlying}")
+            return cached
+
         try:
             # Try the correct endpoint as a public request (no auth)
             endpoint = f'/open/option/getInstruments/{underlying}'
-            logger.debug(f"Trying public endpoint: {endpoint}")
+            logger.debug(f"Fetching instruments for {underlying}")
             url = f"{self.auth.base_url}{endpoint}"
-            logger.debug(f"Full URL: {url}")
             response = requests.get(url, timeout=10)
-            logger.debug(f"Public request status: {response.status_code}")
-            logger.debug(f"Response headers: {response.headers}")
-            logger.debug(f"Response text: {response.text[:500]}")  # First 500 chars
             
             if response.status_code == 200:
                 try:
                     data = response.json()
-                    logger.debug(f"Parsed response: {data}")
                     if data.get('code') == 0 and data.get('data'):
                         instruments = data['data']
                         if isinstance(instruments, list) and len(instruments) > 0:
+                            # Cache the result
+                            self._instruments_cache.set(cache_key, instruments)
                             logger.debug(f"Retrieved {len(instruments)} option instruments for {underlying}")
                             return instruments
                 except Exception as e:
@@ -120,10 +172,11 @@ class MarketData:
             # If public request fails, try with authentication
             logger.debug("Public request failed, trying with authentication")
             response = self.auth.get(endpoint)
-            logger.debug(f"Auth response: {response}")
             if self.auth.is_successful(response):
                 data = response.get('data', [])
                 if isinstance(data, list) and len(data) > 0:
+                    # Cache the result
+                    self._instruments_cache.set(cache_key, data)
                     logger.debug(f"Retrieved {len(data)} option instruments for {underlying} with auth")
                     return data
             
@@ -136,7 +189,7 @@ class MarketData:
 
     def get_option_details(self, symbol: str) -> Optional[Dict[str, Any]]:
         """
-        Get detailed information for a specific option
+        Get detailed information for a specific option (cached for 30s).
 
         Args:
             symbol: Option symbol
@@ -144,12 +197,20 @@ class MarketData:
         Returns:
             Dict with option details or None if failed
         """
+        # Check cache first
+        cached = self._details_cache.get(symbol)
+        if cached is not None:
+            logger.debug(f"Using cached details for {symbol}")
+            return cached
+
         try:
             # Try the option details endpoint
             response = self.auth.get(f'/open/option/detail/v1/{symbol}')
             
             if self.auth.is_successful(response):
                 details = response.get('data', {})
+                # Cache the result
+                self._details_cache.set(symbol, details)
                 logger.debug(f"Retrieved details for {symbol}")
                 return details
             else:
@@ -162,8 +223,11 @@ class MarketData:
                 if response.status_code == 200:
                     data = response.json()
                     if data.get('code') == 0 and data.get('data'):
+                        details = data['data']
+                        # Cache the result
+                        self._details_cache.set(symbol, details)
                         logger.debug(f"Retrieved details for {symbol} (public)")
-                        return data['data']
+                        return details
                 
                 logger.error(f"Failed to get details for {symbol}: {response.get('msg')}")
                 return None

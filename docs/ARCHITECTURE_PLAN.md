@@ -1,8 +1,8 @@
 # CoincallTrader Architecture & Development Plan
 
-**Version:** 1.8  
-**Date:** February 23, 2026  
-**Status:** Phase 5 (Strategy Layer) + Structure Templates + DTE Selection + RFQ Comparison Fix
+**Version:** 1.9  
+**Date:** February 24, 2026  
+**Status:** Phase 5 (Strategy Layer) + Phase 1–2 Hardening (48-Hour Reliability)
 
 ---
 
@@ -31,11 +31,12 @@ This document outlines the transformation of CoincallTrader from a simple option
 - ✅ **Scheduling** — `time_window()`, `utc_time_window()`, `weekday_filter()` as entry conditions; `utc_datetime_exit()` for precise close scheduling
 - ✅ **Account info** — Equity, available margin, IM/MM amounts, margin utilisation, aggregated Greeks
 - ✅ **Logging** — File + console logging to `logs/trading.log` (audit trail)
+- ✅ **Phase 1 Hardening** — Request timeouts (30s), @retry decorator with exponential backoff (1-2-4s), main loop error isolation (max 10 consecutive errors before exit) (`auth.py`, `retry.py`, `main.py`)
+- ✅ **Phase 2 Reliability** — Market data caching with 30s TTL & max 100 entries (`market_data.py`), trade state persistence to `logs/trade_state.json` every 60s for crash recovery (`persistence.py`), background health check logging every 5 minutes (`health_check.py`), fixed `max_concurrent_trades=2` for daily rolling positions
 
 ### Not yet implemented
 - ⬜ Multi-instrument support (futures, spot)
 - ⬜ Web dashboard for monitoring
-- ⬜ Persistent state storage (DB) and crash recovery
 - ⬜ Margin alerts (email/webhook)
 - ⬜ Historical P&L tracking
 - ⬜ Expiry-aware rolling
@@ -44,7 +45,8 @@ This document outlines the transformation of CoincallTrader from a simple option
 
 ## Coincall API Reference
 
-See [API_REFERENCE.md](API_REFERENCE.md) for full endpoint documentation, response formats, and code examples.
+See [API_REFERENCE.md](API_REFERENCE.md) for exchange endpoint documentation and response formats.
+See [MODULE_REFERENCE.md](MODULE_REFERENCE.md) for internal module documentation and code examples.
 
 Key facts:
 - Official docs: https://docs.coincall.com/
@@ -73,14 +75,17 @@ CoincallTrader/
 ├── main.py                 # Entry point — wires TradingContext, registers runners
 ├── strategy.py             # Strategy framework (TradingContext, StrategyConfig, StrategyRunner)
 ├── config.py               # Environment config (.env loading)
-├── auth.py                 # HMAC-SHA256 API authentication
-├── market_data.py          # Option chains, orderbooks, BTC price
+├── auth.py                 # HMAC-SHA256 API authentication with timeouts & retries
+├── retry.py                # @retry decorator with exponential backoff
+├── market_data.py          # Option chains, orderbooks, BTC price; TTLCache caching
 ├── option_selection.py     # LegSpec, resolve_legs(), select_option(), find_option(), straddle(), strangle()
 ├── trade_execution.py      # Order placement, cancellation, status queries
 ├── trade_lifecycle.py      # TradeState machine, TradeLeg, LifecycleManager, exit conditions (incl. time_exit)
 ├── multileg_orderbook.py   # Smart chunked multi-leg execution
 ├── rfq.py                  # RFQ block-trade execution ($50k+ notional)
 ├── account_manager.py      # AccountSnapshot, PositionMonitor, margin/equity queries
+├── persistence.py          # TradeStatePersistence: JSON snapshots for crash recovery
+├── health_check.py         # HealthChecker: background health logging every 5 minutes
 ├── strategies/
 │   ├── __init__.py
 │   ├── micro_strangle.py   # Micro strangle live test strategy
@@ -89,7 +94,8 @@ CoincallTrader/
 ├── .env                    # API keys (gitignored)
 ├── docs/
 │   ├── ARCHITECTURE_PLAN.md
-│   └── API_REFERENCE.md
+│   ├── API_REFERENCE.md
+│   └── MODULE_REFERENCE.md
 ├── tests/
 │   ├── test_strategy_framework.py   # 72/72 unit assertions
 │   ├── test_strategy_layer.py       # 51/51 strategy layer assertions

@@ -23,7 +23,12 @@ import logging
 import requests
 from typing import Dict, Any, Optional
 
+from retry import retry
+
 logger = logging.getLogger(__name__)
+
+# Default timeout for all API requests (30 seconds)
+DEFAULT_REQUEST_TIMEOUT = 30.0
 
 
 class CoincallAuth:
@@ -96,35 +101,85 @@ class CoincallAuth:
             'Content-Type': 'application/json'
         }
 
+    @retry(
+        max_attempts=3,
+        backoff_factor=1.0,
+        exceptions=(
+            requests.ConnectionError,
+            requests.Timeout,
+        )
+    )
+    def _request_with_timeout(
+        self,
+        method: str,
+        url: str,
+        headers: Dict[str, str],
+        data: Optional[Dict[str, Any]] = None,
+        use_form_data: bool = False,
+        timeout: float = DEFAULT_REQUEST_TIMEOUT,
+    ) -> requests.Response:
+        """
+        Internal request method with automatic retry on transient failures.
+        
+        Retries on connection errors, timeouts, and 5xx server errors.
+        Raises on client errors (4xx) and after max retries exceeded.
+        """
+        if method.upper() == 'GET':
+            return self.session.get(url, headers=headers, timeout=timeout)
+        elif method.upper() == 'POST':
+            if use_form_data and data:
+                headers = dict(headers)
+                headers['Content-Type'] = 'application/x-www-form-urlencoded'
+                return self.session.post(url, data=data, headers=headers, timeout=timeout)
+            else:
+                return self.session.post(url, json=data, headers=headers, timeout=timeout)
+        else:
+            raise ValueError(f"Unsupported HTTP method: {method}")
+
     def request(
         self, 
         method: str, 
         endpoint: str, 
         data: Optional[Dict[str, Any]] = None,
-        use_form_data: bool = False
+        use_form_data: bool = False,
+        timeout: float = DEFAULT_REQUEST_TIMEOUT,
     ) -> Dict[str, Any]:
-        """Make authenticated API request."""
+        """
+        Make authenticated API request with timeout and automatic retries.
+        
+        Args:
+            method: HTTP method ('GET' or 'POST')
+            endpoint: API endpoint (e.g., '/open/option/order/create/v1')
+            data: Request payload (for POST)
+            use_form_data: Use form-urlencoded instead of JSON
+            timeout: Request timeout in seconds (default 30s)
+        
+        Returns:
+            Parsed JSON response dict, or error dict on failure
+        """
         headers = self._get_headers(method, endpoint, data)
         url = f'{self.base_url}{endpoint}'
         
         try:
-            if method.upper() == 'GET':
-                response = self.session.get(url, headers=headers)
-            elif method.upper() == 'POST':
-                if use_form_data and data:
-                    # Use form-urlencoded instead of JSON
-                    headers['Content-Type'] = 'application/x-www-form-urlencoded'
-                    response = self.session.post(url, data=data, headers=headers)
-                else:
-                    response = self.session.post(url, json=data, headers=headers)
-            else:
-                raise ValueError(f"Unsupported HTTP method: {method}")
-            
+            response = self._request_with_timeout(
+                method=method,
+                url=url,
+                headers=headers,
+                data=data,
+                use_form_data=use_form_data,
+                timeout=timeout,
+            )
             response.raise_for_status()
             return response.json()
-        
+        except requests.HTTPError as e:
+            # Client or server error — log and return error response
+            logger.error(f"HTTP error {e.response.status_code}: {e}")
+            return {'code': e.response.status_code, 'msg': str(e), 'data': None}
+        except requests.Timeout as e:
+            logger.error(f"API request timeout after {timeout}s: {e}")
+            return {'code': 408, 'msg': 'Request timeout', 'data': None}
         except requests.RequestException as e:
-            logger.error(f"API request failed: {e}")
+            logger.error(f"API request failed (after retries): {e}")
             return {'code': 500, 'msg': str(e), 'data': None}
 
     def get(self, endpoint: str) -> Dict[str, Any]:

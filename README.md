@@ -3,7 +3,7 @@
 A strategy-driven options trading system for the [Coincall](https://www.coincall.com/) exchange.  
 Strategies are declared as configuration — not coded as classes — and the framework handles entry checks, leg resolution, execution, lifecycle management, and exits automatically.
 
-**Current version:** 0.5.1 — RFQ Comparison Fix + Endurance Testing
+**Current version:** 0.6.0 — Phase 1 & 2 Hardening (48-Hour Reliability)
 
 ## Highlights
 
@@ -19,6 +19,8 @@ Strategies are declared as configuration — not coded as classes — and the fr
 - **Position monitoring**: Background polling with live Greeks, PnL, account snapshots, and tick-driven strategy execution ✅
 - **Multi-leg native**: Strangles, Iron Condors, Butterflies — any structure as one lifecycle ✅
 - **HMAC-SHA256 authentication**: Secure API access via `auth.py` ✅
+- **Phase 1 Hardening**: Request timeouts (30s), exponential backoff retries (1-2-4s), main loop error isolation ✅ 
+- **Phase 2 Reliability**: Market data caching (30s TTL), trade state persistence (60s snapshots), health check logging (5min intervals) ✅
 
 ## Quick Start
 
@@ -93,7 +95,8 @@ CoincallTrader/
 ├── account_manager.py              # AccountManager, PositionMonitor, AccountSnapshot
 ├── docs/
 │   ├── ARCHITECTURE_PLAN.md        # Roadmap, phases, requirements
-│   └── API_REFERENCE.md            # Coincall API & internal module reference
+│   ├── API_REFERENCE.md            # Coincall exchange API endpoints & formats
+│   └── MODULE_REFERENCE.md         # Internal module docs (strategies, lifecycle, execution)
 ├── tests/
 │   ├── test_strategy_framework.py  # Unit tests — config, context, conditions
 │   ├── test_strategy_layer.py      # Strategy layer integration tests
@@ -235,7 +238,8 @@ python3 tests/test_complex_option_selection.py
 ## Documentation
 
 - **[Architecture Plan](docs/ARCHITECTURE_PLAN.md)** — Phases, requirements, and roadmap
-- **[API Reference](docs/API_REFERENCE.md)** — Coincall API endpoints and internal module docs
+- **[API Reference](docs/API_REFERENCE.md)** — Coincall exchange API endpoints and formats
+- **[Module Reference](docs/MODULE_REFERENCE.md)** — Internal module documentation (strategies, lifecycle, execution)
 - **[Changelog](CHANGELOG.md)** — Version history
 - **[Release Notes](RELEASE_NOTES.md)** — Detailed release notes
 

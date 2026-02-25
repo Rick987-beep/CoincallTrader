@@ -570,7 +570,7 @@ class StrategyRunner:
             if trade.state == TradeState.OPEN:
                 pnl = trade.structure_pnl(account)
                 hold = trade.hold_seconds or 0
-                logger.info(
+                logger.debug(
                     f"[{self._strategy_id}] trade {trade.id} OPEN "
                     f"hold={hold:.0f}s PnL={pnl:+.4f}"
                 )
@@ -582,7 +582,7 @@ class StrategyRunner:
 
     def _should_open(self, account: AccountSnapshot) -> bool:
         """Evaluate all entry gates.  All must pass to open."""
-        logger.info(f"[{self._strategy_id}] evaluating entry conditions...")
+        logger.debug(f"[{self._strategy_id}] evaluating entry conditions...")
 
         # Gate 1: max concurrent trades
         active = self.active_trades

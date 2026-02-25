@@ -909,7 +909,7 @@ class LifecycleManager:
                 elif trade.state == TradeState.OPEN:
                     pnl = trade.structure_pnl(account)
                     hold = trade.hold_seconds or 0
-                    logger.info(
+                    logger.debug(
                         f"Trade {trade.id}: OPEN hold={hold:.0f}s PnL={pnl:+.4f} "
                         f"— checking exit conditions"
                     )

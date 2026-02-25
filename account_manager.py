@@ -153,7 +153,7 @@ class AccountManager:
                     'timestamp': time.time()
                 }
                 self.last_update = time.time()
-                logger.info(f"Account info retrieved: ${self._account_info_cache['available_margin']:.2f} available")
+                logger.debug(f"Account info retrieved: ${self._account_info_cache['available_margin']:.2f} available")
                 return self._account_info_cache
             else:
                 logger.error(f"Failed to get account info: {response.get('msg')}")
@@ -211,7 +211,7 @@ class AccountManager:
                         }
                         self._positions_cache.append(position)
                     
-                    logger.info(f"Retrieved {len(self._positions_cache)} open positions")
+                    logger.debug(f"Retrieved {len(self._positions_cache)} open positions")
                     self.last_update = time.time()
                     return self._positions_cache
             

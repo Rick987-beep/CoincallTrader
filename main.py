@@ -59,7 +59,7 @@ def main():
     logger.info("=" * 60)
 
     try:
-        ctx = build_context(poll_interval=2)
+        ctx = build_context(poll_interval=10)
         logger.info(f"Context built — {ctx.auth.base_url}")
     except Exception as e:
         logger.error(f"Failed to build context: {e}", exc_info=True)

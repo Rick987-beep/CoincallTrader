@@ -16,7 +16,7 @@ import sys
 import time
 
 from strategy import build_context, StrategyRunner
-from strategies import micro_strangle_test, rfq_endurance_test, reverse_iron_condor_live
+from strategies import micro_strangle_test, rfq_endurance_test, reverse_iron_condor_live, long_strangle_2day_test
 from persistence import TradeStatePersistence
 from health_check import HealthChecker
 
@@ -41,11 +41,10 @@ logger = logging.getLogger(__name__)
 # =============================================================================
 
 STRATEGIES = [
-    reverse_iron_condor_live,
+    long_strangle_2day_test,
+    # reverse_iron_condor_live,
     # rfq_endurance_test,
     # micro_strangle_test,
-    # Add more strategy factories here, e.g.:
-    # iron_condor_weekly,
 ]
 
 
@@ -85,6 +84,10 @@ def main():
                 runner = StrategyRunner(config, ctx)
                 ctx.position_monitor.on_update(runner.tick)
                 runners.append(runner)
+                # Post-creation hook (e.g. multi-day state attachment)
+                on_created = config.metadata.get("on_runner_created")
+                if callable(on_created):
+                    on_created(runner)
                 logger.info(f"Strategy registered: {config.name}")
         except Exception as e:
             logger.error(f"Failed to register strategy {factory.__name__}: {e}", exc_info=True)

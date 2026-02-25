@@ -9,9 +9,11 @@ Import them here for convenient access from main.py.
 from strategies.micro_strangle import micro_strangle_test
 from strategies.rfq_endurance import rfq_endurance_test
 from strategies.reverse_iron_condor_live import reverse_iron_condor_live
+from strategies.long_strangle_2day_test import long_strangle_2day_test
 
 __all__ = [
     "micro_strangle_test",
     "rfq_endurance_test",
     "reverse_iron_condor_live",
+    "long_strangle_2day_test",
 ]

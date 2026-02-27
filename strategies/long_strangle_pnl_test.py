@@ -1,31 +1,38 @@
 """
-Long Strangle — 2-Day VPS Test Strategy
+Long Strangle — 2-Hour PnL Monitoring Test
 
-Opens a long strangle each morning at 07:00 UTC for two consecutive days.
+Opens a long strangle immediately and monitors PnL-based exits for 2 hours.
 Must be run through main.py to get full hardening (persistence, health
 checks, error isolation, retry with exponential backoff).
 
-Structure (1DTE):
-  - BUY call  δ ≈ +0.08  (0.6 BTC)
-  - BUY put   δ ≈ −0.08  (0.6 BTC)
+Purpose:    Validate that open-position PnL monitoring and exit triggers work.
 
-Entry:      07:00–07:05 UTC daily
-Exit:       PnL ≥ 10% of entry cost  OR  19:00 UTC hard close
-Cycles:     2 days, then auto-stop
-Retries:    Up to 3 entry attempts per day
-Execution:  RFQ with limit-order fallback
+Structure (1DTE):
+  - BUY call  δ ≈ +0.08  (0.01 BTC)
+  - BUY put   δ ≈ −0.08  (0.01 BTC)
+
+Entry:      Immediately on launch (wide 24h window)
+Exit:       PnL ≥ 20% of entry cost  OR  2 hours after fill
+Cycles:     1, then auto-stop
+Retries:    Up to 3 entry attempts
+Execution:  Limit orders (orderbook)
+
+Pass criteria:
+  - Either profit_target(20%) fires  → PnL exit works ✓
+  - Or max_hold_hours(2) fires       → time fallback works,
+    and logs confirm PnL was tracked throughout ✓
 
 Usage:
     # In main.py STRATEGIES list:
-    from strategies import long_strangle_2day_test
-    STRATEGIES = [long_strangle_2day_test]
+    from strategies import long_strangle_pnl_test
+    STRATEGIES = [long_strangle_pnl_test]
 """
 
 import logging
 from datetime import datetime, timezone, timedelta
 
 from option_selection import strangle
-from strategy import StrategyConfig, time_exit, profit_target
+from strategy import StrategyConfig, max_hold_hours, profit_target
 from trade_lifecycle import TradeState
 
 logger = logging.getLogger(__name__)
@@ -33,22 +40,19 @@ logger = logging.getLogger(__name__)
 
 # ── Parameters ───────────────────────────────────────────────────────────────
 
-QTY = 0.6                          # BTC per leg
+QTY = 0.01                         # BTC per leg (tiny — orderbook sized)
 DTE = 1                            # 1 day to expiry
 CALL_DELTA = 0.08                  # target call delta
 PUT_DELTA = -0.08                  # target put delta
 
-ENTRY_HOUR = 7                     # 07:00 UTC
-ENTRY_MINUTE = 0
-ENTRY_WINDOW_MIN = 5               # 5-minute entry window
+ENTRY_WINDOW_MIN = 1440            # 24h window — enter immediately on launch
 
-EXIT_HOUR = 19                     # 19:00 UTC hard close
-EXIT_MINUTE = 0
+MAX_HOLD_HOURS = 2                 # close after 2 hours if TP not hit
 
-PROFIT_TARGET_PCT = 0.10           # exit when PnL ≥ 10% of entry cost
+PROFIT_TARGET_PCT = 0.20           # exit when PnL ≥ 20% of entry cost
 CHECK_INTERVAL = 10                # seconds between tick evaluations
-MAX_CYCLES = 2                     # total cycles (1 per day), then stop
-MAX_ATTEMPTS_PER_DAY = 3           # entry retries per day
+MAX_CYCLES = 1                     # single test cycle, then auto-stop
+MAX_ATTEMPTS_PER_DAY = 3           # entry retries
 
 
 # ── Multi-Day State ─────────────────────────────────────────────────────────
@@ -122,7 +126,7 @@ class _MultiDayState:
         Called by StrategyRunner when a trade transitions to CLOSED or FAILED.
 
         Only CLOSED trades count as completed cycles.  FAILED trades
-        (e.g. RFQ + limit both failed) do not consume a cycle — the
+        (e.g. limit order failed) do not consume a cycle — the
         strategy retries via the daily attempt counter.
 
         Signature: (TradeLifecycle, AccountSnapshot) -> None
@@ -138,19 +142,21 @@ class _MultiDayState:
         pnl = trade.structure_pnl(account)
         entry_cost = trade.total_entry_cost()
         roi = (pnl / abs(entry_cost) * 100) if entry_cost else 0.0
+        hold_s = trade.hold_seconds or 0
 
         logger.info(
             f"\n═══ CYCLE {self.completed_cycles}/{MAX_CYCLES} COMPLETE ═══\n"
             f"  Entry Cost:  ${entry_cost:.2f}\n"
             f"  PnL:         ${pnl:.2f}\n"
             f"  ROI:         {roi:+.1f}%\n"
+            f"  Hold Time:   {hold_s / 60:.1f} min\n"
             f"  Trade ID:    {trade.id}"
         )
 
         if self.completed_cycles >= MAX_CYCLES:
             logger.info(
                 f"\n{'=' * 60}\n"
-                f"✓ 2-DAY TEST COMPLETE — {MAX_CYCLES} CYCLES FINISHED\n"
+                f"✓ PnL MONITORING TEST COMPLETE\n"
                 f"{'=' * 60}"
             )
             if self._runner:
@@ -191,31 +197,31 @@ def _daily_minute_window(hour: int, minute: int, duration_min: int):
 
 # ── Strategy Factory ────────────────────────────────────────────────────────
 
-def long_strangle_2day_test() -> StrategyConfig:
+def long_strangle_pnl_test() -> StrategyConfig:
     """
-    Long strangle 2-day VPS test.
+    Long strangle 2-hour PnL monitoring test.
 
     Returns a StrategyConfig for registration in main.py's STRATEGIES list.
     After StrategyRunner creation, main.py calls the 'on_runner_created'
     metadata hook to attach the runner for auto-stop.
     """
+    now_utc = datetime.now(timezone.utc)
     logger.info(
         f"\n{'=' * 60}\n"
-        f"LONG STRANGLE 2-DAY TEST\n"
-        f"  Entry:   {ENTRY_HOUR:02d}:{ENTRY_MINUTE:02d} UTC "
-        f"({ENTRY_WINDOW_MIN}m window)\n"
+        f"LONG STRANGLE — PnL MONITORING TEST\n"
+        f"  Launch:  {now_utc.strftime('%Y-%m-%d %H:%M:%S')} UTC\n"
         f"  Exit:    TP {PROFIT_TARGET_PCT * 100:.0f}% or "
-        f"{EXIT_HOUR:02d}:{EXIT_MINUTE:02d} UTC\n"
+        f"max hold {MAX_HOLD_HOURS}h\n"
         f"  Legs:    buy C(δ{CALL_DELTA}) + P(δ{PUT_DELTA}), "
         f"{QTY} BTC, {DTE}DTE\n"
-        f"  Cycles:  {MAX_CYCLES} days\n"
-        f"  Retries: {MAX_ATTEMPTS_PER_DAY}/day\n"
-        f"  Mode:    RFQ → limit fallback\n"
+        f"  Cycles:  {MAX_CYCLES}\n"
+        f"  Retries: {MAX_ATTEMPTS_PER_DAY}\n"
+        f"  Mode:    limit orders (orderbook)\n"
         f"{'=' * 60}"
     )
 
     return StrategyConfig(
-        name="long_strangle_2day_test",
+        name="long_strangle_pnl_test",
         legs=strangle(
             qty=QTY,
             call_delta=CALL_DELTA,
@@ -224,23 +230,20 @@ def long_strangle_2day_test() -> StrategyConfig:
             side=1,   # BUY
         ),
         entry_conditions=[
-            _daily_minute_window(ENTRY_HOUR, ENTRY_MINUTE, ENTRY_WINDOW_MIN),
+            _daily_minute_window(0, 0, ENTRY_WINDOW_MIN),  # wide open — enter now
             _state.entry_gate,   # LAST — increments attempt counter
         ],
         exit_conditions=[
-            profit_target(PROFIT_TARGET_PCT * 100),  # framework takes %, e.g. 10 for 10%
-            time_exit(EXIT_HOUR, EXIT_MINUTE),
+            profit_target(PROFIT_TARGET_PCT * 100),  # 20% of entry cost
+            max_hold_hours(MAX_HOLD_HOURS),           # 2h fallback
         ],
-        execution_mode="rfq",
-        rfq_action="buy",
+        execution_mode="limit",
         max_concurrent_trades=1,
         max_trades_per_day=0,          # managed by entry_gate (not framework)
         cooldown_seconds=60,
         check_interval_seconds=CHECK_INTERVAL,
         on_trade_closed=_state.on_trade_closed,
         metadata={
-            "rfq_timeout_seconds": 60,
-            "rfq_fallback": "limit",           # limit-order fallback if RFQ fails
             "on_runner_created": _state.set_runner,
         },
     )

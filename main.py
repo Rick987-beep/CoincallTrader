@@ -16,7 +16,7 @@ import sys
 import time
 
 from strategy import build_context, StrategyRunner
-from strategies import micro_strangle_test, rfq_endurance_test, reverse_iron_condor_live, long_strangle_2day_test
+from strategies import micro_strangle_test, rfq_endurance_test, reverse_iron_condor_live, long_strangle_pnl_test
 from persistence import TradeStatePersistence
 from health_check import HealthChecker
 
@@ -41,7 +41,7 @@ logger = logging.getLogger(__name__)
 # =============================================================================
 
 STRATEGIES = [
-    long_strangle_2day_test,
+    long_strangle_pnl_test,
     # reverse_iron_condor_live,
     # rfq_endurance_test,
     # micro_strangle_test,

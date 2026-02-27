@@ -79,6 +79,11 @@ class TradeLeg:
     # Populated when matched to exchange position
     position_id: Optional[str] = None
 
+    def __post_init__(self):
+        """Ensure fill_price is always float (API may return strings)."""
+        if self.fill_price is not None:
+            self.fill_price = float(self.fill_price)
+
     @property
     def is_filled(self) -> bool:
         return self.filled_qty >= self.qty
@@ -203,7 +208,7 @@ class TradeLifecycle:
         for leg in self.open_legs:
             if leg.fill_price is not None:
                 sign = 1 if leg.side == 1 else -1  # buy = debit, sell = credit
-                total += sign * leg.fill_price * leg.filled_qty
+                total += sign * float(leg.fill_price) * leg.filled_qty
         return total
 
     def summary(self, account: Optional[AccountSnapshot] = None) -> str:
@@ -505,7 +510,7 @@ class LifecycleManager:
             for i, leg in enumerate(trade.open_legs):
                 leg.filled_qty = leg.qty
                 if i < len(result.legs):
-                    leg.fill_price = result.legs[i].get('price', 0.0)
+                    leg.fill_price = float(result.legs[i].get('price', 0.0))
             logger.info(f"Trade {trade.id} opened via RFQ (all legs filled)")
             return True
 
@@ -669,7 +674,7 @@ class LifecycleManager:
             for i, leg in enumerate(trade.close_legs):
                 leg.filled_qty = leg.qty
                 if i < len(result.legs):
-                    leg.fill_price = result.legs[i].get('price', 0.0)
+                    leg.fill_price = float(result.legs[i].get('price', 0.0))
             logger.info(f"Trade {trade.id} closed via RFQ")
             return True
 

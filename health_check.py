@@ -78,7 +78,7 @@ class HealthChecker:
                 time.sleep(0.1)
 
     def _log_health_status(self) -> None:
-        """Log current health status."""
+        """Log current health status. Uses DEBUG for normal checks, WARNING for problems."""
         uptime_secs = int(time.time() - self._start_time)
         uptime_str = self._format_uptime(uptime_secs)
 
@@ -88,6 +88,8 @@ class HealthChecker:
             f"═══════════════════════════════════════════════════════════════════",
             f"Uptime: {uptime_str}",
         ]
+
+        log_level = logging.DEBUG  # default: quiet unless problems detected
 
         # Try to get account snapshot
         if self.account_snapshot_fn:
@@ -101,15 +103,26 @@ class HealthChecker:
                         f"Net Delta: {snapshot.net_delta:+.4f}",
                         f"Open Positions: {snapshot.position_count}",
                     ])
+                    # Escalate to WARNING if margin is high or equity is very low
+                    if snapshot.margin_utilization > 80:
+                        log_level = logging.WARNING
+                        status_lines.append("⚠ HIGH MARGIN UTILIZATION")
+                    if snapshot.equity < 100:
+                        log_level = logging.WARNING
+                        status_lines.append("⚠ LOW EQUITY")
+                else:
+                    log_level = logging.WARNING
+                    status_lines.append("⚠ Account snapshot returned None")
             except Exception as e:
-                status_lines.append(f"Account snapshot failed: {e}")
+                log_level = logging.WARNING
+                status_lines.append(f"⚠ Account snapshot failed: {e}")
         else:
             status_lines.append("Account snapshot: (not configured)")
 
         status_lines.append(f"═══════════════════════════════════════════════════════════════════")
 
-        # Log as single INFO to group them
-        logger.info("\n" + "\n".join(status_lines))
+        # Log at DEBUG normally, WARNING only when something looks wrong
+        logger.log(log_level, "\n" + "\n".join(status_lines))
 
     @staticmethod
     def _format_uptime(seconds: int) -> str:

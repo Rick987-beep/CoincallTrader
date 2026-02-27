@@ -25,7 +25,7 @@ import logging
 from datetime import datetime, timezone, timedelta
 
 from option_selection import strangle
-from strategy import StrategyConfig, time_exit
+from strategy import StrategyConfig, time_exit, profit_target
 from trade_lifecycle import TradeState
 
 logger = logging.getLogger(__name__)
@@ -189,39 +189,6 @@ def _daily_minute_window(hour: int, minute: int, duration_min: int):
     return _check
 
 
-# ── Exit condition: profit target (% of entry cost) ────────────────────────
-
-def _profit_target_pct(pct: float):
-    """
-    Exit when structure PnL ≥ pct × |entry cost|.
-
-    For a long strangle (debit trade), total_entry_cost() is positive.
-    PnL represents unrealised gain from the position.
-
-    Signature: (AccountSnapshot, TradeLifecycle) -> bool
-    """
-    _logged = set()
-
-    def _check(account, trade) -> bool:
-        cost = trade.total_entry_cost()
-        if cost == 0:
-            return False
-        pnl = trade.structure_pnl(account)
-        target = abs(cost) * pct
-        hit = pnl >= target
-
-        if hit and trade.id not in _logged:
-            _logged.add(trade.id)
-            logger.info(
-                f"🎯 Profit target hit: PnL ${pnl:.2f} ≥ ${target:.2f} "
-                f"({pct * 100:.0f}% of ${cost:.2f} entry cost)"
-            )
-        return hit
-
-    _check.__name__ = f"profit_target({pct * 100:.0f}%)"
-    return _check
-
-
 # ── Strategy Factory ────────────────────────────────────────────────────────
 
 def long_strangle_2day_test() -> StrategyConfig:
@@ -261,7 +228,7 @@ def long_strangle_2day_test() -> StrategyConfig:
             _state.entry_gate,   # LAST — increments attempt counter
         ],
         exit_conditions=[
-            _profit_target_pct(PROFIT_TARGET_PCT),
+            profit_target(PROFIT_TARGET_PCT * 100),  # framework takes %, e.g. 10 for 10%
             time_exit(EXIT_HOUR, EXIT_MINUTE),
         ],
         execution_mode="rfq",

@@ -68,6 +68,7 @@ def main():
 
     # ── Initialize persistence and health check ──────────────────────────
     persistence = TradeStatePersistence()
+    ctx.persistence = persistence  # Wire into TradingContext for trade history logging
     health_checker = HealthChecker(
         check_interval=300,  # 5 minutes
         account_snapshot_fn=lambda: ctx.position_monitor.snapshot()

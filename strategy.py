@@ -90,6 +90,7 @@ class TradingContext:
     account_manager: AccountManager
     position_monitor: PositionMonitor
     lifecycle_manager: LifecycleManager
+    persistence: Optional[Any] = None  # TradeStatePersistence (optional)
 
 
 def build_context(
@@ -720,16 +721,25 @@ class StrategyRunner:
         """
         Detect trades that transitioned to CLOSED or FAILED since the last tick.
         Fire the on_trade_closed callback for each newly-closed trade.
+        Persist completed trades to history log if persistence is available.
         """
         for trade in self.all_trades:
             if trade.state in (TradeState.CLOSED, TradeState.FAILED):
                 if trade.id not in self._known_closed_ids:
                     self._known_closed_ids.add(trade.id)
-                    pnl = trade.structure_pnl(account) if trade.state == TradeState.CLOSED else 0.0
+                    pnl = trade.realized_pnl if trade.realized_pnl is not None else 0.0
                     logger.info(
                         f"[{self._strategy_id}] trade {trade.id} → {trade.state.value} "
                         f"(PnL={pnl:+.4f})"
                     )
+                    # Persist to trade history log
+                    if self.ctx.persistence and trade.state == TradeState.CLOSED:
+                        try:
+                            self.ctx.persistence.save_completed_trade(trade)
+                        except Exception as e:
+                            logger.error(
+                                f"[{self._strategy_id}] failed to persist trade {trade.id}: {e}"
+                            )
                     if self.config.on_trade_closed:
                         try:
                             self.config.on_trade_closed(trade, account)
@@ -758,25 +768,34 @@ class StrategyRunner:
                 "today_trades": 0, "today_pnl": 0.0,
             }
 
-        # We can only compute approximate PnL from entry costs stored on the trade.
-        # structure_pnl requires a live snapshot, so we use total_entry_cost as a proxy.
         total_hold = 0.0
+        total_pnl = 0.0
+        wins = 0
+        losses = 0
         today = datetime.now(timezone.utc).date()
         today_count = 0
+        today_pnl = 0.0
 
         for t in closed:
+            pnl = t.realized_pnl if t.realized_pnl is not None else 0.0
+            total_pnl += pnl
+            if pnl > 0:
+                wins += 1
+            elif pnl < 0:
+                losses += 1
             if t.hold_seconds is not None:
                 total_hold += t.hold_seconds
             if datetime.fromtimestamp(t.created_at, tz=timezone.utc).date() == today:
                 today_count += 1
+                today_pnl += pnl
 
         return {
             "total": len(closed),
-            "wins": 0,          # Requires last-known PnL — updated by on_trade_closed
-            "losses": 0,
-            "win_rate": 0.0,
-            "total_pnl": 0.0,
+            "wins": wins,
+            "losses": losses,
+            "win_rate": wins / len(closed) if closed else 0.0,
+            "total_pnl": total_pnl,
             "avg_hold_seconds": total_hold / len(closed) if closed else 0.0,
             "today_trades": today_count,
-            "today_pnl": 0.0,
+            "today_pnl": today_pnl,
         }

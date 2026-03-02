@@ -141,6 +141,10 @@ class TradeLifecycle:
     close_rfq_result: Optional[Any] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
 
+    # Populated at close time — persists after positions disappear
+    realized_pnl: Optional[float] = None
+    exit_cost: Optional[float] = None
+
     # -- Helpers --------------------------------------------------------------
 
     @property
@@ -210,6 +214,35 @@ class TradeLifecycle:
                 sign = 1 if leg.side == 1 else -1  # buy = debit, sell = credit
                 total += sign * float(leg.fill_price) * leg.filled_qty
         return total
+
+    def total_exit_cost(self) -> float:
+        """Sum of fill_price * qty across all close legs (signed by side).
+
+        Close legs have the opposite side to open legs, so a BUY open
+        becomes a SELL close.  The sign convention matches total_entry_cost:
+        buy = debit (+), sell = credit (-).
+        """
+        total = 0.0
+        for leg in self.close_legs:
+            if leg.fill_price is not None:
+                sign = 1 if leg.side == 1 else -1
+                total += sign * float(leg.fill_price) * leg.filled_qty
+        return total
+
+    def _finalize_close(self) -> None:
+        """Capture realized PnL at close time.
+
+        Called exactly once when the trade transitions to CLOSED.
+        Computes PnL from entry vs exit fill prices so the result
+        persists after exchange positions disappear.
+
+        PnL = -(entry_cost + exit_cost)
+        For a buy-to-open: entry_cost is positive (debit), exit_cost is
+        negative (credit from selling), so net = credit - debit.
+        """
+        self.exit_cost = self.total_exit_cost()
+        entry = self.total_entry_cost()
+        self.realized_pnl = -(entry + self.exit_cost)
 
     def summary(self, account: Optional[AccountSnapshot] = None) -> str:
         legs_str = ", ".join(
@@ -675,7 +708,8 @@ class LifecycleManager:
                 leg.filled_qty = leg.qty
                 if i < len(result.legs):
                     leg.fill_price = float(result.legs[i].get('price', 0.0))
-            logger.info(f"Trade {trade.id} closed via RFQ")
+            trade._finalize_close()
+            logger.info(f"Trade {trade.id} closed via RFQ (PnL={trade.realized_pnl:+.4f})")
             return True
 
         # RFQ close failed — try fallback if configured
@@ -729,7 +763,8 @@ class LifecycleManager:
             # Everything already closed from a previous partial close
             trade.state = TradeState.CLOSED
             trade.closed_at = time.time()
-            logger.info(f"Trade {trade.id}: all close legs already filled → CLOSED")
+            trade._finalize_close()
+            logger.info(f"Trade {trade.id}: all close legs already filled → CLOSED (PnL={trade.realized_pnl:+.4f})")
             return True
 
         params = trade.metadata.get("execution_params") or ExecutionParams()
@@ -849,7 +884,8 @@ class LifecycleManager:
                 leg.order_id = ls.order_id
             trade.state = TradeState.CLOSED
             trade.closed_at = time.time()
-            logger.info(f"Trade {trade.id}: all close legs filled → CLOSED")
+            trade._finalize_close()
+            logger.info(f"Trade {trade.id}: all close legs filled → CLOSED (PnL={trade.realized_pnl:+.4f})")
 
         elif result == "failed":
             logger.error(f"Trade {trade.id}: close fill manager exhausted requote rounds")

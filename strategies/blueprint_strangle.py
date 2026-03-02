@@ -87,10 +87,10 @@ def _on_trade_closed(trade, account) -> None:
     Called by the framework when a trade transitions to CLOSED or FAILED.
 
     Use this to log results, update external systems, or trigger follow-up
-    actions.  The callback receives the TradeLifecycle object (with PnL,
+    actions.  The callback receives the TradeLifecycle object (with realized_pnl,
     hold time, leg details) and the current AccountSnapshot.
     """
-    pnl = trade.structure_pnl(account)
+    pnl = trade.realized_pnl if trade.realized_pnl is not None else 0.0
     entry_cost = trade.total_entry_cost()
     roi = (pnl / abs(entry_cost) * 100) if entry_cost else 0.0
     hold_seconds = trade.hold_seconds or 0

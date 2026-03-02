@@ -139,7 +139,7 @@ class _MultiDayState:
             return
 
         self.completed_cycles += 1
-        pnl = trade.structure_pnl(account)
+        pnl = trade.realized_pnl if trade.realized_pnl is not None else 0.0
         entry_cost = trade.total_entry_cost()
         roi = (pnl / abs(entry_cost) * 100) if entry_cost else 0.0
         hold_s = trade.hold_seconds or 0

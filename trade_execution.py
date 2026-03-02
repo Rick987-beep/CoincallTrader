@@ -131,6 +131,44 @@ class TradeExecutor:
 # =============================================================================
 
 @dataclass
+class ExecutionPhase:
+    """
+    One phase in a multi-phase execution plan.
+
+    The LimitFillManager walks through phases in order.  When a phase's
+    duration expires and legs are still unfilled, stale orders are cancelled
+    and the manager advances to the next phase with new pricing.
+
+    Attributes:
+        pricing: How to price orders in this phase:
+            "aggressive" — ask × (1 + buffer) for buys, bid / (1 + buffer) for sells
+            "mid"        — (bid + ask) / 2
+            "top_of_book" — best ask for buys, best bid for sells (no buffer)
+            "mark"       — orderbook mark price (falls back to mid if unavailable)
+        duration_seconds: How long to stay in this phase before advancing.
+            Must be ≥ 10 (one polling tick).
+        buffer_pct: % buffer applied when pricing="aggressive" (default 2.0).
+            Ignored by other pricing modes.
+        reprice_interval: Seconds between cancel-and-requote within this phase
+            (default 30.0).  Set to a value > duration_seconds to never reprice
+            within the phase (place once, wait for fill or phase timeout).
+    """
+    pricing: str = "aggressive"
+    duration_seconds: float = 30.0
+    buffer_pct: float = 2.0
+    reprice_interval: float = 30.0
+
+    def __post_init__(self):
+        allowed = {"aggressive", "mid", "top_of_book", "mark"}
+        if self.pricing not in allowed:
+            raise ValueError(f"Unknown pricing '{self.pricing}', must be one of {allowed}")
+        if self.duration_seconds < 10:
+            self.duration_seconds = 10.0
+        if self.reprice_interval < 10:
+            self.reprice_interval = 10.0
+
+
+@dataclass
 class ExecutionParams:
     """
     Per-trade fill-management configuration.
@@ -139,14 +177,28 @@ class ExecutionParams:
     orders are filled.  Stored on TradeLifecycle so the LimitFillManager
     can read them.
 
+    Two usage modes (backward-compatible):
+
+    1. **Flat fields (legacy / default):** Set fill_timeout_seconds,
+       aggressive_buffer_pct, max_requote_rounds.  This creates a single
+       implicit aggressive phase that requotes every fill_timeout_seconds
+       up to max_requote_rounds times — identical to the original behavior.
+
+    2. **Phases list (new):** Provide an ordered list of ExecutionPhase
+       objects.  Each phase defines its own pricing, duration, and reprice
+       interval.  When all phases are exhausted without a fill, the manager
+       returns "failed".  When phases is set, the flat fields are ignored.
+
     Attributes:
-        fill_timeout_seconds: Seconds before cancelling and requoting unfilled orders.
-        aggressive_buffer_pct: % beyond best price (buy: ask×1.02, sell: bid/1.02).
-        max_requote_rounds: Give up and fail after this many requote cycles.
+        fill_timeout_seconds: (Legacy) Seconds before requoting. Ignored if phases set.
+        aggressive_buffer_pct: (Legacy) % beyond best price. Ignored if phases set.
+        max_requote_rounds: (Legacy) Max requote cycles. Ignored if phases set.
+        phases: Ordered list of ExecutionPhase objects. None = use legacy flat fields.
     """
     fill_timeout_seconds: float = 30.0
     aggressive_buffer_pct: float = 2.0
     max_requote_rounds: int = 10
+    phases: Optional[List[ExecutionPhase]] = None
 
 
 # =============================================================================
@@ -182,15 +234,26 @@ class LimitFillManager:
     """
     Manages fill detection and requoting for a set of limit-order legs.
 
+    Supports two execution modes (selected automatically by ExecutionParams):
+
+    **Legacy mode** (params.phases is None):
+      Single aggressive pricing phase with timeout-based requoting.
+      Identical to the original behaviour.
+
+    **Phased mode** (params.phases is a list):
+      Walks through an ordered list of ExecutionPhase objects.  Each phase
+      defines its own pricing strategy, duration, and reprice interval.
+      When a phase expires, orders are cancelled and the next phase begins.
+      After the last phase exhausts, returns ``"failed"``.
+
     Lifecycle:
       1. Caller creates the manager with an executor + params.
       2. ``place_all(legs)`` places initial orders for every leg.
       3. Each tick, caller invokes ``check()`` which:
          a. Polls order status for every unfilled leg.
          b. If all filled → returns ``"filled"``.
-         c. If timeout elapsed → cancels stale orders, re-places at
-            fresh aggressive prices → returns ``"requoted"``.
-         d. If max requote rounds exhausted → returns ``"failed"``.
+         c. If phase/timeout elapsed → advance or requote → returns ``"requoted"``.
+         d. If all phases/requote rounds exhausted → returns ``"failed"``.
          e. Otherwise → returns ``"pending"``.
       4. ``cancel_all()`` cancels any outstanding orders (for cleanup).
       5. ``filled_legs`` returns the final fill details.
@@ -205,7 +268,23 @@ class LimitFillManager:
         self._legs: List[_LegFillState] = []
         self._round_started_at: float = time.time()
 
+        # Phased execution state
+        self._using_phases: bool = self._params.phases is not None and len(self._params.phases) > 0
+        self._phase_index: int = 0
+        self._phase_started_at: float = time.time()
+        self._last_reprice_at: float = time.time()
+
     # -- Public API -----------------------------------------------------------
+
+    @property
+    def _current_phase(self) -> Optional[ExecutionPhase]:
+        """Current execution phase, or None if not using phases or all exhausted."""
+        if not self._using_phases:
+            return None
+        phases = self._params.phases
+        if self._phase_index < len(phases):
+            return phases[self._phase_index]
+        return None
 
     def place_all(self, legs: List[Dict[str, Any]]) -> bool:
         """
@@ -220,14 +299,24 @@ class LimitFillManager:
             On failure, already-placed orders are cancelled.
         """
         self._legs = []
-        self._round_started_at = time.time()
+        now = time.time()
+        self._round_started_at = now
+        self._phase_started_at = now
+        self._last_reprice_at = now
+        self._phase_index = 0
+
+        if self._using_phases:
+            phase = self._current_phase
+            phase_label = f"phase 1/{len(self._params.phases)} ({phase.pricing})"
+        else:
+            phase_label = "aggressive (legacy)"
 
         for leg in legs:
             symbol = leg.symbol if hasattr(leg, 'symbol') else leg['symbol']
             qty = leg.qty if hasattr(leg, 'qty') else leg['qty']
             side = leg.side if hasattr(leg, 'side') else leg['side']
 
-            price = self._get_aggressive_price(symbol, side)
+            price = self._get_price_for_current_mode(symbol, side)
             if price is None:
                 side_label = "buy" if side == 1 else "sell"
                 logger.error(f"LimitFillManager: no orderbook price for {symbol} ({side_label})")
@@ -254,10 +343,10 @@ class LimitFillManager:
             side_label = state.side_label
             logger.info(
                 f"LimitFillManager: placed {side_label} {qty}x {symbol} @ ${price} "
-                f"(order {state.order_id})"
+                f"(order {state.order_id}) [{phase_label}]"
             )
 
-        logger.info(f"LimitFillManager: all {len(self._legs)} orders placed, awaiting fills")
+        logger.info(f"LimitFillManager: all {len(self._legs)} orders placed, awaiting fills [{phase_label}]")
         return True
 
     def check(self) -> str:
@@ -271,6 +360,20 @@ class LimitFillManager:
             "pending"  — still waiting for fills
         """
         # 1. Poll each unfilled leg
+        self._poll_fills()
+
+        # 2. All filled?
+        if all(ls.is_filled for ls in self._legs):
+            return "filled"
+
+        # 3. Timeout / phase advancement
+        if self._using_phases:
+            return self._check_phased()
+        else:
+            return self._check_legacy()
+
+    def _poll_fills(self) -> None:
+        """Poll order status for all unfilled legs."""
         for ls in self._legs:
             if ls.is_filled or not ls.order_id:
                 continue
@@ -295,14 +398,10 @@ class LimitFillManager:
             except Exception as e:
                 logger.error(f"LimitFillManager: error checking {ls.order_id}: {e}")
 
-        # 2. All filled?
-        if all(ls.is_filled for ls in self._legs):
-            return "filled"
-
-        # 3. Timeout check → requote
+    def _check_legacy(self) -> str:
+        """Original timeout-based requoting logic (when phases is None)."""
         elapsed = time.time() - self._round_started_at
         if elapsed > self._params.fill_timeout_seconds:
-            # Check if any leg has exhausted requote rounds
             unfilled = [ls for ls in self._legs if not ls.is_filled]
             if any(ls.requote_count >= self._params.max_requote_rounds for ls in unfilled):
                 logger.error(
@@ -315,6 +414,49 @@ class LimitFillManager:
                 f"LimitFillManager: timeout ({elapsed:.0f}s > "
                 f"{self._params.fill_timeout_seconds}s) — requoting unfilled legs"
             )
+            self._requote_unfilled()
+            return "requoted"
+
+        return "pending"
+
+    def _check_phased(self) -> str:
+        """Phase-based execution: advance through phases, reprice within phases."""
+        now = time.time()
+        phase = self._current_phase
+
+        if phase is None:
+            # All phases exhausted
+            logger.error("LimitFillManager: all execution phases exhausted — failed")
+            return "failed"
+
+        phase_elapsed = now - self._phase_started_at
+        reprice_elapsed = now - self._last_reprice_at
+
+        # Phase expired → advance to next phase
+        if phase_elapsed >= phase.duration_seconds:
+            self._phase_index += 1
+            next_phase = self._current_phase
+            if next_phase is None:
+                logger.error("LimitFillManager: all execution phases exhausted — failed")
+                return "failed"
+
+            logger.info(
+                f"LimitFillManager: phase {self._phase_index}/{len(self._params.phases)} "
+                f"({phase.pricing}) expired after {phase_elapsed:.0f}s "
+                f"→ advancing to phase {self._phase_index + 1} ({next_phase.pricing})"
+            )
+            self._phase_started_at = now
+            self._last_reprice_at = now
+            self._requote_unfilled()
+            return "requoted"
+
+        # Within-phase reprice interval elapsed → reprice at same pricing
+        if reprice_elapsed >= phase.reprice_interval:
+            logger.info(
+                f"LimitFillManager: repricing within phase {self._phase_index + 1} "
+                f"({phase.pricing}) after {reprice_elapsed:.0f}s"
+            )
+            self._last_reprice_at = now
             self._requote_unfilled()
             return "requoted"
 
@@ -352,8 +494,8 @@ class LimitFillManager:
     # -- Internal -------------------------------------------------------------
 
     def _requote_unfilled(self) -> None:
-        """Cancel stale orders and re-place at fresh aggressive prices."""
-        self._round_started_at = time.time()  # reset timeout for next round
+        """Cancel stale orders and re-place at fresh prices (phase-aware)."""
+        self._round_started_at = time.time()  # reset timeout for legacy mode
 
         for ls in self._legs:
             if ls.is_filled:
@@ -370,7 +512,7 @@ class LimitFillManager:
 
             # Re-place at fresh price
             try:
-                price = self._get_aggressive_price(ls.symbol, ls.side)
+                price = self._get_price_for_current_mode(ls.symbol, ls.side)
                 if price is None:
                     logger.error(f"LimitFillManager: no price for {ls.symbol} on requote")
                     continue
@@ -394,8 +536,67 @@ class LimitFillManager:
             except Exception as e:
                 logger.error(f"LimitFillManager: requote exception for {ls.symbol}: {e}")
 
+    # -- Pricing Helpers -------------------------------------------------------
+
+    def _get_price_for_current_mode(self, symbol: str, side: int) -> Optional[float]:
+        """
+        Get order price based on the current execution mode.
+
+        In phased mode: delegates to the current phase's pricing strategy.
+        In legacy mode: uses aggressive pricing with buffer.
+        """
+        if self._using_phases:
+            phase = self._current_phase
+            if phase is not None:
+                return self._get_phased_price(symbol, side, phase)
+            # Fallback if phases exhausted (shouldn't happen, but safe)
+            return self._get_aggressive_price(symbol, side)
+        else:
+            return self._get_aggressive_price(symbol, side)
+
+    def _get_phased_price(self, symbol: str, side: int, phase: ExecutionPhase) -> Optional[float]:
+        """Compute price according to the phase's pricing strategy."""
+        try:
+            ob = get_option_orderbook(symbol)
+            if not ob:
+                return None
+
+            best_ask = float(ob['asks'][0]['price']) if ob.get('asks') else None
+            best_bid = float(ob['bids'][0]['price']) if ob.get('bids') else None
+
+            if phase.pricing == "aggressive":
+                buffer = 1 + (phase.buffer_pct / 100.0)
+                if side == 1 and best_ask is not None:
+                    return round(best_ask * buffer, 2)
+                elif side == 2 and best_bid is not None:
+                    return round(best_bid / buffer, 2)
+
+            elif phase.pricing == "mid":
+                if best_bid is not None and best_ask is not None:
+                    mid = (best_bid + best_ask) / 2
+                    return round(mid, 2)
+
+            elif phase.pricing == "top_of_book":
+                if side == 1 and best_ask is not None:
+                    return round(best_ask, 2)
+                elif side == 2 and best_bid is not None:
+                    return round(best_bid, 2)
+
+            elif phase.pricing == "mark":
+                mark = float(ob.get('mark', 0))
+                if mark > 0:
+                    return round(mark, 2)
+                # Fall back to mid if mark unavailable
+                if best_bid is not None and best_ask is not None:
+                    return round((best_bid + best_ask) / 2, 2)
+
+            return None
+        except Exception as e:
+            logger.error(f"LimitFillManager: error computing {phase.pricing} price for {symbol}: {e}")
+            return None
+
     def _get_aggressive_price(self, symbol: str, side: int) -> Optional[float]:
-        """Fetch best bid/ask and apply aggressive buffer."""
+        """Fetch best bid/ask and apply aggressive buffer (legacy mode)."""
         try:
             ob = get_option_orderbook(symbol)
             if not ob:

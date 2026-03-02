@@ -24,6 +24,8 @@ Not covered here (see other strategies or MODULE_REFERENCE.md):
   - Smart orderbook execution (MODULE_REFERENCE.md § Smart Orderbook)
   - Custom multi-day state tracking (long_strangle_pnl_test.py in archive/)
   - Multi-leg structures like iron condors (reverse_iron_condor_live.py)
+  - Phased execution timing (ExecutionPhase / ExecutionParams)
+  - RFQ timing configuration (RFQParams)
 
 Usage:
     # In main.py STRATEGIES list:
@@ -44,6 +46,11 @@ from strategy import (
     profit_target,
     max_loss,
     max_hold_hours,
+    # Execution timing (optional — import when customizing order behavior)
+    ExecutionParams,
+    ExecutionPhase,
+    # RFQ timing (optional — import when using RFQ execution)
+    # RFQParams,  # from trade_lifecycle import RFQParams
 )
 
 logger = logging.getLogger(__name__)
@@ -151,6 +158,20 @@ def blueprint_strangle() -> StrategyConfig:
         # "smart" = chunked orderbook execution
         # "auto"  = framework picks based on notional size
         execution_mode="limit",
+
+        # ── Execution timing (optional) ──────────────────────────────────
+        # Uncomment to customize order pricing phases.  Default (None) uses
+        # legacy aggressive pricing: ask+2% for buys, bid-2% for sells,
+        # requoting every 30s up to 10 rounds.
+        #
+        # Example: quote at mark for 5 min, then go aggressive for 2 min:
+        # execution_params=ExecutionParams(phases=[
+        #     ExecutionPhase(pricing="mark",  duration_seconds=300, reprice_interval=30),
+        #     ExecutionPhase(pricing="aggressive", duration_seconds=120, buffer_pct=2.0),
+        # ]),
+        #
+        # Example: RFQ with 5-min timeout, require 2% improvement, limit fallback:
+        # rfq_params=RFQParams(timeout_seconds=300, min_improvement_pct=2.0, fallback_mode="limit"),
 
         # ── Operational limits ───────────────────────────────────────────
         max_concurrent_trades=MAX_CONCURRENT,

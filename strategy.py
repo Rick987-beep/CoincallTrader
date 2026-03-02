@@ -59,9 +59,11 @@ from multileg_orderbook import SmartExecConfig, SmartOrderbookExecutor
 from option_selection import LegSpec, resolve_legs
 from rfq import RFQExecutor
 from trade_execution import TradeExecutor
+from trade_execution import ExecutionParams, ExecutionPhase
 from trade_lifecycle import (
     ExitCondition,
     LifecycleManager,
+    RFQParams,
     TradeLifecycle,
     TradeState,
 )
@@ -475,6 +477,8 @@ class StrategyConfig:
         exit_conditions: Callables — ANY returning True triggers a close
         execution_mode: "limit", "rfq", "smart", or "auto" (notional-based routing)
         smart_config: Optional SmartExecConfig for "smart" mode
+        execution_params: Optional ExecutionParams for "limit" mode (phased pricing, timeouts)
+        rfq_params: Optional RFQParams for "rfq" mode (timeout, improvement, fallback)
         rfq_action: "buy" or "sell" — what to do on open (close is the reverse)
         max_concurrent_trades: Maximum active trades for this strategy
         cooldown_seconds: Minimum seconds between trade opens
@@ -487,6 +491,8 @@ class StrategyConfig:
     exit_conditions: List[ExitCondition] = field(default_factory=list)
     execution_mode: str = "auto"
     smart_config: Optional[SmartExecConfig] = None
+    execution_params: Optional[ExecutionParams] = None
+    rfq_params: Optional[RFQParams] = None
     rfq_action: str = "buy"
     max_concurrent_trades: int = 1
     max_trades_per_day: int = 0          # 0 = unlimited
@@ -666,6 +672,8 @@ class StrategyRunner:
                 execution_mode=exec_mode,
                 rfq_action=self.config.rfq_action,
                 smart_config=self.config.smart_config,
+                execution_params=self.config.execution_params,
+                rfq_params=self.config.rfq_params,
                 strategy_id=self._strategy_id,
                 metadata={"strategy": self._strategy_id, **self.config.metadata},
             )

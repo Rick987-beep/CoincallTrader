@@ -31,7 +31,7 @@ from enum import Enum
 from typing import Any, Callable, Dict, List, Optional
 
 from account_manager import AccountSnapshot, PositionSnapshot
-from trade_execution import TradeExecutor, LimitFillManager, ExecutionParams
+from trade_execution import TradeExecutor, LimitFillManager, ExecutionParams, ExecutionPhase
 from rfq import RFQExecutor, OptionLeg, RFQResult
 from multileg_orderbook import SmartOrderbookExecutor, SmartExecConfig
 from market_data import get_option_orderbook
@@ -52,6 +52,29 @@ class TradeState(Enum):
     CLOSING       = "closing"        # Close orders placed, waiting for fills
     CLOSED        = "closed"         # Fully closed
     FAILED        = "failed"         # Unrecoverable error
+
+
+@dataclass
+class RFQParams:
+    """
+    Typed configuration for RFQ execution.
+
+    Replaces the loose metadata keys (rfq_timeout_seconds, rfq_min_improvement_pct,
+    rfq_fallback) with a proper dataclass.  Metadata-based usage still works as a
+    fallback for backward compatibility.
+
+    Attributes:
+        timeout_seconds: Maximum time to wait for RFQ quotes (default 60).
+        min_improvement_pct: Minimum improvement vs orderbook to accept a quote.
+            0.0 = require beating the book; -999 = accept anything (default).
+        fallback_mode: Execution mode to try if RFQ fails:
+            "limit" → fall back to per-leg limit orders.
+            "smart" → fall back to smart orderbook execution.
+            None    → no fallback, mark trade FAILED.
+    """
+    timeout_seconds: float = 60.0
+    min_improvement_pct: float = -999.0
+    fallback_mode: Optional[str] = None
 
 
 @dataclass
@@ -133,6 +156,8 @@ class TradeLifecycle:
     execution_mode: Optional[str] = None  # "limit", "rfq", "smart", or None (auto-route)
     rfq_action: str = "buy"             # "buy" or "sell" — for the open
     smart_config: Optional[SmartExecConfig] = None  # Config for "smart" mode
+    execution_params: Optional[ExecutionParams] = None  # Config for "limit" mode phases/timeouts
+    rfq_params: Optional[RFQParams] = None  # Config for "rfq" mode timing/improvement
     created_at: float = field(default_factory=time.time)
     opened_at: Optional[float] = None
     closed_at: Optional[float] = None
@@ -348,6 +373,8 @@ class LifecycleManager:
         execution_mode: Optional[str] = None,
         rfq_action: str = "buy",
         smart_config: Optional[SmartExecConfig] = None,
+        execution_params: Optional[ExecutionParams] = None,
+        rfq_params: Optional[RFQParams] = None,
         strategy_id: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> TradeLifecycle:
@@ -364,6 +391,8 @@ class LifecycleManager:
                 - Multi-leg with notional < rfq_threshold → "smart"
             rfq_action: "buy" or "sell" — passed to RFQExecutor
             smart_config: SmartExecConfig — optional, can be provided for "smart" mode
+            execution_params: ExecutionParams — optional, for "limit" mode phases/timeouts
+            rfq_params: RFQParams — optional, for "rfq" mode timing/improvement
             metadata: Arbitrary context (strategy name, notes, etc.)
 
         Returns:
@@ -376,6 +405,8 @@ class LifecycleManager:
             execution_mode=execution_mode,
             rfq_action=rfq_action,
             smart_config=smart_config,
+            execution_params=execution_params,
+            rfq_params=rfq_params,
             metadata=metadata or {},
         )
         self._trades[trade.id] = trade
@@ -506,14 +537,12 @@ class LifecycleManager:
     def _open_rfq(self, trade: TradeLifecycle) -> bool:
         """Open via RFQ — atomic multi-leg execution.
 
-        Reads optional metadata keys:
+        Reads RFQ parameters from trade.rfq_params (typed) first,
+        falling back to metadata keys for backward compatibility:
           - rfq_timeout_seconds (int): Override default 60s RFQ poll timeout.
           - rfq_min_improvement_pct (float): Minimum improvement vs orderbook
               to accept a quote. Default -999 (accept anything).
           - rfq_fallback (str|None): Execution mode to try if RFQ fails.
-              "limit" → fall back to per-leg limit orders.
-              "smart" → fall back to smart orderbook execution.
-              None    → no fallback, mark trade FAILED (original behaviour).
         """
         rfq_legs = [
             OptionLeg(
@@ -524,8 +553,10 @@ class LifecycleManager:
             for leg in trade.open_legs
         ]
 
-        rfq_timeout = trade.metadata.get("rfq_timeout_seconds", 60)
-        min_improvement = trade.metadata.get("rfq_min_improvement_pct", -999.0)
+        # Read from typed RFQParams first, fall back to metadata
+        rp = trade.rfq_params
+        rfq_timeout = rp.timeout_seconds if rp else trade.metadata.get("rfq_timeout_seconds", 60)
+        min_improvement = rp.min_improvement_pct if rp else trade.metadata.get("rfq_min_improvement_pct", -999.0)
 
         result: RFQResult = self._rfq_executor.execute(
             legs=rfq_legs,
@@ -548,7 +579,7 @@ class LifecycleManager:
             return True
 
         # RFQ failed — try fallback if configured
-        fallback = trade.metadata.get("rfq_fallback")
+        fallback = rp.fallback_mode if rp else trade.metadata.get("rfq_fallback")
         if fallback:
             logger.warning(
                 f"Trade {trade.id} RFQ open failed: {result.message} "
@@ -568,12 +599,14 @@ class LifecycleManager:
     def _open_limit(self, trade: TradeLifecycle) -> bool:
         """Open via limit orders — delegates placement to LimitFillManager.
 
-        Creates a fill manager, places aggressive limit orders for all legs,
-        and stores the manager in trade metadata for tick-based fill checking.
+        Creates a fill manager, places limit orders for all legs using
+        the trade's ExecutionParams (phased or legacy), and stores the
+        manager in trade metadata for tick-based fill checking.
         """
         trade.state = TradeState.OPENING
 
-        params = trade.metadata.get("execution_params") or ExecutionParams()
+        # Typed field first, then metadata fallback, then defaults
+        params = trade.execution_params or trade.metadata.get("execution_params") or ExecutionParams()
         mgr = LimitFillManager(self._executor, params)
 
         ok = mgr.place_all(trade.open_legs)
@@ -669,13 +702,8 @@ class LifecycleManager:
         Submits the SAME leg structure as the open (preserving each leg's
         original side), but reverses the action: buy→sell or sell→buy.
 
-        Reads optional metadata keys:
-          - rfq_timeout_seconds (int): Override default 60s RFQ poll timeout.
-          - rfq_min_improvement_pct (float): Minimum improvement vs orderbook
-              to accept a quote. Default -999 (accept anything).
-          - rfq_fallback (str|None): Execution mode to try if RFQ fails.
-              On fallback, switches execution_mode so subsequent ticks use
-              the new mode (prevents infinite RFQ retry loops).
+        Reads RFQ parameters from trade.rfq_params (typed) first,
+        falling back to metadata keys for backward compatibility.
         """
         # Use the ORIGINAL open legs (preserving each leg's side)
         rfq_legs = [
@@ -690,8 +718,10 @@ class LifecycleManager:
         # Reverse the action: if we bought to open, we sell to close
         close_action = "sell" if trade.rfq_action == "buy" else "buy"
 
-        rfq_timeout = trade.metadata.get("rfq_timeout_seconds", 60)
-        min_improvement = trade.metadata.get("rfq_min_improvement_pct", -999.0)
+        # Read from typed RFQParams first, fall back to metadata
+        rp = trade.rfq_params
+        rfq_timeout = rp.timeout_seconds if rp else trade.metadata.get("rfq_timeout_seconds", 60)
+        min_improvement = rp.min_improvement_pct if rp else trade.metadata.get("rfq_min_improvement_pct", -999.0)
 
         result: RFQResult = self._rfq_executor.execute(
             legs=rfq_legs,
@@ -713,7 +743,7 @@ class LifecycleManager:
             return True
 
         # RFQ close failed — try fallback if configured
-        fallback = trade.metadata.get("rfq_fallback")
+        fallback = rp.fallback_mode if rp else trade.metadata.get("rfq_fallback")
         if fallback:
             logger.warning(
                 f"Trade {trade.id} RFQ close failed: {result.message} "
@@ -767,7 +797,7 @@ class LifecycleManager:
             logger.info(f"Trade {trade.id}: all close legs already filled → CLOSED (PnL={trade.realized_pnl:+.4f})")
             return True
 
-        params = trade.metadata.get("execution_params") or ExecutionParams()
+        params = trade.execution_params or trade.metadata.get("execution_params") or ExecutionParams()
         mgr = LimitFillManager(self._executor, params)
 
         ok = mgr.place_all(trade.close_legs)

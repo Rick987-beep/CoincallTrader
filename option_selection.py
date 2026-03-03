@@ -768,6 +768,49 @@ def straddle(
     ]
 
 
+def straddle(
+    qty: float,
+    dte = "next",
+    side: int = 1,
+    underlying: str = "BTC",
+) -> List[LegSpec]:
+    """
+    ATM straddle — buy (or sell) an ATM call and an ATM put at the same strike.
+
+    Both legs use closestStrike=0 (ATM) so they resolve to the strike
+    nearest to the current spot price.
+
+    Args:
+        qty: Contract quantity per leg.
+        dte: Days to expiry — "next" for nearest available, or int (0=0DTE, 1=1DTE, …).
+        side: 1 = buy (long straddle), 2 = sell (short straddle).
+        underlying: Underlying asset.
+
+    Returns:
+        List of two LegSpec objects [ATM call, ATM put].
+    """
+    expiry = {"dte": dte}
+    atm = {"type": "closestStrike", "value": 0}
+    return [
+        LegSpec(
+            option_type="C",
+            side=side,
+            qty=qty,
+            strike_criteria=atm,
+            expiry_criteria=expiry,
+            underlying=underlying,
+        ),
+        LegSpec(
+            option_type="P",
+            side=side,
+            qty=qty,
+            strike_criteria=atm,
+            expiry_criteria=expiry,
+            underlying=underlying,
+        ),
+    ]
+
+
 def strangle(
     qty: float,
     call_delta: float = 0.25,

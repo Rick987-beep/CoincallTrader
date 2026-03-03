@@ -5,6 +5,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.1] - 2026-03-03
+
+### Added - Telegram Notifications
+
+- **`telegram_notifier.py`** (NEW) — `TelegramNotifier` class sends high-level alerts to Telegram via Bot API. Fire-and-forget with 1 msg/sec rate limiting; never crashes the bot on failure. Silently no-ops when `TELEGRAM_BOT_TOKEN` is not set.
+- **Notifications wired at framework level** — all strategies automatically get trade open/close alerts without per-strategy code:
+  - System startup/shutdown
+  - Trade opened (strategy, legs, entry cost)
+  - Trade closed (PnL, ROI, hold time)
+  - Daily account summary (equity, UPnL, margin, delta, positions) — throttled to 1×/day
+  - Critical errors (consecutive main loop failures)
+- **`TradingContext.notifier`** (`strategy.py`) — optional `TelegramNotifier` field on the DI container
+- **`HealthChecker.notifier`** (`health_check.py`) — optional notifier param triggers daily Telegram summary alongside health checks
+
+### Configuration
+- Two new optional `.env` variables: `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`
+- If not set, all notifications silently disabled — fully backward compatible
+
+### Files Changed
+- NEW: `telegram_notifier.py` (~115 lines)
+- MODIFIED: `strategy.py` (+15 lines, notifier on TradingContext, trade open/close notifications)
+- MODIFIED: `main.py` (+10 lines, notifier instantiation, startup/shutdown/error alerts)
+- MODIFIED: `health_check.py` (+12 lines, daily summary via notifier)
+
+---
+
 ## [0.7.0] - 2026-03-02
 
 ### Added - Configurable Execution Timing & RFQ Parameters

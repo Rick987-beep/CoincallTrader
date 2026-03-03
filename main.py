@@ -19,6 +19,8 @@ from strategy import build_context, StrategyRunner
 from strategies import blueprint_strangle, rfq_endurance_test, reverse_iron_condor_live, long_strangle_pnl_test
 from persistence import TradeStatePersistence
 from health_check import HealthChecker
+from telegram_notifier import TelegramNotifier
+from config import ENVIRONMENT
 
 # =============================================================================
 # Logging
@@ -66,12 +68,17 @@ def main():
         print(f"\n✗ FATAL: Could not initialize — {e}")
         sys.exit(1)
 
-    # ── Initialize persistence and health check ──────────────────────────
+    # ── Initialize persistence, health check, and notifications ──────────
     persistence = TradeStatePersistence()
     ctx.persistence = persistence  # Wire into TradingContext for trade history logging
+
+    notifier = TelegramNotifier()
+    ctx.notifier = notifier  # Wire into TradingContext for strategy notifications
+
     health_checker = HealthChecker(
         check_interval=300,  # 5 minutes
-        account_snapshot_fn=lambda: ctx.position_monitor.snapshot()
+        account_snapshot_fn=lambda: ctx.position_monitor.snapshot(),
+        notifier=notifier,
     )
 
     # ── Register strategies ──────────────────────────────────────────────
@@ -110,6 +117,8 @@ def main():
         
         health_checker.start()
         logger.info("Health checker started (interval=5m)")
+
+        notifier.notify_startup(ENVIRONMENT)
     except Exception as e:
         logger.error(f"Failed to start services: {e}", exc_info=True)
         print(f"\n✗ FATAL: Could not start services — {e}")
@@ -118,6 +127,8 @@ def main():
     def shutdown(sig=None, frame=None):
         logger.info("Shutting down...")
         try:
+            notifier.notify_shutdown()
+
             # Stop health checker first
             health_checker.stop()
             
@@ -190,6 +201,10 @@ def main():
                 if consecutive_errors >= max_consecutive_errors:
                     logger.error(
                         f"Too many consecutive errors ({consecutive_errors}) — exiting"
+                    )
+                    notifier.notify_error(
+                        f"Main loop failed {max_consecutive_errors} consecutive times — shutting down.\n"
+                        f"Last error: {e}"
                     )
                     print(f"\n✗ FATAL: Main loop failed {max_consecutive_errors} times — exiting")
                     shutdown()

@@ -3,7 +3,7 @@
 A strategy-driven options trading system for the [Coincall](https://www.coincall.com/) exchange.  
 Strategies are declared as configuration — not coded as classes — and the framework handles entry checks, leg resolution, execution, lifecycle management, and exits automatically.
 
-**Current version:** 0.7.0 — Configurable Execution Timing
+**Current version:** 0.7.1 — Telegram Notifications
 
 ## Highlights
 
@@ -18,6 +18,7 @@ Strategies are declared as configuration — not coded as classes — and the fr
 - **LimitFillManager**: Fill detection, configurable phased pricing (mark → mid → aggressive), requote management ✅
 - **ExecutionPhase**: Declarative pricing phases for limit orders — duration, buffer, reprice interval per phase ✅
 - **RFQParams**: Typed RFQ configuration (timeout, improvement threshold, fallback mode) ✅
+- **Telegram notifications**: Trade opens/closes, daily account summary, critical errors — via Bot API ✅
 - **Position monitoring**: Background polling with live Greeks, PnL, account snapshots, and tick-driven strategy execution ✅
 - **Multi-leg native**: Strangles, Iron Condors, Butterflies — any structure as one lifecycle ✅
 - **HMAC-SHA256 authentication**: Secure API access via `auth.py` ✅
@@ -100,6 +101,7 @@ CoincallTrader/
 ├── account_manager.py              # AccountManager, PositionMonitor, AccountSnapshot
 ├── persistence.py                  # Trade state persistence (JSON snapshots for crash recovery)
 ├── health_check.py                 # Background health check logging (5-min intervals)
+├── telegram_notifier.py            # Telegram Bot API notifications (trade alerts, daily summary)
 ├── deployment/
 │   ├── health_check.ps1            # Windows service health monitoring
 │   └── monitor_dashboard.ps1       # Real-time status dashboard (PowerShell)

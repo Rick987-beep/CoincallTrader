@@ -1,3 +1,49 @@
+# Release Notes — v0.7.1 "Telegram Notifications"
+
+**Release Date:** March 3, 2026  
+**Previous Version:** v0.7.0 (Configurable Execution Timing)
+
+---
+
+## Overview
+
+v0.7.1 adds **Telegram notifications** — high-level trading alerts sent directly to your Telegram chat. Trade opens, closes (with PnL), daily account summaries, and critical errors are pushed automatically. No per-strategy code needed; all strategies get notifications at the framework level.
+
+Fully backward compatible — if no Telegram credentials are configured, everything works exactly as before.
+
+---
+
+## Setup
+
+1. Create a bot via [@BotFather](https://t.me/BotFather) on Telegram
+2. Message your bot, then visit `https://api.telegram.org/bot<TOKEN>/getUpdates` to get your chat ID
+3. Add to `.env`:
+   ```
+   TELEGRAM_BOT_TOKEN=123456:ABC-DEF...
+   TELEGRAM_CHAT_ID=123456789
+   ```
+
+## Notification Types
+
+| Event | Content | Frequency |
+|-------|---------|----------|
+| Startup | Environment, timestamp | Once on boot |
+| Shutdown | Timestamp | Once on exit |
+| Trade opened | Strategy, legs, entry cost | Each trade |
+| Trade closed | PnL, ROI, hold time, entry cost | Each trade |
+| Daily summary | Equity, UPnL, margin, delta, positions | 1×/day |
+| Critical error | Error message, count | On main loop failures |
+
+## Files Changed
+
+- **NEW:** `telegram_notifier.py` — TelegramNotifier class (~115 lines)
+- **MODIFIED:** `strategy.py` — notifier field on TradingContext, trade open/close notifications
+- **MODIFIED:** `main.py` — notifier instantiation, startup/shutdown/error alerts
+- **MODIFIED:** `health_check.py` — daily summary via notifier
+
+---
+---
+
 # Release Notes — v0.7.0 "Configurable Execution Timing"
 
 **Release Date:** March 2, 2026  

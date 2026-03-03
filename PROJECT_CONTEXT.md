@@ -1,6 +1,6 @@
 # CoincallTrader — Project Context & Knowledge Base
 
-**Last Updated:** 2 March 2026  
+**Last Updated:** 3 March 2026  
 **Maintainer:** Ulrik Deichsel
 
 This document captures important context, decisions, and setup information for continuity when working on different machines or with AI assistants.
@@ -13,7 +13,7 @@ This document captures important context, decisions, and setup information for c
 **Language:** Python 3.9+  
 **Architecture:** Tick-driven with position monitoring loop  
 **Deployment Target:** Windows Server 2022 VPS (primary), also runs on macOS locally  
-**Current Version:** 0.7.0 — Configurable Execution Timing
+**Current Version:** 0.7.1 — Telegram Notifications
 
 ---
 
@@ -35,6 +35,7 @@ This document captures important context, decisions, and setup information for c
 12. **account_manager.py** — AccountSnapshot, PositionMonitor, margin/equity queries
 13. **persistence.py** — Trade state persistence (JSON snapshots for crash recovery)
 14. **health_check.py** — Background health check logging (5-min intervals)
+15. **telegram_notifier.py** — Telegram Bot API notifications (trade opens/closes, daily summary, errors)
 
 ### Strategy Modules
 - **strategies/blueprint_strangle.py** — Blueprint strangle strategy (starting template for new strategies)
@@ -54,6 +55,10 @@ COINCALL_API_KEY_TEST=...
 COINCALL_API_SECRET_TEST=...
 COINCALL_API_KEY_PROD=...
 COINCALL_API_SECRET_PROD=...
+
+# Telegram notifications (optional — leave blank to disable)
+TELEGRAM_BOT_TOKEN=...
+TELEGRAM_CHAT_ID=...
 ```
 
 ### Key Config Details

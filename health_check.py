@@ -22,16 +22,18 @@ logger = logging.getLogger(__name__)
 class HealthChecker:
     """Monitors and logs system health at regular intervals."""
 
-    def __init__(self, check_interval: int = 300, account_snapshot_fn: Optional[Callable] = None):
+    def __init__(self, check_interval: int = 300, account_snapshot_fn: Optional[Callable] = None, notifier=None):
         """
         Initialize health checker.
 
         Args:
             check_interval: Interval between health checks in seconds (default 5 min = 300s)
             account_snapshot_fn: Function to call for latest account snapshot
+            notifier: Optional TelegramNotifier for daily summary alerts
         """
         self.check_interval = check_interval
         self.account_snapshot_fn = account_snapshot_fn
+        self._notifier = notifier
         self._running = False
         self._thread = None
         self._start_time = time.time()
@@ -110,6 +112,20 @@ class HealthChecker:
                     if snapshot.equity < 100:
                         log_level = logging.WARNING
                         status_lines.append("⚠ LOW EQUITY")
+
+                    # Telegram daily summary (throttled to 1× per ~23h inside notifier)
+                    if self._notifier:
+                        try:
+                            self._notifier.notify_daily_summary(
+                                equity=snapshot.equity,
+                                unrealized_pnl=snapshot.unrealized_pnl,
+                                margin_utilization=snapshot.margin_utilization,
+                                net_delta=snapshot.net_delta,
+                                position_count=snapshot.position_count,
+                            )
+                        except Exception:
+                            pass  # Never let notification failure affect health checks
+
                 else:
                     log_level = logging.WARNING
                     status_lines.append("⚠ Account snapshot returned None")

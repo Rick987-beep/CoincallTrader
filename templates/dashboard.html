@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CoincallTrader — Dashboard</title>
+  <script src="https://unpkg.com/htmx.org@2.0.4"></script>
+  <style>
+    /* ── Reset & Base ───────────────────────────────────────────────── */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: "SF Mono", "Fira Code", "Cascadia Code", monospace;
+      background: #0d1117; color: #c9d1d9; padding: 1rem 1.5rem;
+      font-size: 0.85rem; line-height: 1.5;
+    }
+    a { color: #58a6ff; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+
+    /* ── Header ─────────────────────────────────────────────────────── */
+    .header {
+      display: flex; justify-content: space-between; align-items: center;
+      border-bottom: 1px solid #30363d; padding-bottom: 0.75rem; margin-bottom: 1rem;
+    }
+    .header h1 { font-size: 1.1rem; color: #58a6ff; }
+    .env-badge {
+      display: inline-block; padding: 0.15rem 0.6rem; border-radius: 12px;
+      font-size: 0.75rem; font-weight: 600; text-transform: uppercase;
+    }
+    .env-testnet { background: #1f6feb33; color: #58a6ff; border: 1px solid #1f6feb; }
+    .env-production { background: #f8514933; color: #f85149; border: 1px solid #f85149; }
+
+    /* ── Panels ─────────────────────────────────────────────────────── */
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin-bottom: 1rem; }
+    @media (max-width: 900px) { .grid { grid-template-columns: 1fr; } }
+
+    .panel {
+      background: #161b22; border: 1px solid #30363d; border-radius: 6px;
+      padding: 0.8rem 1rem;
+    }
+    .panel h2 {
+      font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.05em;
+      color: #8b949e; margin-bottom: 0.6rem; border-bottom: 1px solid #21262d;
+      padding-bottom: 0.4rem;
+    }
+    .panel.full { grid-column: 1 / -1; }
+
+    /* ── Account metrics ────────────────────────────────────────────── */
+    .metrics { display: flex; flex-wrap: wrap; gap: 0.5rem 1.5rem; }
+    .metric label { color: #8b949e; font-size: 0.75rem; display: block; }
+    .metric value { font-size: 1rem; font-weight: 600; }
+    .positive { color: #3fb950; }
+    .negative { color: #f85149; }
+    .muted { color: #484f58; font-style: italic; }
+
+    /* ── Strategy cards ─────────────────────────────────────────────── */
+    .strat-card {
+      background: #0d1117; border: 1px solid #21262d; border-radius: 4px;
+      padding: 0.6rem 0.8rem; margin-bottom: 0.5rem;
+    }
+    .strat-header {
+      display: flex; justify-content: space-between; align-items: center;
+      margin-bottom: 0.4rem;
+    }
+    .strat-name { font-weight: 600; font-size: 0.9rem; }
+    .badge {
+      display: inline-block; padding: 0.1rem 0.5rem; border-radius: 10px;
+      font-size: 0.7rem; font-weight: 600;
+    }
+    .badge-active { background: #23863633; color: #3fb950; border: 1px solid #238636; }
+    .badge-paused { background: #d29922; color: #0d1117; }
+    .badge-stopped { background: #f8514933; color: #f85149; border: 1px solid #f85149; }
+    .strat-stats { color: #8b949e; font-size: 0.8rem; margin-bottom: 0.5rem; }
+    .strat-controls { display: flex; gap: 0.4rem; }
+
+    /* ── Buttons ─────────────────────────────────────────────────────── */
+    .btn {
+      padding: 0.25rem 0.7rem; border: 1px solid #30363d; border-radius: 4px;
+      background: #21262d; color: #c9d1d9; font-size: 0.75rem; cursor: pointer;
+      font-family: inherit;
+    }
+    .btn:hover { background: #30363d; }
+    .btn-green { border-color: #238636; color: #3fb950; }
+    .btn-green:hover { background: #23863644; }
+    .btn-red { border-color: #f85149; color: #f85149; }
+    .btn-red:hover { background: #f8514922; }
+
+    /* ── Positions table ────────────────────────────────────────────── */
+    table { width: 100%; border-collapse: collapse; font-size: 0.8rem; }
+    th { text-align: left; color: #8b949e; font-weight: 600; padding: 0.3rem 0.5rem;
+         border-bottom: 1px solid #21262d; }
+    td { padding: 0.3rem 0.5rem; border-bottom: 1px solid #161b2244; }
+    tr:hover td { background: #161b2288; }
+
+    /* ── Log tail ───────────────────────────────────────────────────── */
+    .log-container {
+      max-height: 320px; overflow-y: auto; background: #010409;
+      border-radius: 4px; padding: 0.5rem; font-size: 0.75rem; line-height: 1.6;
+    }
+    .log-line { white-space: pre-wrap; word-break: break-all; }
+    .log-line:nth-child(even) { background: #0d111722; }
+
+    /* ── Kill switch ────────────────────────────────────────────────── */
+    .kill-section {
+      display: flex; align-items: center; gap: 1rem;
+      padding: 0.8rem 1rem; border: 1px solid #f8514966;
+      border-radius: 6px; background: #f8514911; margin-bottom: 1rem;
+    }
+    .kill-btn {
+      padding: 0.4rem 1.2rem; background: #da3633; border: none; border-radius: 4px;
+      color: #fff; font-weight: 700; font-size: 0.85rem; cursor: pointer;
+      font-family: inherit;
+    }
+    .kill-btn:hover { background: #f85149; }
+    .kill-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+    .kill-result { color: #f85149; font-weight: 600; }
+  </style>
+</head>
+<body>
+
+  <!-- ── Header ──────────────────────────────────────────────────── -->
+  <div class="header">
+    <h1>CoincallTrader</h1>
+    <div>
+      <span class="env-badge env-{{ environment|lower }}">{{ environment }}</span>
+      <a href="/logout" style="margin-left: 1rem; font-size: 0.8rem;">Logout</a>
+    </div>
+  </div>
+
+  <!-- ── Main Grid ───────────────────────────────────────────────── -->
+  <div class="grid">
+
+    <!-- Account -->
+    <div class="panel">
+      <h2>Account</h2>
+      <div id="account"
+           hx-get="/api/account" hx-trigger="load, every 5s" hx-swap="innerHTML">
+        <p class="muted">Loading...</p>
+      </div>
+    </div>
+
+    <!-- Strategies -->
+    <div class="panel">
+      <h2>Strategies</h2>
+      <div id="strategies"
+           hx-get="/api/strategies" hx-trigger="load, every 5s" hx-swap="innerHTML">
+        <p class="muted">Loading...</p>
+      </div>
+    </div>
+
+    <!-- Positions -->
+    <div class="panel full">
+      <h2>Open Positions</h2>
+      <div id="positions"
+           hx-get="/api/positions" hx-trigger="load, every 5s" hx-swap="innerHTML">
+        <p class="muted">Loading...</p>
+      </div>
+    </div>
+
+    <!-- Log Tail -->
+    <div class="panel full">
+      <h2>Recent Logs</h2>
+      <div class="log-container" id="logs"
+           hx-get="/api/logs" hx-trigger="load, every 3s" hx-swap="innerHTML">
+        <p class="muted">Loading...</p>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- ── Kill Switch ─────────────────────────────────────────────── -->
+  <div class="kill-section">
+    <div>
+      <strong style="color: #f85149;">Kill Switch</strong>
+      <span class="muted"> — force-close ALL open positions</span>
+    </div>
+    <div id="kill-target">
+      <button class="kill-btn" id="kill-arm-btn" onclick="armKillSwitch()">ARM</button>
+    </div>
+  </div>
+
+  <script>
+    function armKillSwitch() {
+      document.getElementById('kill-target').innerHTML =
+        '<button class="kill-btn" style="background:#b62324;" ' +
+        'hx-post="/api/killswitch" hx-target="#kill-target" hx-swap="innerHTML"' +
+        '>CONFIRM — CLOSE ALL</button>';
+      htmx.process(document.getElementById('kill-target'));
+      // Auto-disarm after 5 seconds
+      setTimeout(function() {
+        var el = document.getElementById('kill-target');
+        if (el && !el.querySelector('.kill-result')) {
+          el.innerHTML = '<button class="kill-btn" id="kill-arm-btn" onclick="armKillSwitch()">ARM</button>';
+        }
+      }, 5000);
+    }
+
+    // Auto-scroll log container to bottom on each update
+    document.body.addEventListener('htmx:afterSwap', function(evt) {
+      if (evt.detail.target.id === 'logs') {
+        evt.detail.target.scrollTop = evt.detail.target.scrollHeight;
+      }
+    });
+  </script>
+
+</body>
+</html>

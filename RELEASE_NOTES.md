@@ -1,3 +1,70 @@
+# Release Notes — v0.8.0 "Web Dashboard"
+
+**Release Date:** March 3, 2026  
+**Previous Version:** v0.7.1 (Telegram Notifications)
+
+---
+
+## Overview
+
+v0.8.0 adds a **real-time web dashboard** for monitoring and controlling CoincallTrader from any browser. Built with Flask + htmx, it runs as a lightweight daemon thread inside the existing process — no separate service, no IPC, no architecture changes.
+
+The dashboard is an opt-in add-on: set `DASHBOARD_PASSWORD` in `.env` to enable it. If not set, the dashboard is completely disabled with zero impact on the trading bot.
+
+---
+
+## Features
+
+| Feature | Description |
+|---------|-------------|
+| **Account summary** | Equity, available margin, margin utilization, UPnL, net Greeks |
+| **Strategy cards** | Per-strategy status (running/paused/stopped), active trade count, win/loss stats, PnL |
+| **Strategy controls** | Pause (stop new entries), Resume, Stop (force-close active trades) |
+| **Open positions** | Table with symbol, side, qty, entry/mark price, UPnL, ROI, delta |
+| **Live log tail** | Last 80 log entries, auto-refreshing every 3 seconds |
+| **Kill switch** | Two-step (ARM → CONFIRM) force-close of all active trades, with Telegram alert |
+| **Password auth** | Session-based login via `DASHBOARD_PASSWORD` env var |
+| **Auto-refresh** | htmx polls each panel independently (every 3-5 seconds) |
+
+## Setup
+
+Add to `.env`:
+```
+DASHBOARD_PASSWORD=your_secret_here    # required — dashboard disabled without it
+DASHBOARD_PORT=8080                    # optional, default 8080
+```
+
+For remote access on the VPS, open the port in Windows Firewall, or use a Cloudflare Tunnel for zero-config HTTPS.
+
+## Architecture
+
+- Runs on a **daemon thread** inside the existing Python process
+- **Reads only** from existing objects: `TradingContext`, `StrategyRunner.stats`, `AccountSnapshot`
+- **Controls** call existing methods: `runner.enable()`, `runner.disable()`, `runner.stop()`, `lifecycle_manager.force_close()`
+- If the dashboard thread crashes, the trading bot is unaffected
+- No changes to any core module (`strategy.py`, `account_manager.py`, etc.)
+
+## Files Changed
+
+- **NEW:** `dashboard.py` — Flask app factory, routes, htmx endpoints, log handler (~280 lines)
+- **NEW:** `templates/dashboard.html` — Main page with CSS + htmx auto-polling
+- **NEW:** `templates/login.html` — Login page
+- **NEW:** `templates/_account.html` — Account metrics fragment
+- **NEW:** `templates/_strategies.html` — Strategy cards with controls
+- **NEW:** `templates/_positions.html` — Positions table
+- **NEW:** `templates/_logs.html` — Log tail fragment
+- **NEW:** `tests/test_dashboard.py` — Standalone test with mock data
+- **MODIFIED:** `main.py` — 3 lines added (import + `start_dashboard()` call)
+- **MODIFIED:** `requirements.txt` — Added `flask>=3.0.0`
+
+## Dependencies Added
+
+- `flask>=3.0.0` (pulls in Jinja2, Werkzeug, click, etc.)
+- htmx loaded from CDN — no npm/build step
+
+---
+---
+
 # Release Notes — v0.7.1 "Telegram Notifications"
 
 **Release Date:** March 3, 2026  

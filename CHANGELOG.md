@@ -5,6 +5,42 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.0] - 2026-03-03
+
+### Added - Web Dashboard
+
+- **`dashboard.py`** (NEW) — Real-time web dashboard built with Flask + htmx. Runs as a daemon thread inside the existing process. Password-protected via `DASHBOARD_PASSWORD` env var. Silently disabled when not configured.
+- **Dashboard features:**
+  - Account summary panel (equity, margin, UPnL, net Greeks)
+  - Strategy status cards with Pause / Resume / Stop controls
+  - Open positions table (symbol, side, qty, entry/mark, UPnL, ROI, delta)
+  - Live log tail (last 80 entries, auto-refreshing every 3s via in-memory ring buffer)
+  - Kill switch with two-step confirmation (ARM → CONFIRM), sends Telegram alert
+  - Session-based login page
+  - htmx auto-polling (each panel refreshes independently every 3-5s)
+- **`templates/`** (NEW directory) — Jinja2 templates: `dashboard.html`, `login.html`, `_account.html`, `_strategies.html`, `_positions.html`, `_logs.html`
+- **`tests/test_dashboard.py`** (NEW) — Standalone dashboard test with mock data (fake positions, strategies, log entries)
+- **`DashboardLogHandler`** — `logging.Handler` subclass with ring buffer (deque) to capture recent log entries for display without modifying existing log setup
+
+### Configuration
+- Two new optional `.env` variables: `DASHBOARD_PASSWORD` (required to enable), `DASHBOARD_PORT` (default 8080)
+- If `DASHBOARD_PASSWORD` is not set, dashboard is completely disabled — zero impact on trading bot
+
+### Architecture Notes
+- No changes to any core module (`strategy.py`, `account_manager.py`, `trade_lifecycle.py`, etc.)
+- Dashboard reads existing objects: `ctx.position_monitor.latest`, `runner.stats`, `runner._enabled`
+- Controls call existing methods: `runner.enable()`, `runner.disable()`, `runner.stop()`, `ctx.lifecycle_manager.force_close()`
+- Daemon thread — if dashboard crashes, trading bot is unaffected
+
+### Files Changed
+- NEW: `dashboard.py` (~280 lines)
+- NEW: `templates/` (6 HTML files)
+- NEW: `tests/test_dashboard.py` (~230 lines)
+- MODIFIED: `main.py` (+3 lines, import + `start_dashboard()` call)
+- MODIFIED: `requirements.txt` (+1 line, `flask>=3.0.0`)
+
+---
+
 ## [0.7.1] - 2026-03-03
 
 ### Added - Telegram Notifications

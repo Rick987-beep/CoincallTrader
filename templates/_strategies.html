@@ -1,0 +1,48 @@
+{% for s in strategies %}
+<div class="strat-card">
+  <div class="strat-header">
+    <span class="strat-name">{{ s.name }}</span>
+    {% if s.enabled %}
+      <span class="badge badge-active">Running</span>
+    {% else %}
+      {% if s.active_trades > 0 %}
+        <span class="badge badge-paused">Paused</span>
+      {% else %}
+        <span class="badge badge-stopped">Stopped</span>
+      {% endif %}
+    {% endif %}
+  </div>
+
+  <div class="strat-stats">
+    Active: {{ s.active_trades }}/{{ s.max_trades }}
+    {% if s.stats.total > 0 %}
+      · Total: {{ s.stats.total }}
+      · W/L: {{ s.stats.wins }}/{{ s.stats.losses }}
+      · PnL: <span class="{{ 'positive' if s.stats.total_pnl >= 0 else 'negative' }}">{{ "%+.4f"|format(s.stats.total_pnl) }}</span>
+    {% endif %}
+    {% if s.stats.today_trades > 0 %}
+      · Today: {{ s.stats.today_trades }} ({{ "%+.4f"|format(s.stats.today_pnl) }})
+    {% endif %}
+  </div>
+
+  <div class="strat-controls">
+    {% if s.enabled %}
+      <button class="btn"
+              hx-post="/api/strategy/{{ s.name }}/pause"
+              hx-target="#strategies" hx-swap="innerHTML">Pause</button>
+    {% else %}
+      <button class="btn btn-green"
+              hx-post="/api/strategy/{{ s.name }}/resume"
+              hx-target="#strategies" hx-swap="innerHTML">Resume</button>
+    {% endif %}
+    <button class="btn btn-red"
+            hx-post="/api/strategy/{{ s.name }}/stop"
+            hx-target="#strategies" hx-swap="innerHTML"
+            hx-confirm="Stop '{{ s.name }}'? This will force-close its active trades.">Stop</button>
+  </div>
+</div>
+{% endfor %}
+
+{% if not strategies %}
+<p class="muted">No strategies registered</p>
+{% endif %}

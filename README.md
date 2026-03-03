@@ -3,7 +3,7 @@
 A strategy-driven options trading system for the [Coincall](https://www.coincall.com/) exchange.  
 Strategies are declared as configuration — not coded as classes — and the framework handles entry checks, leg resolution, execution, lifecycle management, and exits automatically.
 
-**Current version:** 0.7.1 — Telegram Notifications
+**Current version:** 0.8.0 — Web Dashboard
 
 ## Highlights
 
@@ -19,6 +19,7 @@ Strategies are declared as configuration — not coded as classes — and the fr
 - **ExecutionPhase**: Declarative pricing phases for limit orders — duration, buffer, reprice interval per phase ✅
 - **RFQParams**: Typed RFQ configuration (timeout, improvement threshold, fallback mode) ✅
 - **Telegram notifications**: Trade opens/closes, daily account summary, critical errors — via Bot API ✅
+- **Web dashboard**: Real-time browser UI (Flask + htmx) — account status, strategy controls, positions table, log tail, kill switch ✅
 - **Position monitoring**: Background polling with live Greeks, PnL, account snapshots, and tick-driven strategy execution ✅
 - **Multi-leg native**: Strangles, Iron Condors, Butterflies — any structure as one lifecycle ✅
 - **HMAC-SHA256 authentication**: Secure API access via `auth.py` ✅
@@ -102,6 +103,14 @@ CoincallTrader/
 ├── persistence.py                  # Trade state persistence (JSON snapshots for crash recovery)
 ├── health_check.py                 # Background health check logging (5-min intervals)
 ├── telegram_notifier.py            # Telegram Bot API notifications (trade alerts, daily summary)
+├── dashboard.py                    # Web dashboard (Flask + htmx, daemon thread, password-protected)
+├── templates/
+│   ├── dashboard.html              # Main dashboard page (htmx auto-polling panels)
+│   ├── login.html                  # Login page
+│   ├── _account.html               # Account metrics fragment
+│   ├── _strategies.html            # Strategy cards fragment
+│   ├── _positions.html             # Positions table fragment
+│   └── _logs.html                  # Log tail fragment
 ├── deployment/
 │   ├── health_check.ps1            # Windows service health monitoring
 │   └── monitor_dashboard.ps1       # Real-time status dashboard (PowerShell)
@@ -113,7 +122,8 @@ CoincallTrader/
 │   ├── test_strategy_framework.py  # Unit tests — config, context, conditions
 │   ├── test_strategy_layer.py      # Strategy layer integration tests
 │   ├── test_atm_straddle.py        # ATM straddle strategy unit tests
-│   └── test_execution_timing.py    # ExecutionPhase, RFQParams, phased execution
+│   ├── test_execution_timing.py    # ExecutionPhase, RFQParams, phased execution
+│   └── test_dashboard.py           # Standalone dashboard test with mock data
 ├── logs/                           # Runtime logs (gitignored)
 ├── archive/                        # Legacy code (gitignored)
 ├── CHANGELOG.md
@@ -287,8 +297,8 @@ python3 tests/test_complex_option_selection.py
 8. ✅ **RFQ comparison fix** — correct orderbook side selection, unified improvement formula
 9. ✅ **48-hour reliability** — timeouts, retries, persistence, health checks
 10. ✅ **Configurable execution timing** — phased pricing, typed RFQ params
-11. ⬜ Multi-instrument — futures, spot trading
-12. ⬜ Web dashboard — monitoring interface
+11. ✅ **Web dashboard** — real-time browser UI with strategy controls and kill switch
+12. ⬜ Multi-instrument — futures, spot trading
 
 ## Disclaimer
 

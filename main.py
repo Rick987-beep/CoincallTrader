@@ -20,6 +20,7 @@ from strategies import blueprint_strangle, reverse_iron_condor_live, long_strang
 from persistence import TradeStatePersistence
 from health_check import HealthChecker
 from telegram_notifier import TelegramNotifier
+from dashboard import start_dashboard
 from config import ENVIRONMENT
 
 # =============================================================================
@@ -116,6 +117,8 @@ def main():
         
         health_checker.start()
         logger.info("Health checker started (interval=5m)")
+
+        start_dashboard(ctx, runners)
 
         notifier.notify_startup(ENVIRONMENT)
     except Exception as e:

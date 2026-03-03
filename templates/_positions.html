@@ -1,0 +1,32 @@
+<table>
+  <thead>
+    <tr>
+      <th>Symbol</th>
+      <th>Side</th>
+      <th>Qty</th>
+      <th>Entry</th>
+      <th>Mark</th>
+      <th>UPnL</th>
+      <th>ROI</th>
+      <th>Delta</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for p in positions %}
+    <tr>
+      <td>{{ p.symbol }}</td>
+      <td>{{ p.side }}</td>
+      <td>{{ p.qty }}</td>
+      <td>{{ "%.4f"|format(p.entry_price) }}</td>
+      <td>{{ "%.4f"|format(p.mark_price) }}</td>
+      <td class="{{ 'positive' if p.unrealized_pnl >= 0 else 'negative' }}">
+        {{ "%+.4f"|format(p.unrealized_pnl) }}
+      </td>
+      <td class="{{ 'positive' if p.roi >= 0 else 'negative' }}">
+        {{ "%.1f"|format(p.roi * 100) }}%
+      </td>
+      <td>{{ "%+.4f"|format(p.delta) }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>

@@ -13,7 +13,7 @@ This document captures important context, decisions, and setup information for c
 **Language:** Python 3.9+  
 **Architecture:** Tick-driven with position monitoring loop  
 **Deployment Target:** Windows Server 2022 VPS (primary), also runs on macOS locally  
-**Current Version:** 0.7.1 — Telegram Notifications
+**Current Version:** 0.8.0 — Web Dashboard
 
 ---
 
@@ -36,6 +36,7 @@ This document captures important context, decisions, and setup information for c
 13. **persistence.py** — Trade state persistence (JSON snapshots for crash recovery)
 14. **health_check.py** — Background health check logging (5-min intervals)
 15. **telegram_notifier.py** — Telegram Bot API notifications (trade opens/closes, daily summary, errors)
+16. **dashboard.py** — Web dashboard (Flask + htmx), runs on daemon thread, password-protected
 
 ### Strategy Modules
 - **strategies/blueprint_strangle.py** — Blueprint strangle strategy (starting template for new strategies)
@@ -59,6 +60,10 @@ COINCALL_API_SECRET_PROD=...
 # Telegram notifications (optional — leave blank to disable)
 TELEGRAM_BOT_TOKEN=...
 TELEGRAM_CHAT_ID=...
+
+# Web dashboard (optional — leave blank to disable)
+DASHBOARD_PASSWORD=...           # required to enable dashboard
+DASHBOARD_PORT=8080              # optional, default 8080
 ```
 
 ### Key Config Details
@@ -73,7 +78,7 @@ TELEGRAM_CHAT_ID=...
 
 ### Local (macOS)
 - Python 3.9+ in virtual environment (.venv)
-- Dependencies: requests, python-dotenv, websockets (see requirements.txt)
+- Dependencies: requests, python-dotenv, websockets, flask (see requirements.txt)
 - Development and testing happens here
 - VS Code with GitHub Copilot
 

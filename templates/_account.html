@@ -1,0 +1,36 @@
+<div class="metrics">
+  <div class="metric">
+    <label>Equity</label>
+    <value>${{ "%.2f"|format(snap.equity) }}</value>
+  </div>
+  <div class="metric">
+    <label>Available Margin</label>
+    <value>${{ "%.2f"|format(snap.available_margin) }}</value>
+  </div>
+  <div class="metric">
+    <label>Margin Used</label>
+    <value>{{ "%.1f"|format(snap.margin_utilization) }}%</value>
+  </div>
+  <div class="metric">
+    <label>UPnL</label>
+    <value class="{{ 'positive' if snap.unrealized_pnl >= 0 else 'negative' }}">
+      ${{ "%+.2f"|format(snap.unrealized_pnl) }}
+    </value>
+  </div>
+  <div class="metric">
+    <label>Net Δ</label>
+    <value>{{ "%+.4f"|format(snap.net_delta) }}</value>
+  </div>
+  <div class="metric">
+    <label>Net Θ</label>
+    <value>{{ "%+.4f"|format(snap.net_theta) }}</value>
+  </div>
+  <div class="metric">
+    <label>Positions</label>
+    <value>{{ snap.position_count }}</value>
+  </div>
+  <div class="metric">
+    <label>Snapshot</label>
+    <value style="font-size:0.8rem;">{{ ts }}</value>
+  </div>
+</div>

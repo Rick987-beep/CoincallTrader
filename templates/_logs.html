@@ -1,0 +1,7 @@
+{% for line in lines %}
+<div class="log-line">{{ line }}</div>
+{% endfor %}
+
+{% if not lines %}
+<p class="muted">No log entries yet</p>
+{% endif %}

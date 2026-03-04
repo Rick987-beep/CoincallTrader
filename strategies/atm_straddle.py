@@ -118,7 +118,7 @@ def atm_straddle() -> StrategyConfig:
         #   1. Profit target hit → close early (win)
         #   2. Hard time exit → close at CLOSE_HOUR:CLOSE_MINUTE UTC
         exit_conditions=[
-            profit_target(TAKE_PROFIT_PCT),
+            profit_target(TAKE_PROFIT_PCT, pnl_mode="executable"),
             time_exit(CLOSE_HOUR, CLOSE_MINUTE),
         ],
 

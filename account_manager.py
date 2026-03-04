@@ -274,7 +274,7 @@ class AccountManager:
                     }
                     self._orders_cache.append(order_info)
                 
-                logger.info(f"Retrieved {len(self._orders_cache)} open orders")
+                logger.debug(f"Retrieved {len(self._orders_cache)} open orders")
                 self.last_update = time.time()
                 
                 if symbol:

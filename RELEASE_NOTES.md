@@ -1,3 +1,78 @@
+# Release Notes — v0.8.1 "Executable PnL"
+
+**Release Date:** March 4, 2026  
+**Previous Version:** v0.8.0 (Web Dashboard)
+
+---
+
+## Overview
+
+v0.8.1 fixes a critical issue where **mark-price PnL did not reflect executable prices** on short-DTE Coincall options.  Wide bid-ask spreads caused `profit_target` to fire at +30% based on mark prices, but the actual close filled at -60%.  This release adds orderbook-based PnL evaluation and instant close-order placement.
+
+---
+
+## Problem
+
+Coincall's mark/mid prices on short-DTE options diverge significantly from the best bid/ask.  The existing `profit_target()` exit condition used `PositionSnapshot.unrealized_pnl` (mark-based), which triggered a take-profit before checking whether the position could actually be closed at a profit.
+
+## Changes
+
+### 1. Executable PnL — orderbook-based exit evaluation
+
+**New method:** `TradeLifecycle.executable_pnl()` fetches the live orderbook for every leg and computes PnL using:
+- **Best bid** for legs we'd sell to close (long positions)
+- **Best ask** for legs we'd buy back (short positions)
+
+Returns `None` if any orderbook is unavailable — the exit condition safely skips that tick.
+
+Works for any multi-leg structure: straddles, strangles, iron condors, butterflies.
+
+**Parameterized exit conditions:** `profit_target()` and `max_loss()` now accept `pnl_mode`:
+- `"mark"` (default) — existing behavior, backward compatible
+- `"executable"` — uses `executable_pnl()` for real bid/ask evaluation
+
+```python
+# Before (mark-based, vulnerable to wide spreads):
+profit_target(30)
+
+# After (orderbook-based, checks real liquidity):
+profit_target(30, pnl_mode="executable")
+```
+
+### 2. Instant close-order placement
+
+Previously, when an exit condition triggered, the state machine set `PENDING_CLOSE` and waited for the **next tick** (10 seconds later) to place close orders.  Now `close()` is called immediately in the same tick — eliminating the 10-second gap between PnL evaluation and order placement.
+
+### 3. Log noise reduction
+
+Demoted three per-tick `logger.info` calls to `logger.debug`:
+- "Retrieved N open orders" (fires every order poll)
+- "requoted unfilled open/close legs" (fires every requote cycle)
+
+INFO logs now contain only: trade actions (open/close), condition triggers, and errors.
+
+### 4. ATM Straddle activated
+
+`atm_straddle` is now the active strategy in `main.py`, using `profit_target(30, pnl_mode="executable")`.
+
+## Files Changed
+
+| File | Change |
+|------|--------|
+| `trade_lifecycle.py` | Added `executable_pnl()` method; instant close after exit trigger; demoted requote logs to DEBUG |
+| `strategy.py` | Added `pnl_mode` parameter to `profit_target()` and `max_loss()` |
+| `strategies/atm_straddle.py` | Switched to `pnl_mode="executable"` |
+| `main.py` | Activated `atm_straddle` as sole strategy |
+| `account_manager.py` | Demoted open-orders log to DEBUG |
+| `PROJECT_CONTEXT.md` | Documented PnL evaluation modes |
+
+## Testing
+
+All 49 existing tests pass. No new dependencies.
+
+---
+---
+
 # Release Notes — v0.8.0 "Web Dashboard"
 
 **Release Date:** March 3, 2026  

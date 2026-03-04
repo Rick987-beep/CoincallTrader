@@ -261,43 +261,89 @@ def no_existing_position_in(symbols: List[str]) -> EntryCondition:
 # Exit Condition Factories
 # =============================================================================
 
-def profit_target(pct: float) -> ExitCondition:
+def profit_target(pct: float, pnl_mode: str = "mark") -> ExitCondition:
     """
     Close when structure PnL exceeds +pct% of entry cost.
 
-    Example: profit_target(50) closes when profit >= 50% of premium received.
+    Args:
+        pct: Profit target percentage of entry cost.
+        pnl_mode: How to evaluate PnL.
+            "mark"       — use exchange mark/mid prices (default, fast).
+            "executable" — use live orderbook best bid/ask to estimate
+                           what closing would actually yield.  Safer for
+                           illiquid or wide-spread options (e.g. short DTE).
+                           If any orderbook is unavailable, the condition
+                           silently skips that tick (no false triggers).
+
+    Example: profit_target(50, pnl_mode="executable")
     """
+    label = f"profit_target({pct}%,{pnl_mode})"
+
     def _check(account: AccountSnapshot, trade: "TradeLifecycle") -> bool:
         entry = trade.total_entry_cost()
         if entry == 0:
             return False
-        pnl = trade.structure_pnl(account)
-        ratio = (pnl / abs(entry)) * 100 if entry != 0 else 0
+
+        if pnl_mode == "executable":
+            pnl = trade.executable_pnl()
+            if pnl is None:
+                return False  # orderbook unavailable — skip this tick
+        else:
+            pnl = trade.structure_pnl(account)
+
+        ratio = (pnl / abs(entry)) * 100
         triggered = ratio >= pct
         if triggered:
-            logger.info(f"[{trade.id}] profit_target({pct}%) triggered: PnL ratio={ratio:.1f}%")
+            logger.info(
+                f"[{trade.id}] {label} triggered: PnL ratio={ratio:.1f}% "
+                f"(pnl=${pnl:.4f}, entry=${entry:.4f})"
+            )
         return triggered
-    _check.__name__ = f"profit_target({pct}%)"
+
+    _check.__name__ = label
     return _check
 
 
-def max_loss(pct: float) -> ExitCondition:
+def max_loss(pct: float, pnl_mode: str = "mark") -> ExitCondition:
     """
     Close when structure loss exceeds pct% of entry cost.
 
-    Example: max_loss(100) closes when loss >= 100% of premium received.
+    Args:
+        pct: Loss threshold percentage of entry cost.
+        pnl_mode: How to evaluate PnL.
+            "mark"       — use exchange mark/mid prices (default, fast).
+            "executable" — use live orderbook best bid/ask to estimate
+                           what closing would actually yield.  Safer for
+                           illiquid or wide-spread options (e.g. short DTE).
+                           If any orderbook is unavailable, the condition
+                           silently skips that tick (no false triggers).
+
+    Example: max_loss(100, pnl_mode="executable")
     """
+    label = f"max_loss({pct}%,{pnl_mode})"
+
     def _check(account: AccountSnapshot, trade: "TradeLifecycle") -> bool:
         entry = trade.total_entry_cost()
         if entry == 0:
             return False
-        pnl = trade.structure_pnl(account)
-        ratio = (pnl / abs(entry)) * 100 if entry != 0 else 0
+
+        if pnl_mode == "executable":
+            pnl = trade.executable_pnl()
+            if pnl is None:
+                return False  # orderbook unavailable — skip this tick
+        else:
+            pnl = trade.structure_pnl(account)
+
+        ratio = (pnl / abs(entry)) * 100
         triggered = ratio <= -pct
         if triggered:
-            logger.info(f"[{trade.id}] max_loss({pct}%) triggered: PnL ratio={ratio:.1f}%")
+            logger.info(
+                f"[{trade.id}] {label} triggered: PnL ratio={ratio:.1f}% "
+                f"(pnl=${pnl:.4f}, entry=${entry:.4f})"
+            )
         return triggered
-    _check.__name__ = f"max_loss({pct}%)"
+
+    _check.__name__ = label
     return _check
 
 

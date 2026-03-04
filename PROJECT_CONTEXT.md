@@ -1,7 +1,7 @@
 # CoincallTrader — Project Context for AI Agents
 
-**Version:** 0.8.0  
-**Last Updated:** 3 March 2026  
+**Version:** 0.8.1  
+**Last Updated:** 4 March 2026  
 **Python:** 3.9+ (no 3.10+ syntax — use `Optional[X]`, not `X | None`)
 
 Automated BTC/ETH options trading bot for the Coincall exchange.
@@ -86,6 +86,17 @@ entry/mark price, UPnL, ROI, per-position Greeks).
 **Exit** (`strategy.py` + `trade_lifecycle.py`): `profit_target`, `max_loss`,
 `max_hold_hours`, `time_exit`, `utc_datetime_exit`, `account_delta_limit`,
 `structure_delta_limit`, `leg_greek_limit`
+
+**PnL evaluation modes** — `profit_target` and `max_loss` accept an optional
+`pnl_mode` parameter:
+- `"mark"` (default) — uses exchange mark-price UPnL from `PositionSnapshot`.
+  Fast (no extra API calls), but mark prices can diverge from executable
+  prices on illiquid / wide-spread options.
+- `"executable"` — uses `TradeLifecycle.executable_pnl()`, which fetches the
+  live orderbook for each leg and computes PnL based on **best bid** (to close
+  longs) or **best ask** (to close shorts).  Returns `None` if any orderbook
+  is unavailable, causing the condition to safely skip that tick.  Recommended
+  for short-DTE strategies where bid-ask spreads are wide.
 
 ### LegSpec → TradeLeg Resolution (`option_selection.py`)
 `LegSpec(option_type, side, qty, strike_criteria, expiry_criteria)` is resolved

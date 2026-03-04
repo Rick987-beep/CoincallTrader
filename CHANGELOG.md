@@ -5,6 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.1] - 2026-03-04
+
+### Added - Executable PnL & Instant Close
+
+- **`TradeLifecycle.executable_pnl()`** (NEW method) — computes PnL using live orderbook best bid/ask instead of mark prices. Uses best bid for closing longs, best ask for closing shorts. Returns `None` when orderbook unavailable (safe skip). Works for any multi-leg structure.
+- **`pnl_mode` parameter** on `profit_target()` and `max_loss()` — `"mark"` (default, backward compatible) or `"executable"` (orderbook-based). Documented in PROJECT_CONTEXT.md.
+- **Instant close-order placement** — when an exit condition triggers, `close()` is now called in the same tick instead of waiting 10 seconds for the next poll cycle.
+
+### Changed
+
+- `strategies/atm_straddle.py` — switched `profit_target` to `pnl_mode="executable"`
+- `main.py` — activated `atm_straddle` as sole strategy (replaced `blueprint_strangle`)
+- `account_manager.py` — demoted "Retrieved N open orders" log from INFO to DEBUG
+- `trade_lifecycle.py` — demoted requote log messages from INFO to DEBUG
+- `PROJECT_CONTEXT.md` — added PnL evaluation modes documentation
+
+### Fixed
+
+- Exit conditions no longer trigger on inflated mark prices that don't reflect executable bid/ask liquidity
+- Close orders are placed immediately after exit evaluation, not 10 seconds later
+
+---
+
 ## [0.8.0] - 2026-03-03
 
 ### Added - Web Dashboard

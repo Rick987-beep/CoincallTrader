@@ -16,7 +16,7 @@ import sys
 import time
 
 from strategy import build_context, StrategyRunner
-from strategies import blueprint_strangle, reverse_iron_condor_live, long_strangle_pnl_test
+from strategies import blueprint_strangle, reverse_iron_condor_live, long_strangle_pnl_test, atm_straddle
 from persistence import TradeStatePersistence
 from health_check import HealthChecker
 from telegram_notifier import TelegramNotifier
@@ -44,7 +44,8 @@ logger = logging.getLogger(__name__)
 # =============================================================================
 
 STRATEGIES = [
-    blueprint_strangle,
+    atm_straddle,
+    # blueprint_strangle,
     # long_strangle_pnl_test,
     # reverse_iron_condor_live,
 ]

@@ -209,6 +209,70 @@ class TradeLifecycle:
                 total += pos.unrealized_pnl * self._our_share(leg, pos)
         return total
 
+    def executable_pnl(self) -> Optional[float]:
+        """PnL if the structure were closed at current best bid/ask prices.
+
+        For each open leg, fetches the live orderbook and uses:
+          - best BID for legs we'd SELL to close  (long positions, side=1)
+          - best ASK for legs we'd BUY to close   (short positions, side=2)
+
+        Returns the net PnL vs entry fills, or None if any orderbook is
+        unavailable (safety — the calling condition should not trigger).
+
+        Works for any multi-leg structure: straddles, strangles, iron
+        condors, butterflies, etc.
+        """
+        total_exit_value = 0.0
+
+        for leg in self.open_legs:
+            if leg.fill_price is None:
+                return None  # leg not yet filled — shouldn't be called
+
+            orderbook = get_option_orderbook(leg.symbol)
+            if not orderbook:
+                logger.debug(
+                    f"[{self.id}] executable_pnl: no orderbook for {leg.symbol}"
+                )
+                return None
+
+            bids = orderbook.get('bids', [])
+            asks = orderbook.get('asks', [])
+
+            # To close: long (side=1) → sell → need bid;
+            #           short (side=2) → buy back → need ask
+            if leg.side == 1:  # long — close by selling
+                if not bids:
+                    logger.debug(
+                        f"[{self.id}] executable_pnl: no bids for {leg.symbol}"
+                    )
+                    return None
+                close_price = float(bids[0]['price'])
+            else:  # short — close by buying
+                if not asks:
+                    logger.debug(
+                        f"[{self.id}] executable_pnl: no asks for {leg.symbol}"
+                    )
+                    return None
+                close_price = float(asks[0]['price'])
+
+            if close_price <= 0:
+                logger.debug(
+                    f"[{self.id}] executable_pnl: zero/negative price for {leg.symbol}"
+                )
+                return None
+
+            qty = leg.filled_qty if leg.filled_qty > 0 else leg.qty
+            entry_price = float(leg.fill_price)
+
+            # PnL per leg: for a BUY (side=1), profit = (close - entry) * qty
+            #              for a SELL (side=2), profit = (entry - close) * qty
+            if leg.side == 1:
+                total_exit_value += (close_price - entry_price) * qty
+            else:
+                total_exit_value += (entry_price - close_price) * qty
+
+        return total_exit_value
+
     def structure_delta(self, account: AccountSnapshot) -> float:
         """Delta for THIS lifecycle's legs only (pro-rated)."""
         total = 0.0
@@ -887,7 +951,7 @@ class LifecycleManager:
                 leg.order_id = ls.order_id
                 leg.filled_qty = ls.filled_qty
                 leg.fill_price = ls.fill_price
-            logger.info(f"Trade {trade.id}: requoted unfilled open legs, continuing")
+            logger.debug(f"Trade {trade.id}: requoted unfilled open legs, continuing")
 
         # "pending" → nothing to do, wait for next tick
 
@@ -933,7 +997,7 @@ class LifecycleManager:
                 leg.order_id = ls.order_id
                 leg.filled_qty = ls.filled_qty
                 leg.fill_price = ls.fill_price
-            logger.info(f"Trade {trade.id}: requoted unfilled close legs, continuing")
+            logger.debug(f"Trade {trade.id}: requoted unfilled close legs, continuing")
 
         # "pending" → wait for next tick
 
@@ -985,6 +1049,10 @@ class LifecycleManager:
                         f"— checking exit conditions"
                     )
                     self._evaluate_exits(trade, account)
+                    # If exit triggered, place close orders immediately —
+                    # don't wait 10 s for the next tick.
+                    if trade.state == TradeState.PENDING_CLOSE:
+                        self.close(trade.id)
 
                 elif trade.state == TradeState.PENDING_CLOSE:
                     self.close(trade.id)

@@ -609,11 +609,11 @@ class StrategyRunner:
         and opens a new trade if all gates pass.  Also fires
         on_trade_closed for newly completed trades.
         """
+        # Always process trade close events, even when entry is paused
+        self._check_closed_trades(account)
+
         if not self._enabled:
             return
-
-        # Fire on_trade_closed for any trades that just finished
-        self._check_closed_trades(account)
 
         now = time.time()
         if now - self._last_check_time < self.config.check_interval_seconds:
@@ -669,19 +669,10 @@ class StrategyRunner:
                 if datetime.fromtimestamp(t.created_at, tz=timezone.utc).date() == today
             )
             if today_count >= self.config.max_trades_per_day:
-                # If no active trades remain, auto-disable — nothing left to do
-                if not self.active_trades:
-                    logger.info(
-                        f"[{self._strategy_id}] max_trades_per_day reached "
-                        f"({today_count}/{self.config.max_trades_per_day}) "
-                        f"and no active trades — auto-disabling"
-                    )
-                    self._enabled = False
-                else:
-                    logger.debug(
-                        f"[{self._strategy_id}] max_trades_per_day "
-                        f"({today_count}/{self.config.max_trades_per_day}) — skip"
-                    )
+                logger.debug(
+                    f"[{self._strategy_id}] max_trades_per_day "
+                    f"({today_count}/{self.config.max_trades_per_day}) — skip"
+                )
                 return False
 
         # Gate 4: user-defined entry conditions (all must pass)

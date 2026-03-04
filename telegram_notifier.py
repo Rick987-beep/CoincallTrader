@@ -57,9 +57,9 @@ class TelegramNotifier:
         self._enabled = bool(self._token and self._chat_id)
         self._lock = threading.Lock()
         self._last_send: float = 0.0
-        # Daily summary throttle — send at most once per 23 hours
-        self._last_daily_summary: float = 0.0
-        self._daily_interval = 23 * 3600  # 23 hours
+        # Daily summary: track the last UTC date we sent on
+        self._last_daily_date: Optional[str] = None
+        self._daily_hour = 7  # Send daily summary at 07:00 UTC
 
         if self._enabled:
             self._url = f"https://api.telegram.org/bot{self._token}/sendMessage"
@@ -171,32 +171,68 @@ class TelegramNotifier:
         self,
         equity: float,
         unrealized_pnl: float,
-        margin_utilization: float,
         net_delta: float,
-        position_count: int,
+        positions: tuple = (),
     ) -> None:
         """
-        Send a daily account summary.
+        Send a daily account summary at a fixed wall-clock time (07:00 UTC).
 
-        Throttled to at most once per 23 hours so it naturally drifts
-        to cover 1× per day even if health checks run every 5 minutes.
+        Called frequently by HealthChecker (every 5 min).  Internally gated
+        by date string — sends at most once per calendar day, and only
+        after self._daily_hour UTC.  Immune to process restarts (uses date,
+        not elapsed time).
         """
-        now = time.time()
-        if now - self._last_daily_summary < self._daily_interval:
-            return  # Already sent today
-        self._last_daily_summary = now
+        now_utc = datetime.now(timezone.utc)
 
-        ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-        self.send(
+        # Only send after the configured hour
+        if now_utc.hour < self._daily_hour:
+            return
+
+        today_str = now_utc.strftime("%Y-%m-%d")
+        if self._last_daily_date == today_str:
+            return  # Already sent today
+
+        self._last_daily_date = today_str
+
+        # Build positions list
+        pos_lines = []
+        for p in positions:
+            side = getattr(p, "side", "?")
+            symbol = getattr(p, "symbol", "?")
+            qty = getattr(p, "qty", 0)
+            pos_lines.append(f"  • {symbol} {qty} {side}")
+
+        ts = now_utc.strftime("%Y-%m-%d %H:%M UTC")
+        msg = (
             f"📊 <b>Daily Summary</b> — {ts}\n"
             f"Equity: ${equity:,.2f}\n"
             f"Unrealized PnL: ${unrealized_pnl:+,.2f}\n"
-            f"Margin utilization: {margin_utilization:.1f}%\n"
             f"Net delta: {net_delta:+.4f}\n"
-            f"Open positions: {position_count}"
+            f"Open positions: {len(positions)}"
         )
+        if pos_lines:
+            msg += "\n" + "\n".join(pos_lines)
+
+        self.send(msg)
 
     def notify_error(self, message: str) -> None:
         """Send a critical error alert."""
         ts = datetime.now(timezone.utc).strftime("%H:%M UTC")
         self.send(f"🚨 <b>Error</b> ({ts})\n{message}")
+
+    # ── Dashboard control notifications ──────────────────────────────────
+
+    def notify_strategy_paused(self, strategy_name: str) -> None:
+        """Notify when a strategy is paused via dashboard."""
+        ts = datetime.now(timezone.utc).strftime("%H:%M UTC")
+        self.send(f"\u23f8 <b>Strategy paused</b>: {strategy_name}\nTime: {ts}")
+
+    def notify_strategy_resumed(self, strategy_name: str) -> None:
+        """Notify when a strategy is resumed via dashboard."""
+        ts = datetime.now(timezone.utc).strftime("%H:%M UTC")
+        self.send(f"\u25b6 <b>Strategy resumed</b>: {strategy_name}\nTime: {ts}")
+
+    def notify_strategy_stopped(self, strategy_name: str) -> None:
+        """Notify when a strategy is stopped via dashboard."""
+        ts = datetime.now(timezone.utc).strftime("%H:%M UTC")
+        self.send(f"\u23f9 <b>Strategy stopped</b>: {strategy_name}\nTime: {ts}")

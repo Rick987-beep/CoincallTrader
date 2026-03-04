@@ -5,6 +5,35 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.0] - 2026-03-04
+
+### Added - Hardened Operations
+
+- **`position_closer.py`** (NEW) — `PositionCloser` class: two-phase mark-price position closer for the dashboard kill switch. Phase 1 places limit orders at mark price (5 min, reprice every 30s). Phase 2 drops to ±10% off mark for aggressive fills on illiquid legs (2 min, reprice every 15s). Runs in background thread with Telegram progress notifications.
+- **`LifecycleManager.kill_all()`** (NEW method) — emergency termination: cancels all tracked orders (including fill-manager requoted IDs) and marks every active trade CLOSED. Used by the kill switch before handing off to PositionCloser.
+- **`TradeLifecycle.to_dict()` / `from_dict()`** (NEW methods) — full trade serialization and deserialization for crash recovery. `to_dict()` captures all recovery-critical fields; `from_dict()` reconstructs the trade with exit conditions left empty for the caller to re-attach.
+- **`LifecycleManager.restore_trade()`** (NEW method) — re-injects a recovered `TradeLifecycle` into the active trade tracking dict.
+- **Crash recovery** — `main.py` writes a `logs/.running` crash flag on startup; clears it on clean shutdown. On restart with flag present, `_recover_trades()` loads the trade snapshot, verifies exchange positions, re-attaches exit conditions from strategy configs, and normalizes transient states (OPENING→OPEN, CLOSING→PENDING_CLOSE). All-or-nothing: fails to manual intervention if state is inconsistent.
+- **Dashboard `/api/killswitch/status`** (NEW route) — poll kill switch progress (idle/phase1/phase2/done).
+- **Telegram `notify_strategy_paused()`**, **`notify_strategy_resumed()`**, **`notify_strategy_stopped()`** — new notification helpers for dashboard control actions.
+
+### Changed
+
+- **Dashboard kill switch** — now uses `PositionCloser` (two-phase mark-price close in background thread) instead of the old `force_close` loop. Returns immediately; progress reported via Telegram and the new status endpoint.
+- **`persistence.py`** — stripped to trade history only (`save_completed_trade`, `load_trade_history`). Removed `save_trades()`, `load_trades()`, `clear()` — active trade persistence now handled by `LifecycleManager._persist_all_trades()` via `to_dict()`.
+- **`telegram_notifier.py`** — daily summary now wall-clock gated at 07:00 UTC (immune to restarts), accepts `positions` tuple with individual position details, removed `margin_utilization` parameter.
+- **`strategies/atm_straddle.py`** — `OPEN_HOUR` changed from 12 to 13 (entry window now 13:00–14:00 UTC).
+
+### Fixed
+
+- **Self-shutdown bug** — removed `_enabled = False` side effect from `max_trades_per_day` gate in `strategy.py`. The gate now purely blocks entry without disabling the runner. This was the root cause of the duplicate trade incident (runner disabled → main.py auto-shutdown → NSSM restart → new trade on empty state).
+- **Auto-shutdown removed** — `main.py` no longer shuts down when all runners are disabled. The process stays alive for position management and dashboard access.
+- **`_check_closed_trades` always runs** — moved above the `if not self._enabled: return` guard in `StrategyRunner.tick()`, so trade close callbacks, persistence, and notifications always fire even when entry is paused.
+- **`notify_daily_summary` crash** — method referenced undefined `_last_daily_summary` and `_daily_interval` attributes. Rewritten to use wall-clock `_last_daily_date` date tracking.
+- **`kill_all()` state logging** — logged `trade.state.value` after already setting it to CLOSED, always showing "was closed". Now captures `prev_state` before mutation.
+
+---
+
 ## [0.8.1] - 2026-03-04
 
 ### Added - Executable PnL & Instant Close

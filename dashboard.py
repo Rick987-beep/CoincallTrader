@@ -34,6 +34,7 @@ from functools import wraps
 from typing import TYPE_CHECKING, List, Optional
 
 from flask import Flask, Response, redirect, render_template, request, session, url_for
+from position_closer import PositionCloser
 
 if TYPE_CHECKING:
     from strategy import StrategyRunner, TradingContext
@@ -186,6 +187,8 @@ def _create_app(
         if r:
             r.disable()
             logger.info(f"[Dashboard] Strategy '{name}' paused by user")
+            if ctx.notifier:
+                ctx.notifier.notify_strategy_paused(name)
         return api_strategies()
 
     @app.route("/api/strategy/<name>/resume", methods=["POST"])
@@ -195,6 +198,8 @@ def _create_app(
         if r:
             r.enable()
             logger.info(f"[Dashboard] Strategy '{name}' resumed by user")
+            if ctx.notifier:
+                ctx.notifier.notify_strategy_resumed(name)
         return api_strategies()
 
     @app.route("/api/strategy/<name>/stop", methods=["POST"])
@@ -204,34 +209,43 @@ def _create_app(
         if r:
             r.stop()
             logger.info(f"[Dashboard] Strategy '{name}' stopped by user")
+            if ctx.notifier:
+                ctx.notifier.notify_strategy_stopped(name)
         return api_strategies()
+
+    # ── Kill switch (two-phase mark-price close) ────────────────────────
+
+    closer = PositionCloser(
+        account_manager=ctx.account_manager,
+        executor=ctx.executor,
+        lifecycle_manager=ctx.lifecycle_manager,
+        notifier=ctx.notifier,
+    )
 
     @app.route("/api/killswitch", methods=["POST"])
     @login_required
     def killswitch():
-        """Force-close all active trades across all strategies."""
-        closed_count = 0
-        for r in runners:
-            active = r.active_trades
-            for trade in active:
-                try:
-                    ctx.lifecycle_manager.force_close(trade.id)
-                    closed_count += 1
-                except Exception as e:
-                    logger.error(f"[Dashboard] Kill switch error on {trade.id}: {e}")
+        """Activate kill switch — close all positions via two-phase mark-price."""
+        if closer.is_running:
+            return (
+                f'<span class="kill-result">'
+                f'Kill switch already running — {closer.status}'
+                f'</span>'
+            )
 
-        logger.warning(f"[Dashboard] KILL SWITCH activated — force-closed {closed_count} trade(s)")
+        closer.start(runners)
+        logger.warning("[Dashboard] KILL SWITCH activated by user")
+        return (
+            '<span class="kill-result">'
+            'Kill switch activated — closing positions (check Telegram for progress)'
+            '</span>'
+        )
 
-        if ctx.notifier:
-            try:
-                ctx.notifier.send(
-                    f"🔴 <b>KILL SWITCH</b> activated via dashboard\n"
-                    f"Force-closed {closed_count} trade(s)"
-                )
-            except Exception:
-                pass
-
-        return f'<span class="kill-result">Kill switch activated — {closed_count} trade(s) closed</span>'
+    @app.route("/api/killswitch/status")
+    @login_required
+    def killswitch_status():
+        """Poll kill switch progress."""
+        return f'<span class="kill-status">{closer.status}</span>'
 
     return app
 

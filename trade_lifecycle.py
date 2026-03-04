@@ -347,6 +347,92 @@ class TradeLifecycle:
             s += f" | PnL={pnl:+.4f} Δ={greeks['delta']:+.4f}"
         return s
 
+    def to_dict(self) -> Dict[str, Any]:
+        """Serialize trade state for crash-recovery persistence.
+
+        Excludes non-serializable fields (exit_conditions, rfq_result,
+        smart_config, execution_params, rfq_params, metadata internals).
+        Those are re-attached from the strategy config on recovery.
+        """
+        return {
+            "id": self.id,
+            "strategy_id": self.strategy_id,
+            "state": self.state.value,
+            "execution_mode": self.execution_mode,
+            "rfq_action": self.rfq_action,
+            "created_at": self.created_at,
+            "opened_at": self.opened_at,
+            "closed_at": self.closed_at,
+            "error": self.error,
+            "realized_pnl": self.realized_pnl,
+            "exit_cost": self.exit_cost,
+            "open_legs": [
+                {
+                    "symbol": l.symbol,
+                    "qty": l.qty,
+                    "side": l.side,
+                    "order_id": l.order_id,
+                    "fill_price": l.fill_price,
+                    "filled_qty": l.filled_qty,
+                }
+                for l in self.open_legs
+            ],
+            "close_legs": [
+                {
+                    "symbol": l.symbol,
+                    "qty": l.qty,
+                    "side": l.side,
+                    "order_id": l.order_id,
+                    "fill_price": l.fill_price,
+                    "filled_qty": l.filled_qty,
+                }
+                for l in self.close_legs
+            ],
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "TradeLifecycle":
+        """Reconstruct a TradeLifecycle from a persisted dict.
+
+        Exit conditions are NOT restored here — caller must re-attach
+        them from the matching strategy config.
+        """
+        return cls(
+            id=data["id"],
+            strategy_id=data.get("strategy_id"),
+            state=TradeState(data["state"]),
+            execution_mode=data.get("execution_mode"),
+            rfq_action=data.get("rfq_action", "buy"),
+            created_at=data.get("created_at", time.time()),
+            opened_at=data.get("opened_at"),
+            closed_at=data.get("closed_at"),
+            error=data.get("error"),
+            realized_pnl=data.get("realized_pnl"),
+            exit_cost=data.get("exit_cost"),
+            open_legs=[
+                TradeLeg(
+                    symbol=l["symbol"],
+                    qty=l["qty"],
+                    side=l["side"],
+                    order_id=l.get("order_id"),
+                    fill_price=l.get("fill_price"),
+                    filled_qty=l.get("filled_qty", 0.0),
+                )
+                for l in data.get("open_legs", [])
+            ],
+            close_legs=[
+                TradeLeg(
+                    symbol=l["symbol"],
+                    qty=l["qty"],
+                    side=l["side"],
+                    order_id=l.get("order_id"),
+                    fill_price=l.get("fill_price"),
+                    filled_qty=l.get("filled_qty", 0.0),
+                )
+                for l in data.get("close_legs", [])
+            ],
+        )
+
 
 # =============================================================================
 # Lifecycle Manager
@@ -425,6 +511,18 @@ class LifecycleManager:
     def active_trades_for_strategy(self, strategy_id: str) -> List[TradeLifecycle]:
         """Active (not CLOSED/FAILED) trades belonging to a strategy."""
         return [t for t in self.active_trades if t.strategy_id == strategy_id]
+
+    def restore_trade(self, trade: TradeLifecycle) -> None:
+        """Inject a recovered trade into the manager's trade registry.
+
+        Used by crash recovery to restore trades from persisted state.
+        Active trades must have exit_conditions re-attached before calling.
+        """
+        self._trades[trade.id] = trade
+        logger.info(
+            f"Restored trade {trade.id} (strategy={trade.strategy_id}, "
+            f"state={trade.state.value}, legs={len(trade.open_legs)})"
+        )
 
     # -------------------------------------------------------------------------
     # Create
@@ -1120,6 +1218,50 @@ class LifecycleManager:
         logger.warning(f"Trade {trade.id}: cannot force close in state {state.value}")
         return False
 
+    def kill_all(self) -> int:
+        """
+        Emergency termination — cancel all orders and mark every trade CLOSED.
+
+        Used by the dashboard kill switch before handing off to PositionCloser.
+        Removes all trades from the tick() processing loop so the closer can
+        work on exchange positions without interference.
+
+        Returns the number of trades terminated.
+        """
+        killed = 0
+        for trade in list(self._trades.values()):
+            if trade.state in (TradeState.CLOSED, TradeState.FAILED):
+                continue
+
+            # Cancel any tracked orders (open legs and close legs)
+            for leg in trade.open_legs + trade.close_legs:
+                if leg.order_id and not leg.is_filled:
+                    try:
+                        self._executor.cancel_order(leg.order_id)
+                    except Exception:
+                        pass
+
+            # Cancel via fill managers if present (they track requoted order IDs)
+            for key in ("_open_fill_mgr", "_close_fill_mgr"):
+                mgr = trade.metadata.get(key)
+                if mgr is not None:
+                    try:
+                        mgr.cancel_all()
+                    except Exception:
+                        pass
+
+            prev_state = trade.state.value
+            trade.state = TradeState.CLOSED
+            trade.closed_at = time.time()
+            trade.error = "Terminated by kill switch"
+            killed += 1
+            logger.info(f"Trade {trade.id}: killed (was {prev_state})")
+
+        if killed:
+            self._persist_all_trades()
+
+        return killed
+
     def cancel(self, trade_id: str) -> bool:
         """
         Cancel a trade that hasn't fully opened yet.
@@ -1180,31 +1322,7 @@ class LifecycleManager:
         """Dump all trade states to JSON for inspection and crash recovery."""
         try:
             os.makedirs("logs", exist_ok=True)
-            trades_data = []
-            for trade in self._trades.values():
-                trades_data.append({
-                    "id": trade.id,
-                    "strategy_id": trade.strategy_id,
-                    "state": trade.state.value,
-                    "symbols": trade.symbols,
-                    "execution_mode": trade.execution_mode,
-                    "created_at": trade.created_at,
-                    "opened_at": trade.opened_at,
-                    "closed_at": trade.closed_at,
-                    "error": trade.error,
-                    "open_legs": [
-                        {"symbol": l.symbol, "qty": l.qty, "side": l.side,
-                         "filled_qty": l.filled_qty, "fill_price": l.fill_price,
-                         "order_id": l.order_id}
-                        for l in trade.open_legs
-                    ],
-                    "close_legs": [
-                        {"symbol": l.symbol, "qty": l.qty, "side": l.side,
-                         "filled_qty": l.filled_qty, "fill_price": l.fill_price,
-                         "order_id": l.order_id}
-                        for l in trade.close_legs
-                    ],
-                })
+            trades_data = [trade.to_dict() for trade in self._trades.values()]
             with open("logs/trades_snapshot.json", "w") as f:
                 json.dump({"timestamp": time.time(), "trades": trades_data}, f, indent=2)
         except Exception as e:

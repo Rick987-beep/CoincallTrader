@@ -1,6 +1,6 @@
 # CoincallTrader — Module Reference
 
-**Last Updated:** March 3, 2026
+**Last Updated:** March 4, 2026
 
 Internal documentation for the CoincallTrader application modules.
 For Coincall exchange API endpoints, see [API_REFERENCE.md](API_REFERENCE.md).
@@ -628,8 +628,11 @@ Fire-and-forget Telegram alerts via the Bot API.  If `TELEGRAM_BOT_TOKEN` is not
 | `notify_shutdown()` | Graceful shutdown |
 | `notify_trade_opened(strategy, trade_id, legs, cost)` | Trade enters OPEN state |
 | `notify_trade_closed(strategy, trade_id, pnl, roi, hold_min, cost)` | Trade enters CLOSED state |
-| `notify_daily_summary(equity, upnl, margin%, delta, positions)` | Once per ~23 h (throttled internally) |
+| `notify_daily_summary(equity, upnl, net_delta, positions)` | Once per day at 07:00 UTC (wall-clock gated) |
 | `notify_error(message)` | Consecutive failures in main loop |
+| `notify_strategy_paused(name)` | Strategy paused via dashboard |
+| `notify_strategy_resumed(name)` | Strategy resumed via dashboard |
+| `notify_strategy_stopped(name)` | Strategy stopped via dashboard |
 
 ### Integration
 - Created by `build_context()` in `strategy.py` and stored as `ctx.notifier`.
@@ -678,7 +681,23 @@ start_dashboard(ctx, runners, host="0.0.0.0", port=8080)
 | `/api/strategy/<name>/pause` | POST | ✓ | Pause (disable ticks) for a strategy |
 | `/api/strategy/<name>/resume` | POST | ✓ | Resume a paused strategy |
 | `/api/strategy/<name>/stop` | POST | ✓ | Permanently stop a strategy |
-| `/api/killswitch` | POST | ✓ | Force-close **all** active trades across all strategies |
+| `/api/killswitch` | POST | ✓ | Activate kill switch — two-phase mark-price close of all positions |
+| `/api/killswitch/status` | GET | ✓ | Poll kill switch progress (idle/phase1/phase2/done) |
+
+### Kill Switch — PositionCloser
+
+The kill switch uses `PositionCloser` (see [position_closer.py](../position_closer.py)) to close all exchange positions.
+This is an **emergency procedure** — not part of normal strategy operation.  It runs in a background thread and
+performs a complete shutdown sequence:
+
+1. `LifecycleManager.kill_all()` — cancel all tracked orders, mark all trades CLOSED
+2. `StrategyRunner.stop()` on all runners — prevent new trades
+3. Phase 1: limit orders at mark price (5 min, reprice every 30s)
+4. Phase 2: aggressive pricing ±10% off mark (2 min, reprice every 15s)
+5. Verify positions closed on exchange
+6. Send Telegram summary
+
+Dashboard returns immediately; progress reported via Telegram and `/api/killswitch/status`.
 
 ### Design Decisions
 - **htmx polling** — each panel re-fetches its own fragment every 3–5 s; no WebSocket needed.

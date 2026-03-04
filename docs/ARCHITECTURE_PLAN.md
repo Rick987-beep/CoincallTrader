@@ -1,8 +1,8 @@
 # CoincallTrader Architecture & Development Plan
 
-**Version:** 3.0  
-**Date:** March 3, 2026  
-**Status:** v0.8.0 — Web Dashboard (Phase 7 complete)
+**Version:** 3.1  
+**Date:** March 4, 2026  
+**Status:** v0.9.0 — Hardened Operations (Phase 8 complete)
 
 ---
 
@@ -36,6 +36,10 @@ This document outlines the transformation of CoincallTrader from a simple option
 - ✅ **Configurable Execution Timing** — `ExecutionPhase` dataclass for phased limit pricing (aggressive/mid/top_of_book/mark with duration, buffer, reprice interval); `RFQParams` typed dataclass replacing loose metadata keys; wired through `StrategyConfig` and `TradeLifecycle` with full backward compatibility (`trade_execution.py`, `trade_lifecycle.py`, `strategy.py`)
 - ✅ **Telegram Notifications** — Fire-and-forget alerts via Bot API: trade opens/closes (PnL, ROI), daily account summary, startup/shutdown, critical errors. Wired at framework level — all strategies get notifications automatically (`telegram_notifier.py`)
 - ✅ **Web Dashboard** — Real-time browser UI (Flask + htmx) running as daemon thread. Account summary, strategy cards with Pause/Resume/Stop controls, positions table, live log tail, kill switch. Password-protected via `DASHBOARD_PASSWORD` env var (`dashboard.py`, `templates/`)
+- ✅ **Crash Recovery** — `TradeLifecycle.to_dict()/from_dict()` serialization, `LifecycleManager.restore_trade()`, crash flag (`logs/.running`), `_recover_trades()` in `main.py` with exchange position verification. All-or-nothing: fails fast to manual intervention if state is inconsistent (`main.py`, `trade_lifecycle.py`)
+- ✅ **Kill Switch** — `PositionCloser` two-phase mark-price position closer for the dashboard kill switch. Phase 1: mark price (5 min, reprice 30s). Phase 2: aggressive ±10% off mark (2 min, reprice 15s). Runs in background thread with Telegram progress notifications. `LifecycleManager.kill_all()` emergency method terminates all lifecycle trades (`position_closer.py`, `trade_lifecycle.py`, `dashboard.py`)
+- ✅ **Self-Shutdown Bug Fix** — Removed `_enabled=False` side effect from `max_trades_per_day` gate, removed auto-shutdown when all runners disabled, moved `_check_closed_trades` above `_enabled` guard (`strategy.py`, `main.py`)
+- ✅ **Telegram Enhancements** — Daily summary at fixed 07:00 UTC (wall-clock gated, immune to restarts), position details in summary, pause/resume/stop notifications (`telegram_notifier.py`)
 
 ### Not yet implemented
 - ⬜ Multi-instrument support (futures, spot)
@@ -86,7 +90,8 @@ CoincallTrader/
 ├── multileg_orderbook.py   # Smart chunked multi-leg execution
 ├── rfq.py                  # RFQ block-trade execution ($50k+ notional)
 ├── account_manager.py      # AccountSnapshot, PositionMonitor, margin/equity queries
-├── persistence.py          # TradeStatePersistence: JSON snapshots for crash recovery
+├── persistence.py          # Trade history log (append-only JSONL)
+├── position_closer.py      # Emergency two-phase position closer (kill switch)
 ├── health_check.py         # HealthChecker: background health logging every 5 minutes
 ├── telegram_notifier.py    # Telegram Bot API notifications (fire-and-forget)
 ├── dashboard.py            # Web dashboard (Flask + htmx, daemon thread)
@@ -190,14 +195,14 @@ CoincallTrader/
 | REQ-WD-02 | ✅ **Done** | Open positions view with P&L and Greeks — dashboard positions table |
 | REQ-WD-03 | ✅ **Partial** | Account health (margin level displayed; equity curve not yet) |
 | REQ-WD-04 | ✅ **Done** | Remote access — bind to 0.0.0.0, password-protected |
-| REQ-WD-05 | ✅ **Done** | Manual intervention — Pause/Resume/Stop per strategy + kill switch |
+| REQ-WD-05 | ✅ **Done** | Manual intervention — Pause/Resume/Stop per strategy + kill switch (two-phase mark-price close via PositionCloser) |
 
 ### 7. Persistence & Recovery
 
 | Requirement | Priority | Description |
 |-------------|----------|-------------|
-| REQ-PR-01 | ✅ **Partial** | Position persistence — file logging to `logs/trading.log` provides audit trail; no DB storage yet |
-| REQ-PR-02 | ✅ **Partial** | Order history — logged to file; no queryable DB |
+| REQ-PR-01 | ✅ **Done** | Trade state persistence — `to_dict()/from_dict()` serialization, `trades_snapshot.json` on every tick, crash flag + recovery in `main.py` |
+| REQ-PR-02 | ✅ **Done** | Trade history — append-only `trade_history.jsonl` via `save_completed_trade()` |
 | REQ-PR-03 | Medium | Persist strategy state to database |
 | REQ-PR-04 | Medium | Restart recovery: reload state on startup |
 

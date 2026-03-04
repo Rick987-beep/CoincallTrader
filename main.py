@@ -9,6 +9,7 @@ Usage:
     python main.py
 """
 
+import json
 import logging
 import os
 import signal
@@ -16,6 +17,7 @@ import sys
 import time
 
 from strategy import build_context, StrategyRunner
+from trade_lifecycle import TradeLifecycle, TradeState
 from strategies import blueprint_strangle, reverse_iron_condor_live, long_strangle_pnl_test, atm_straddle
 from persistence import TradeStatePersistence
 from health_check import HealthChecker
@@ -49,6 +51,119 @@ STRATEGIES = [
     # long_strangle_pnl_test,
     # reverse_iron_condor_live,
 ]
+
+RUNNING_FLAG = "logs/.running"
+
+
+# =============================================================================
+# Crash Recovery
+# =============================================================================
+
+def _recover_trades(ctx, runners):
+    """Attempt to recover active trades after a crash.
+
+    Loads trades from the LifecycleManager snapshot, reconstructs
+    TradeLifecycle objects, re-attaches exit conditions from the
+    matching strategy configs, and verifies positions on the exchange.
+
+    Returns:
+        Number of active trades recovered, or None on critical failure.
+    """
+    snapshot_file = "logs/trades_snapshot.json"
+    if not os.path.exists(snapshot_file):
+        logger.warning("No trades snapshot found — nothing to recover")
+        return 0
+
+    try:
+        with open(snapshot_file, "r") as f:
+            snapshot = json.load(f)
+    except Exception as e:
+        logger.error(f"Failed to parse trades snapshot: {e}")
+        return None
+
+    trades_data = snapshot.get("trades", [])
+    if not trades_data:
+        return 0
+
+    # Map strategy_id → runner for exit-condition re-attachment
+    runner_map = {r.strategy_id: r for r in runners}
+
+    # Fetch live exchange positions for verification
+    try:
+        exchange_positions = ctx.account_manager.get_positions(force_refresh=True)
+        exchange_symbols = {
+            p["symbol"] for p in exchange_positions
+            if float(p.get("qty", 0)) != 0
+        }
+        logger.info(f"Exchange has {len(exchange_symbols)} open position(s)")
+    except Exception as e:
+        logger.error(f"Failed to fetch exchange positions for recovery: {e}")
+        return None
+
+    recovered_active = 0
+
+    for td in trades_data:
+        state_str = td.get("state", "")
+        trade_id = td.get("id", "?")
+
+        # ── Completed trades: restore for counters (max_trades_per_day) ──
+        if state_str in ("closed", "failed"):
+            trade = TradeLifecycle.from_dict(td)
+            ctx.lifecycle_manager.restore_trade(trade)
+            continue
+
+        # ── PENDING_OPEN: no orders placed, safe to skip ────────────────
+        if state_str == "pending_open":
+            logger.info(f"Skipping PENDING_OPEN trade {trade_id} (no orders placed)")
+            continue
+
+        # ── Active trades: OPEN, OPENING, PENDING_CLOSE, CLOSING ────────
+        strategy_id = td.get("strategy_id")
+        runner = runner_map.get(strategy_id)
+        if not runner:
+            logger.error(
+                f"Cannot recover trade {trade_id}: "
+                f"no registered strategy '{strategy_id}'"
+            )
+            return None
+
+        trade = TradeLifecycle.from_dict(td)
+
+        # Re-attach exit conditions from the strategy config
+        trade.exit_conditions = list(runner.config.exit_conditions)
+
+        # Verify all open legs still have positions on the exchange
+        for leg in trade.open_legs:
+            if leg.symbol not in exchange_symbols:
+                logger.error(
+                    f"Cannot recover trade {trade.id}: "
+                    f"position {leg.symbol} not found on exchange"
+                )
+                return None
+
+        # Normalize transient states to safe resume points
+        if trade.state == TradeState.OPENING:
+            # Positions confirmed on exchange → treat as filled
+            trade.state = TradeState.OPEN
+            trade.opened_at = trade.opened_at or time.time()
+            for leg in trade.open_legs:
+                if leg.filled_qty == 0:
+                    leg.filled_qty = leg.qty
+        elif trade.state == TradeState.CLOSING:
+            # Close orders died with the process → retry from PENDING_CLOSE
+            trade.state = TradeState.PENDING_CLOSE
+            trade.close_legs = []
+
+        ctx.lifecycle_manager.restore_trade(trade)
+        recovered_active += 1
+
+    # Pre-populate _known_closed_ids so runners don't re-fire callbacks
+    for r in runners:
+        for trade in r.all_trades:
+            if trade.state in (TradeState.CLOSED, TradeState.FAILED):
+                r._known_closed_ids.add(trade.id)
+
+    return recovered_active
 
 
 # =============================================================================
@@ -108,6 +223,32 @@ def main():
         print("\n✗ FATAL: No valid strategies to run")
         sys.exit(1)
 
+    # ── Crash Recovery ────────────────────────────────────────────────────
+    if os.path.exists(RUNNING_FLAG):
+        logger.warning("Crash flag detected — previous run did not shut down cleanly")
+        recovered = _recover_trades(ctx, runners)
+        if recovered is None:
+            logger.error("CRITICAL: State recovery failed — manual intervention required")
+            notifier.notify_error(
+                "CRITICAL: Crash recovery failed. "
+                "Check exchange positions and logs manually."
+            )
+            print("\n✗ CRITICAL: Could not recover from crash. Check logs and positions.")
+            sys.exit(1)
+        elif recovered > 0:
+            logger.info(f"Successfully recovered {recovered} active trade(s)")
+            notifier.notify_error(
+                f"Crash recovery: restored {recovered} active trade(s). "
+                f"Resuming normal operation."
+            )
+        else:
+            logger.info("Crash flag present but no active trades to recover")
+
+    # Write crash flag (cleared on clean shutdown)
+    os.makedirs("logs", exist_ok=True)
+    with open(RUNNING_FLAG, "w") as f:
+        f.write(str(time.time()))
+
     # ── Start services ────────────────────────────────────────────────────
     try:
         ctx.position_monitor.start()
@@ -139,17 +280,16 @@ def main():
             for r in runners:
                 r.stop()
             
-            # Save final trade state
-            all_active_trades = []
-            for r in runners:
-                all_active_trades.extend(r.active_trades)
-            if all_active_trades:
-                persistence.save_trades(all_active_trades)
-            
             ctx.position_monitor.stop()
             logger.info("Shutdown complete")
         except Exception as e:
             logger.error(f"Error during shutdown: {e}", exc_info=True)
+        # Clear crash flag — clean shutdown
+        try:
+            if os.path.exists(RUNNING_FLAG):
+                os.remove(RUNNING_FLAG)
+        except Exception:
+            pass
         sys.exit(0)
 
     signal.signal(signal.SIGINT, shutdown)
@@ -159,33 +299,11 @@ def main():
     logger.info("Main event loop started — monitoring strategies")
     consecutive_errors = 0
     max_consecutive_errors = 10
-    last_persistence_save = time.time()
 
     try:
         while True:
             try:
                 time.sleep(10)
-                
-                # Check if all strategies are complete
-                if runners and all(
-                    not r._enabled and not r.active_trades for r in runners
-                ):
-                    logger.info("All strategies completed — auto-shutting down")
-                    print("\n✓ All strategies completed — shutting down cleanly")
-                    shutdown()
-                
-                # Periodically save trade state (every 60 seconds)
-                now = time.time()
-                if now - last_persistence_save > 60:
-                    try:
-                        all_active_trades = []
-                        for r in runners:
-                            all_active_trades.extend(r.active_trades)
-                        if all_active_trades:
-                            persistence.save_trades(all_active_trades)
-                        last_persistence_save = now
-                    except Exception as e:
-                        logger.error(f"Failed to save trade state: {e}")
                 
                 # Log health status periodically
                 active_count = sum(1 for r in runners if r.active_trades)

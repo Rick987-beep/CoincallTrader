@@ -1,3 +1,106 @@
+# Release Notes — v0.9.0 "Hardened Operations"
+
+**Release Date:** March 4, 2026  
+**Previous Version:** v0.8.1 (Executable PnL)
+
+---
+
+## Overview
+
+v0.9.0 addresses the **duplicate trade incident** (4 BTC option legs opened instead of 2) by fixing the self-shutdown bug chain, and adds three operational hardening features: **crash recovery**, a **real kill switch** (two-phase mark-price position closer), and **Telegram enhancements**.
+
+---
+
+## Problem
+
+A three-step death chain caused the duplicate trade:
+
+1. `max_trades_per_day` gate set `_enabled = False` on the strategy runner — a side effect beyond its gating purpose
+2. `main.py` detected all runners disabled and triggered auto-shutdown
+3. NSSM restarted the process with empty state — opened a duplicate trade
+
+Secondary issues: the kill switch only transitioned lifecycle state (didn't place close orders on illiquid legs), `_check_closed_trades` was gated behind `_enabled` (callbacks/persistence/notifications skipped for killed trades), and the daily Telegram summary crashed on restart due to undefined attributes.
+
+## Changes
+
+### 1. Self-Shutdown Bug Fix
+
+**`strategy.py`** — Removed `self._enabled = False` from `max_trades_per_day` gate. The gate now returns `False` to block entry without disabling the runner. The runner stays alive for position management.
+
+**`strategy.py`** — Moved `_check_closed_trades(account)` above the `if not self._enabled: return` guard so trade close callbacks, persistence, and Telegram notifications always fire.
+
+**`main.py`** — Removed the auto-shutdown block (`if runners and all(not r._enabled...)`). The process stays alive for dashboard access and position monitoring.
+
+### 2. Crash Recovery
+
+**`trade_lifecycle.py`** — Added `TradeLifecycle.to_dict()` (serializes all recovery-critical fields) and `TradeLifecycle.from_dict()` (reconstructs trade; exit conditions left empty for caller). Added `LifecycleManager.restore_trade()` to re-inject recovered trades.
+
+**`main.py`** — Writes `logs/.running` crash flag on startup; clears on clean shutdown. On restart with flag present, `_recover_trades()`:
+- Loads `logs/trades_snapshot.json`
+- Verifies each leg still has a position on the exchange
+- Re-attaches exit conditions from the matching strategy config  
+- Normalizes transient states: OPENING → OPEN (positions confirmed), CLOSING → PENDING_CLOSE (retry close orders)
+- All-or-nothing: exits to manual intervention if any inconsistency found
+
+### 3. Kill Switch — Two-Phase Mark-Price Close
+
+**`position_closer.py`** (NEW) — `PositionCloser` class for the dashboard kill switch. Emergency procedure, not part of normal strategy operation:
+
+| Step | Action |
+|------|--------|
+| 1 | `LifecycleManager.kill_all()` — cancel all tracked orders, mark trades CLOSED |
+| 2 | `StrategyRunner.stop()` on all runners — prevent new trades |
+| 3 | Wait 2s for cancellations to settle on exchange |
+| 4 | Fetch fresh exchange positions |
+| 5 | **Phase 1**: limit orders at mark price (5 min, reprice every 30s) |
+| 6 | **Phase 2**: aggressive ±10% off mark (2 min, reprice every 15s) |
+| 7 | Cancel unfilled, verify with exchange, send Telegram summary |
+
+Runs in a background thread — dashboard returns immediately. Designed for Coincall's illiquid short-DTE options where `LimitFillManager` fails (requires both bids and asks) and mark-price-based orders are the only reliable close mechanism.
+
+**`trade_lifecycle.py`** — Added `LifecycleManager.kill_all()`: cancels all orders (including fill-manager requoted IDs) and marks every active trade CLOSED in one pass.
+
+**`dashboard.py`** — Kill switch route now starts `PositionCloser` in background. Added `/api/killswitch/status` endpoint. Rejects duplicate activation.
+
+### 4. Telegram Enhancements
+
+- Daily summary now fires at exactly 07:00 UTC (wall-clock gated via date string, immune to process restarts)
+- Summary includes individual position details (symbol, qty, side)  
+- Removed `margin_utilization` parameter (was noisy, not actionable)
+- Added `notify_strategy_paused()`, `notify_strategy_resumed()`, `notify_strategy_stopped()` for dashboard control actions
+
+### 5. Persistence Cleanup
+
+- `persistence.py` stripped to trade history only (~120 lines, was 205)
+- Removed `save_trades()`, `load_trades()`, `clear()` — active trade persistence now handled by `LifecycleManager._persist_all_trades()` writing `logs/trades_snapshot.json` on every tick
+- `_persist_all_trades()` simplified to use `to_dict()`
+
+### 6. ATM Straddle Fix
+
+- `OPEN_HOUR` changed from 12 to 13 (entry window 13:00–14:00 UTC) to match intended trading schedule
+
+## Files Changed
+
+| File | Change |
+|------|--------|
+| `position_closer.py` | **NEW** — Two-phase mark-price position closer (~370 lines) |
+| `strategy.py` | Removed `_enabled=False` from max_trades gate; moved `_check_closed_trades` above guard |
+| `main.py` | Removed auto-shutdown; added crash flag + `_recover_trades()`; removed old `persistence.save_trades` calls |
+| `trade_lifecycle.py` | Added `to_dict()`, `from_dict()`, `restore_trade()`, `kill_all()`; simplified `_persist_all_trades()` |
+| `persistence.py` | Stripped to history only: `save_completed_trade()` + `load_trade_history()` |
+| `telegram_notifier.py` | Fixed daily summary (07:00 UTC wall-clock); added position details; added pause/resume/stop helpers |
+| `health_check.py` | Updated `notify_daily_summary` call signature (positions tuple) |
+| `dashboard.py` | Kill switch uses `PositionCloser`; added `/api/killswitch/status`; added Telegram for controls |
+| `strategies/atm_straddle.py` | `OPEN_HOUR` 12 → 13 |
+
+## Deployment Notes
+
+- **NSSM**: Run `nssm set CoincallTrader AppExit 0 Exit` on the VPS to prevent restart on clean shutdown (exit code 0)
+- Commit, push, pull on VPS, restart service as usual
+
+---
+---
+
 # Release Notes — v0.8.1 "Executable PnL"
 
 **Release Date:** March 4, 2026  

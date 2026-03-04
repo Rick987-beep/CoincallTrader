@@ -1,6 +1,6 @@
 # CoincallTrader — Project Context for AI Agents
 
-**Version:** 0.8.1  
+**Version:** 0.9.0  
 **Last Updated:** 4 March 2026  
 **Python:** 3.9+ (no 3.10+ syntax — use `Optional[X]`, not `X | None`)
 
@@ -127,10 +127,11 @@ All daemon threads — if the main process dies, everything dies.
 
 | Thread | Source | Interval |
 |--------|--------|----------|
-| Main | `main.py` — sleep loop, persistence saves, auto-shutdown detection | 10 s |
+| Main | `main.py` — sleep loop, crash flag management | 10 s |
 | PositionMonitor | `account_manager.py` — polls positions → fires callbacks | 10 s |
 | HealthChecker | `health_check.py` — logs status, triggers Telegram daily summary | 5 min |
 | Dashboard | `dashboard.py` — Flask + htmx web server | continuous |
+| PositionCloser | `position_closer.py` — emergency two-phase close (only when kill switch activated) | one-shot |
 
 ---
 
@@ -163,14 +164,15 @@ All daemon threads — if the main process dies, everything dies.
 | File | Purpose |
 |------|---------|
 | `account_manager.py` | `AccountManager`, `AccountSnapshot`, `PositionSnapshot`, `PositionMonitor`. |
-| `persistence.py` | `TradeStatePersistence` — `trade_state.json` (active), `trade_history.jsonl` (completed). |
+| `persistence.py` | `TradeStatePersistence` — append-only `trade_history.jsonl`. Completed trades only. |
 | `health_check.py` | `HealthChecker` — logs every 5 min, escalates on high margin/low equity, triggers daily Telegram summary. |
 
 ### Notifications & UI
 | File | Purpose |
 |------|---------|
-| `telegram_notifier.py` | `TelegramNotifier` — startup/shutdown, trade open/close, daily summary, errors. Fire-and-forget, rate-limited. |
-| `dashboard.py` | Flask + htmx web dashboard. Session auth, daemon thread. Routes: account, strategies, positions, logs, pause/resume/stop, kill switch. |
+| `telegram_notifier.py` | `TelegramNotifier` — startup/shutdown, trade open/close, daily summary (07:00 UTC), strategy pause/resume/stop, errors. Fire-and-forget, rate-limited. |
+| `dashboard.py` | Flask + htmx web dashboard. Session auth, daemon thread. Routes: account, strategies, positions, logs, pause/resume/stop, kill switch (two-phase mark-price close). |
+| `position_closer.py` | `PositionCloser` — emergency two-phase mark-price position closer. Phase 1: mark price (5 min). Phase 2: aggressive ±10% (2 min). Background thread. Kill switch only. |
 | `templates/` | 6 HTML files: `dashboard.html`, `login.html`, `_account.html`, `_strategies.html`, `_positions.html`, `_logs.html`. |
 
 ### Strategies
@@ -237,8 +239,9 @@ All hardening is built-in — no configuration needed:
 - **@retry**: Exponential backoff for ConnectionError/Timeout only (`retry.py`)
 - **Error isolation**: Main loop tolerates up to 10 consecutive errors, then exits and notifies via Telegram (`main.py`)
 - **Market data cache**: 30 s TTL, 100-entry LRU (`market_data.py`)
-- **Trade persistence**: Active trades saved to JSON every 60 s; completed trades appended to JSONL (`persistence.py`)
-- **Crash recovery**: PositionMonitor detects live positions on restart; `max_trades_per_day` prevents duplicates
+- **Trade persistence**: Active trades serialized via `to_dict()` to `logs/trades_snapshot.json` on every tick; completed trades appended to `logs/trade_history.jsonl` (`trade_lifecycle.py`, `persistence.py`)
+- **Crash recovery**: `logs/.running` crash flag written on start, removed on clean shutdown. On restart with flag, `_recover_trades()` loads snapshot, verifies exchange positions, re-attaches exit conditions, normalizes transient states. All-or-nothing: fails to manual intervention if inconsistent (`main.py`)
+- **Kill switch**: `PositionCloser` — two-phase mark-price close bypasses `LimitFillManager` (which requires both bids and asks). Phase 1: mark price. Phase 2: aggressive ±10%. Emergency procedure only (`position_closer.py`)
 
 ---
 

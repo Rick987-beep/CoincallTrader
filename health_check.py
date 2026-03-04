@@ -113,15 +113,14 @@ class HealthChecker:
                         log_level = logging.WARNING
                         status_lines.append("⚠ LOW EQUITY")
 
-                    # Telegram daily summary (throttled to 1× per ~23h inside notifier)
+                    # Telegram daily summary (wall-clock gated inside notifier)
                     if self._notifier:
                         try:
                             self._notifier.notify_daily_summary(
                                 equity=snapshot.equity,
                                 unrealized_pnl=snapshot.unrealized_pnl,
-                                margin_utilization=snapshot.margin_utilization,
                                 net_delta=snapshot.net_delta,
-                                position_count=snapshot.position_count,
+                                positions=snapshot.positions,
                             )
                         except Exception:
                             pass  # Never let notification failure affect health checks

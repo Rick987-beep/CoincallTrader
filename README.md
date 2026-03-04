@@ -3,7 +3,7 @@
 A strategy-driven options trading system for the [Coincall](https://www.coincall.com/) exchange.  
 Strategies are declared as configuration — not coded as classes — and the framework handles entry checks, leg resolution, execution, lifecycle management, and exits automatically.
 
-**Current version:** 0.8.0 — Web Dashboard
+**Current version:** 0.9.0 — Hardened Operations
 
 ## Highlights
 
@@ -18,13 +18,15 @@ Strategies are declared as configuration — not coded as classes — and the fr
 - **LimitFillManager**: Fill detection, configurable phased pricing (mark → mid → aggressive), requote management ✅
 - **ExecutionPhase**: Declarative pricing phases for limit orders — duration, buffer, reprice interval per phase ✅
 - **RFQParams**: Typed RFQ configuration (timeout, improvement threshold, fallback mode) ✅
-- **Telegram notifications**: Trade opens/closes, daily account summary, critical errors — via Bot API ✅
+- **Telegram notifications**: Trade opens/closes, daily account summary (07:00 UTC), strategy pause/resume/stop, critical errors ✅
 - **Web dashboard**: Real-time browser UI (Flask + htmx) — account status, strategy controls, positions table, log tail, kill switch ✅
+- **Kill switch**: Two-phase mark-price position closer — mark price (5 min) then aggressive ±10% (2 min), with Telegram progress ✅
+- **Crash recovery**: Crash flag detection, trade snapshot serialization (`to_dict`/`from_dict`), exchange position verification, all-or-nothing restore ✅
 - **Position monitoring**: Background polling with live Greeks, PnL, account snapshots, and tick-driven strategy execution ✅
 - **Multi-leg native**: Strangles, Iron Condors, Butterflies — any structure as one lifecycle ✅
 - **HMAC-SHA256 authentication**: Secure API access via `auth.py` ✅
 - **Phase 1 Hardening**: Request timeouts (30s), exponential backoff retries (1-2-4s), main loop error isolation ✅ 
-- **Phase 2 Reliability**: Market data caching (30s TTL), trade state persistence (60s snapshots), health check logging (5min intervals) ✅
+- **Phase 2 Reliability**: Market data caching (30s TTL), trade state persistence (tick snapshots), health check logging (5min intervals) ✅
 
 ## Quick Start
 
@@ -100,7 +102,8 @@ CoincallTrader/
 ├── multileg_orderbook.py           # SmartOrderbookExecutor — chunked multi-leg execution
 ├── rfq.py                          # RFQExecutor — block-trade execution ($50k+ notional)
 ├── account_manager.py              # AccountManager, PositionMonitor, AccountSnapshot
-├── persistence.py                  # Trade state persistence (JSON snapshots for crash recovery)
+├── persistence.py                  # Trade history log (append-only JSONL)
+├── position_closer.py              # Emergency two-phase position closer (kill switch)
 ├── health_check.py                 # Background health check logging (5-min intervals)
 ├── telegram_notifier.py            # Telegram Bot API notifications (trade alerts, daily summary)
 ├── dashboard.py                    # Web dashboard (Flask + htmx, daemon thread, password-protected)
@@ -298,7 +301,8 @@ python3 tests/test_complex_option_selection.py
 9. ✅ **48-hour reliability** — timeouts, retries, persistence, health checks
 10. ✅ **Configurable execution timing** — phased pricing, typed RFQ params
 11. ✅ **Web dashboard** — real-time browser UI with strategy controls and kill switch
-12. ⬜ Multi-instrument — futures, spot trading
+12. ✅ **Hardened operations** — crash recovery, kill switch (two-phase mark-price close), self-shutdown fix, Telegram enhancements
+13. ⬜ Multi-instrument — futures, spot trading
 
 ## Disclaimer
 

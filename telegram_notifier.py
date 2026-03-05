@@ -22,6 +22,9 @@ Setup:
      TELEGRAM_CHAT_ID=123456789
 
 If TELEGRAM_BOT_TOKEN is not set, the notifier silently no-ops.
+
+Access the shared instance via ``get_notifier()`` — works like
+``logging.getLogger()``: any module can import and call it.
 """
 
 import logging
@@ -37,6 +40,21 @@ logger = logging.getLogger(__name__)
 
 # Rate limit: minimum seconds between messages
 _MIN_INTERVAL = 1.0
+
+# Module-level singleton — initialised lazily by get_notifier()
+_instance: Optional["TelegramNotifier"] = None
+
+
+def get_notifier() -> "TelegramNotifier":
+    """Return the shared TelegramNotifier singleton.
+
+    Creates the instance on first call (reads env vars).  Thread-safe
+    via the GIL — subsequent calls return the same object.
+    """
+    global _instance
+    if _instance is None:
+        _instance = TelegramNotifier()
+    return _instance
 
 
 class TelegramNotifier:

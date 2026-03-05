@@ -1,6 +1,6 @@
 # CoincallTrader — Project Context for AI Agents
 
-**Version:** 0.9.1  
+**Version:** 0.9.2  
 **Last Updated:** 5 March 2026  
 **Python:** 3.9+ (no 3.10+ syntax — use `Optional[X]`, not `X | None`)
 
@@ -58,6 +58,7 @@ position_monitor  PositionMonitor      — background poller → callbacks
 lifecycle_manager LifecycleManager     — trade state machine
 persistence       TradeStatePersistence (optional) — crash recovery JSON
 notifier          TelegramNotifier     (optional) — fire-and-forget alerts
+                  ↳ also accessible globally via get_notifier() singleton
 ```
 Created by `build_context()`.  For tests, replace any field with a mock.
 
@@ -170,7 +171,7 @@ All daemon threads — if the main process dies, everything dies.
 ### Notifications & UI
 | File | Purpose |
 |------|---------|
-| `telegram_notifier.py` | `TelegramNotifier` — startup/shutdown, trade open/close, daily summary (`maybe_send_daily_summary`, 07:00 UTC, called from main loop), strategy pause/resume/stop, errors. Fire-and-forget, rate-limited. |
+| `telegram_notifier.py` | `TelegramNotifier` — startup/shutdown, trade open/close, daily summary (`maybe_send_daily_summary`, 07:00 UTC, called from main loop), strategy pause/resume/stop, errors. Fire-and-forget, rate-limited. `get_notifier()` provides module-level singleton access (like `logging.getLogger()`). Trade-open notification fires from `LifecycleManager` at the OPEN state transition. |
 | `dashboard.py` | Flask + htmx web dashboard. Session auth, daemon thread. Routes: account, strategies, positions, logs, pause/resume/stop, kill switch (two-phase mark-price close). |
 | `position_closer.py` | `PositionCloser` — emergency two-phase mark-price position closer. Phase 1: mark price (5 min). Phase 2: aggressive ±10% (2 min). Background thread. Kill switch only. |
 | `templates/` | 6 HTML files: `dashboard.html`, `login.html`, `_account.html`, `_strategies.html`, `_positions.html`, `_logs.html`. |

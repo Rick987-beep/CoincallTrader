@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.2] - 2026-03-05
+
+### Fixed
+
+- **Entry cost $0.00 in Telegram** — "Trade Opened" notification was sent before limit-mode fills completed, so `total_entry_cost()` returned zero. Moved notification from `strategy.py` to `trade_lifecycle.py`, firing at the actual OPEN state transition where fill prices are populated.
+
+### Changed
+
+- **`telegram_notifier.py`** — Added `get_notifier()` module-level singleton factory. Any module can import and call it without DI wiring (same pattern as `logging.getLogger()`).
+- **`trade_lifecycle.py`** — Added `_notify_trade_opened()` helper on `LifecycleManager`. Called at all 3 OPEN transitions: `_check_open_fills` (limit), `_open_rfq`, `_open_smart`.
+- **`strategy.py`** — Removed premature `notify_trade_opened` call from `_open_trade()`. Close notification migrated from `self.ctx.notifier` to `get_notifier()`.
+
+---
+
 ## [0.9.1] - 2026-03-05
 
 ### Removed - Streamlined Supervision

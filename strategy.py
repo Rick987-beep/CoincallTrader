@@ -58,7 +58,7 @@ from market_data import MarketData
 from multileg_orderbook import SmartExecConfig, SmartOrderbookExecutor
 from option_selection import LegSpec, resolve_legs
 from rfq import RFQExecutor
-from telegram_notifier import TelegramNotifier
+from telegram_notifier import TelegramNotifier, get_notifier
 from trade_execution import TradeExecutor
 from trade_execution import ExecutionParams, ExecutionPhase
 from trade_lifecycle import (
@@ -720,17 +720,8 @@ class StrategyRunner:
             logger.info(f"[{self._strategy_id}] opening trade {trade.id}")
             self.ctx.lifecycle_manager.open(trade.id)
 
-            # Telegram notification — trade opened
-            if self.ctx.notifier:
-                try:
-                    self.ctx.notifier.notify_trade_opened(
-                        strategy_name=self._strategy_id,
-                        trade_id=trade.id,
-                        legs=trade.open_legs,
-                        entry_cost=trade.total_entry_cost(),
-                    )
-                except Exception:
-                    pass  # Never let notification failure affect trading
+            # Telegram notification is sent by LifecycleManager when trade
+            # reaches OPEN state (after fills complete).
 
         except Exception as e:
             logger.error(f"[{self._strategy_id}] failed to open trade: {e}")
@@ -800,21 +791,20 @@ class StrategyRunner:
                                 f"[{self._strategy_id}] failed to persist trade {trade.id}: {e}"
                             )
                     # Telegram notification — trade closed
-                    if self.ctx.notifier:
-                        try:
-                            entry_cost = trade.total_entry_cost()
-                            roi = (pnl / abs(entry_cost) * 100) if entry_cost else 0.0
-                            hold_min = (trade.hold_seconds or 0) / 60
-                            self.ctx.notifier.notify_trade_closed(
-                                strategy_name=self._strategy_id,
-                                trade_id=trade.id,
-                                pnl=pnl,
-                                roi=roi,
-                                hold_minutes=hold_min,
-                                entry_cost=entry_cost,
-                            )
-                        except Exception:
-                            pass  # Never let notification failure affect trading
+                    try:
+                        entry_cost = trade.total_entry_cost()
+                        roi = (pnl / abs(entry_cost) * 100) if entry_cost else 0.0
+                        hold_min = (trade.hold_seconds or 0) / 60
+                        get_notifier().notify_trade_closed(
+                            strategy_name=self._strategy_id,
+                            trade_id=trade.id,
+                            pnl=pnl,
+                            roi=roi,
+                            hold_minutes=hold_min,
+                            entry_cost=entry_cost,
+                        )
+                    except Exception:
+                        pass  # Never let notification failure affect trading
 
                     if self.config.on_trade_closed:
                         try:

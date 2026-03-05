@@ -1,3 +1,44 @@
+# Release Notes — v0.9.2 "Notifier Singleton & Entry Cost Fix"
+
+**Release Date:** March 5, 2026  
+**Previous Version:** v0.9.1 (Streamlined Supervision)
+
+---
+
+## Overview
+
+Fixes the Telegram "Trade Opened" notification showing `Entry cost: $0.00` for limit-mode trades, and refactors the notifier into a module-level singleton accessible from any module.
+
+---
+
+## Bug
+
+The "Trade Opened" Telegram notification was sent in `strategy.py` immediately after `lifecycle_manager.open()`. For limit-mode trades, `open()` only **places** orders — it returns while `filled_qty` on every leg is still `0.0`. The actual fills arrive asynchronously via `_check_open_fills()` in the tick loop.
+
+`total_entry_cost()` multiplies `fill_price × filled_qty` per leg — both zero at notification time → entry cost = $0.00.
+
+RFQ and smart modes were unaffected because their fills complete synchronously inside `open()`.
+
+## Fix
+
+Moved the "Trade Opened" notification from `strategy.py` (premature) to `trade_lifecycle.py` (at the exact OPEN state transition), where fill prices are guaranteed to be populated. Added a `_notify_trade_opened()` helper on `LifecycleManager`, called at all three OPEN transitions: `_check_open_fills` (limit), `_open_rfq`, `_open_smart`.
+
+## Refactor: `get_notifier()` Singleton
+
+The `TelegramNotifier` is a cross-cutting observability concern — like a logger, not business logic. Previously it lived on `TradingContext` and was only accessible to modules with a `ctx` reference, which forced notifications into the wrong layer.
+
+Added `get_notifier()` to `telegram_notifier.py` — a module-level singleton (lazy-initialized, reads env vars on first call). Any module can now `from telegram_notifier import get_notifier` without DI wiring. The close notification in `strategy.py` was migrated to use it as well.
+
+## Files Changed
+
+| File | Change |
+|------|--------|
+| `telegram_notifier.py` | Added `get_notifier()` singleton factory and module-level `_instance` |
+| `trade_lifecycle.py` | Added `_notify_trade_opened()` helper; fires at all 3 OPEN transitions |
+| `strategy.py` | Removed premature `notify_trade_opened` from `_open_trade()`; close notification uses `get_notifier()` |
+
+---
+
 # Release Notes — v0.9.1 "Streamlined Supervision"
 
 **Release Date:** March 5, 2026  

@@ -187,8 +187,6 @@ def _create_app(
         if r:
             r.disable()
             logger.info(f"[Dashboard] Strategy '{name}' paused by user")
-            if ctx.notifier:
-                ctx.notifier.notify_strategy_paused(name)
         return api_strategies()
 
     @app.route("/api/strategy/<name>/resume", methods=["POST"])
@@ -198,8 +196,6 @@ def _create_app(
         if r:
             r.enable()
             logger.info(f"[Dashboard] Strategy '{name}' resumed by user")
-            if ctx.notifier:
-                ctx.notifier.notify_strategy_resumed(name)
         return api_strategies()
 
     @app.route("/api/strategy/<name>/stop", methods=["POST"])
@@ -209,8 +205,6 @@ def _create_app(
         if r:
             r.stop()
             logger.info(f"[Dashboard] Strategy '{name}' stopped by user")
-            if ctx.notifier:
-                ctx.notifier.notify_strategy_stopped(name)
         return api_strategies()
 
     # ── Kill switch (two-phase mark-price close) ────────────────────────
@@ -219,7 +213,6 @@ def _create_app(
         account_manager=ctx.account_manager,
         executor=ctx.executor,
         lifecycle_manager=ctx.lifecycle_manager,
-        notifier=ctx.notifier,
     )
 
     @app.route("/api/killswitch", methods=["POST"])

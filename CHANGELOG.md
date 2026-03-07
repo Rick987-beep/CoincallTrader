@@ -5,6 +5,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.4] - 2026-03-07
+
+### Changed — Telegram Notifications Moved to Strategy Level
+
+Telegram notifications are now a strategy opt-in concern, not a framework responsibility. Infrastructure modules no longer call the notifier — each strategy decides what to notify and when.
+
+#### Removed from framework
+- **`main.py`** — Removed `TelegramNotifier` creation, `ctx.notifier` wiring, startup/shutdown/error/daily-summary notifications
+- **`dashboard.py`** — Removed `notify_strategy_paused/resumed/stopped()` calls
+- **`trade_lifecycle.py`** — Removed `_notify_trade_opened()` method and all call sites, removed `notify_error()` on close circuit breaker
+- **`position_closer.py`** — Removed `notifier` parameter, `_notify()` method, and all Telegram progress calls
+- **`strategy.py`** — Removed `TelegramNotifier`/`get_notifier` imports, `ctx.notifier` field from `TradingContext`, auto `notify_trade_closed()` from `_check_closed_trades()`
+- **`telegram_notifier.py`** — Removed `maybe_send_daily_summary()`, `notify_strategy_paused/resumed/stopped()`, daily-summary state
+
+#### Added to framework
+- **`strategy.py`** — New `on_trade_opened` callback on `StrategyConfig` (mirrors existing `on_trade_closed`). New `_check_opened_trades()` detection in `StrategyRunner` with `_known_open_ids` tracking. Recovery in `main.py` pre-populates open IDs to prevent re-firing.
+
+#### Strategy-level Telegram (opt-in)
+- **`strategies/atm_straddle.py`** — Added `get_notifier()` import, `_on_trade_opened()` and Telegram calls in `_on_trade_closed()`, both wired to `StrategyConfig`
+- **`strategies/blueprint_strangle.py`** — Same pattern
+
+### Design Rationale
+The singleton `get_notifier()` remains available for any strategy to import and use. Infrastructure modules (lifecycle, dashboard, kill switch) stay silent — their events are logged but not pushed to Telegram. This keeps notification decisions where they belong: in the strategy.
+
+---
+
 ## [0.9.3] - 2026-03-05
 
 ### Fixed — Runaway Short Position on Close (Critical)

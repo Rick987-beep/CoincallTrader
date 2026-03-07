@@ -2,15 +2,18 @@
 """
 Telegram Notification Module
 
-Sends high-level trading alerts to a Telegram chat via the Bot API.
+Sends trading alerts to a Telegram chat via the Bot API.
 Designed to be fire-and-forget: a Telegram failure never crashes the bot.
 
-Notifications sent:
-  - System startup / shutdown
-  - Trade opened (strategy, legs, entry cost)
-  - Trade closed (PnL, ROI, hold time)
-  - Daily account summary (equity, UPnL, positions, delta)
-  - Critical errors (consecutive failures in main loop)
+Strategies opt in by calling ``get_notifier()`` — a lazy singleton that
+reads credentials from env vars on first use.  Modules outside strategies
+should NOT call the notifier; notification decisions belong to strategies.
+
+Available helpers:
+  - notify_startup / notify_shutdown
+  - notify_trade_opened / notify_trade_closed
+  - notify_error
+  - send() for custom messages
 
 Setup:
   1. Message @BotFather on Telegram → /newbot → get your bot token
@@ -22,9 +25,6 @@ Setup:
      TELEGRAM_CHAT_ID=123456789
 
 If TELEGRAM_BOT_TOKEN is not set, the notifier silently no-ops.
-
-Access the shared instance via ``get_notifier()`` — works like
-``logging.getLogger()``: any module can import and call it.
 """
 
 import logging
@@ -75,9 +75,6 @@ class TelegramNotifier:
         self._enabled = bool(self._token and self._chat_id)
         self._lock = threading.Lock()
         self._last_send: float = 0.0
-        # Daily summary: track the last UTC date we sent on
-        self._last_daily_date: Optional[str] = None
-        self._daily_hour = 7  # Send daily summary at 07:00 UTC
 
         if self._enabled:
             self._url = f"https://api.telegram.org/bot{self._token}/sendMessage"
@@ -185,72 +182,7 @@ class TelegramNotifier:
             f"Entry cost: ${entry_cost:.2f}"
         )
 
-    def maybe_send_daily_summary(
-        self,
-        equity: float,
-        unrealized_pnl: float,
-        net_delta: float,
-        positions: tuple = (),
-    ) -> None:
-        """
-        Send a daily account summary at a fixed wall-clock time (07:00 UTC).
-
-        Called every 10 s from the main event loop.  Internally gated
-        by date string — sends at most once per calendar day, and only
-        after self._daily_hour UTC.  Immune to process restarts (uses date,
-        not elapsed time).
-        """
-        now_utc = datetime.now(timezone.utc)
-
-        # Only send after the configured hour
-        if now_utc.hour < self._daily_hour:
-            return
-
-        today_str = now_utc.strftime("%Y-%m-%d")
-        if self._last_daily_date == today_str:
-            return  # Already sent today
-
-        self._last_daily_date = today_str
-
-        # Build positions list
-        pos_lines = []
-        for p in positions:
-            side = getattr(p, "side", "?")
-            symbol = getattr(p, "symbol", "?")
-            qty = getattr(p, "qty", 0)
-            pos_lines.append(f"  • {symbol} {qty} {side}")
-
-        ts = now_utc.strftime("%Y-%m-%d %H:%M UTC")
-        msg = (
-            f"📊 <b>Daily Summary</b> — {ts}\n"
-            f"Equity: ${equity:,.2f}\n"
-            f"Unrealized PnL: ${unrealized_pnl:+,.2f}\n"
-            f"Net delta: {net_delta:+.4f}\n"
-            f"Open positions: {len(positions)}"
-        )
-        if pos_lines:
-            msg += "\n" + "\n".join(pos_lines)
-
-        self.send(msg)
-
     def notify_error(self, message: str) -> None:
         """Send a critical error alert."""
         ts = datetime.now(timezone.utc).strftime("%H:%M UTC")
         self.send(f"🚨 <b>Error</b> ({ts})\n{message}")
-
-    # ── Dashboard control notifications ──────────────────────────────────
-
-    def notify_strategy_paused(self, strategy_name: str) -> None:
-        """Notify when a strategy is paused via dashboard."""
-        ts = datetime.now(timezone.utc).strftime("%H:%M UTC")
-        self.send(f"\u23f8 <b>Strategy paused</b>: {strategy_name}\nTime: {ts}")
-
-    def notify_strategy_resumed(self, strategy_name: str) -> None:
-        """Notify when a strategy is resumed via dashboard."""
-        ts = datetime.now(timezone.utc).strftime("%H:%M UTC")
-        self.send(f"\u25b6 <b>Strategy resumed</b>: {strategy_name}\nTime: {ts}")
-
-    def notify_strategy_stopped(self, strategy_name: str) -> None:
-        """Notify when a strategy is stopped via dashboard."""
-        ts = datetime.now(timezone.utc).strftime("%H:%M UTC")
-        self.send(f"\u23f9 <b>Strategy stopped</b>: {strategy_name}\nTime: {ts}")

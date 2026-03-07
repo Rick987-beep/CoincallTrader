@@ -58,7 +58,6 @@ from market_data import MarketData
 from multileg_orderbook import SmartExecConfig, SmartOrderbookExecutor
 from option_selection import LegSpec, resolve_legs
 from rfq import RFQExecutor
-from telegram_notifier import TelegramNotifier, get_notifier
 from trade_execution import TradeExecutor
 from trade_execution import ExecutionParams, ExecutionPhase
 from trade_lifecycle import (
@@ -94,7 +93,6 @@ class TradingContext:
     position_monitor: PositionMonitor
     lifecycle_manager: LifecycleManager
     persistence: Optional[Any] = None  # TradeStatePersistence (optional)
-    notifier: Optional[TelegramNotifier] = None  # Telegram notifications (optional)
 
 
 def build_context(
@@ -547,6 +545,7 @@ class StrategyConfig:
     cooldown_seconds: float = 0.0
     check_interval_seconds: float = 60.0
     on_trade_closed: Optional[Callable] = None   # (TradeLifecycle, AccountSnapshot) -> None
+    on_trade_opened: Optional[Callable] = None   # (TradeLifecycle, AccountSnapshot) -> None
     metadata: Dict[str, Any] = field(default_factory=dict)
 
 
@@ -575,6 +574,7 @@ class StrategyRunner:
         self._last_check_time: float = 0.0
         self._enabled: bool = True
         self._known_closed_ids: set = set()   # tracks already-handled closed trades
+        self._known_open_ids: set = set()     # tracks already-handled opened trades
         logger.info(
             f"StrategyRunner '{config.name}' initialised "
             f"(max_trades={config.max_concurrent_trades}, "
@@ -609,7 +609,8 @@ class StrategyRunner:
         and opens a new trade if all gates pass.  Also fires
         on_trade_closed for newly completed trades.
         """
-        # Always process trade close events, even when entry is paused
+        # Always process trade open/close events, even when entry is paused
+        self._check_opened_trades(account)
         self._check_closed_trades(account)
 
         if not self._enabled:
@@ -720,9 +721,6 @@ class StrategyRunner:
             logger.info(f"[{self._strategy_id}] opening trade {trade.id}")
             self.ctx.lifecycle_manager.open(trade.id)
 
-            # Telegram notification is sent by LifecycleManager when trade
-            # reaches OPEN state (after fills complete).
-
         except Exception as e:
             logger.error(f"[{self._strategy_id}] failed to open trade: {e}")
 
@@ -765,6 +763,25 @@ class StrategyRunner:
             lines.append(f"  {trade.summary(account)}")
         return "\n".join(lines)
 
+    # -- Trade Open Tracking --------------------------------------------------
+
+    def _check_opened_trades(self, account: AccountSnapshot) -> None:
+        """
+        Detect trades that transitioned to OPEN since the last tick.
+        Fire the on_trade_opened callback for each newly-opened trade.
+        """
+        if not self.config.on_trade_opened:
+            return
+        for trade in self.all_trades:
+            if trade.state == TradeState.OPEN and trade.id not in self._known_open_ids:
+                self._known_open_ids.add(trade.id)
+                try:
+                    self.config.on_trade_opened(trade, account)
+                except Exception as e:
+                    logger.error(
+                        f"[{self._strategy_id}] on_trade_opened callback error: {e}"
+                    )
+
     # -- Trade Close Tracking -------------------------------------------------
 
     def _check_closed_trades(self, account: AccountSnapshot) -> None:
@@ -790,22 +807,6 @@ class StrategyRunner:
                             logger.error(
                                 f"[{self._strategy_id}] failed to persist trade {trade.id}: {e}"
                             )
-                    # Telegram notification — trade closed
-                    try:
-                        entry_cost = trade.total_entry_cost()
-                        roi = (pnl / abs(entry_cost) * 100) if entry_cost else 0.0
-                        hold_min = (trade.hold_seconds or 0) / 60
-                        get_notifier().notify_trade_closed(
-                            strategy_name=self._strategy_id,
-                            trade_id=trade.id,
-                            pnl=pnl,
-                            roi=roi,
-                            hold_minutes=hold_min,
-                            entry_cost=entry_cost,
-                        )
-                    except Exception:
-                        pass  # Never let notification failure affect trading
-
                     if self.config.on_trade_closed:
                         try:
                             self.config.on_trade_closed(trade, account)

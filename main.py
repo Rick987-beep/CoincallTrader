@@ -21,7 +21,6 @@ from trade_lifecycle import TradeLifecycle, TradeState
 from strategies import blueprint_strangle, reverse_iron_condor_live, long_strangle_pnl_test, atm_straddle
 from persistence import TradeStatePersistence
 from health_check import HealthChecker
-from telegram_notifier import TelegramNotifier
 from dashboard import start_dashboard
 from config import ENVIRONMENT
 
@@ -159,11 +158,13 @@ def _recover_trades(ctx, runners):
         ctx.lifecycle_manager.restore_trade(trade)
         recovered_active += 1
 
-    # Pre-populate _known_closed_ids so runners don't re-fire callbacks
+    # Pre-populate _known_closed_ids and _known_open_ids so runners don't re-fire callbacks
     for r in runners:
         for trade in r.all_trades:
             if trade.state in (TradeState.CLOSED, TradeState.FAILED):
                 r._known_closed_ids.add(trade.id)
+            if trade.state == TradeState.OPEN:
+                r._known_open_ids.add(trade.id)
 
     return recovered_active
 
@@ -186,12 +187,9 @@ def main():
         print(f"\n✗ FATAL: Could not initialize — {e}")
         sys.exit(1)
 
-    # ── Initialize persistence, health check, and notifications ──────────
+    # ── Initialize persistence and health check ─────────────────────────
     persistence = TradeStatePersistence()
     ctx.persistence = persistence  # Wire into TradingContext for trade history logging
-
-    notifier = TelegramNotifier()
-    ctx.notifier = notifier  # Wire into TradingContext for strategy notifications
 
     health_checker = HealthChecker(
         check_interval=300,  # 5 minutes
@@ -228,18 +226,10 @@ def main():
     recovered = _recover_trades(ctx, runners)
     if recovered is None:
         logger.error("CRITICAL: State recovery failed — manual intervention required")
-        notifier.notify_error(
-            "CRITICAL: Trade recovery failed. "
-            "Check exchange positions and logs manually."
-        )
         print("\n✗ CRITICAL: Could not recover trades. Check logs and positions.")
         sys.exit(1)
     elif recovered > 0:
         logger.info(f"Successfully recovered {recovered} active trade(s)")
-        notifier.notify_error(
-            f"Trade recovery: restored {recovered} active trade(s). "
-            f"Resuming normal operation."
-        )
 
     # ── Start services ────────────────────────────────────────────────────
     try:
@@ -253,8 +243,6 @@ def main():
         logger.info("Health checker started (interval=5m)")
 
         start_dashboard(ctx, runners)
-
-        notifier.notify_startup(ENVIRONMENT)
     except Exception as e:
         logger.error(f"Failed to start services: {e}", exc_info=True)
         print(f"\n✗ FATAL: Could not start services — {e}")
@@ -263,8 +251,6 @@ def main():
     def shutdown(sig=None, frame=None):
         logger.info("Shutting down...")
         try:
-            notifier.notify_shutdown()
-
             # Stop health checker first
             health_checker.stop()
             
@@ -286,28 +272,11 @@ def main():
     consecutive_errors = 0
     max_consecutive_errors = 10
 
-    def _maybe_send_daily_summary():
-        """Trigger daily Telegram summary if due (date-gated inside notifier)."""
-        try:
-            snapshot = ctx.position_monitor.snapshot()
-            if snapshot:
-                notifier.maybe_send_daily_summary(
-                    equity=snapshot.equity,
-                    unrealized_pnl=snapshot.unrealized_pnl,
-                    net_delta=snapshot.net_delta,
-                    positions=snapshot.positions,
-                )
-        except Exception:
-            pass  # Never let notification failure affect the main loop
-
     try:
         while True:
             try:
                 time.sleep(10)
 
-                # Daily Telegram summary (date-gated, at most once per day)
-                _maybe_send_daily_summary()
-                
                 # Log health status periodically
                 active_count = sum(1 for r in runners if r.active_trades)
                 if active_count > 0:
@@ -325,10 +294,6 @@ def main():
                 if consecutive_errors >= max_consecutive_errors:
                     logger.error(
                         f"Too many consecutive errors ({consecutive_errors}) — exiting"
-                    )
-                    notifier.notify_error(
-                        f"Main loop failed {max_consecutive_errors} consecutive times — shutting down.\n"
-                        f"Last error: {e}"
                     )
                     print(f"\n✗ FATAL: Main loop failed {max_consecutive_errors} times — exiting")
                     shutdown()

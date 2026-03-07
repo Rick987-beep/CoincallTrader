@@ -35,7 +35,6 @@ from trade_execution import TradeExecutor, LimitFillManager, ExecutionParams, Ex
 from rfq import RFQExecutor, OptionLeg, RFQResult
 from multileg_orderbook import SmartOrderbookExecutor, SmartExecConfig
 from market_data import get_option_orderbook
-from telegram_notifier import get_notifier
 
 logger = logging.getLogger(__name__)
 
@@ -513,18 +512,6 @@ class LifecycleManager:
         """Active (not CLOSED/FAILED) trades belonging to a strategy."""
         return [t for t in self.active_trades if t.strategy_id == strategy_id]
 
-    def _notify_trade_opened(self, trade: TradeLifecycle) -> None:
-        """Send a Telegram notification when a trade reaches OPEN state."""
-        try:
-            get_notifier().notify_trade_opened(
-                strategy_name=trade.strategy_id or "unknown",
-                trade_id=trade.id,
-                legs=trade.open_legs,
-                entry_cost=trade.total_entry_cost(),
-            )
-        except Exception:
-            pass  # Never let notification failure affect trading
-
     def restore_trade(self, trade: TradeLifecycle) -> None:
         """Inject a recovered trade into the manager's trade registry.
 
@@ -751,7 +738,6 @@ class LifecycleManager:
                 if i < len(result.legs):
                     leg.fill_price = float(result.legs[i].get('price', 0.0))
             logger.info(f"Trade {trade.id} opened via RFQ (all legs filled)")
-            self._notify_trade_opened(trade)
             return True
 
         # RFQ failed — try fallback if configured
@@ -823,7 +809,6 @@ class LifecycleManager:
                 trade.state = TradeState.OPEN
                 trade.opened_at = time.time()
                 logger.info(f"Trade {trade.id}: smart execution completed successfully")
-                self._notify_trade_opened(trade)
                 return True
             else:
                 trade.state = TradeState.FAILED
@@ -982,10 +967,6 @@ class LifecycleManager:
             trade.state = TradeState.FAILED
             trade.error = f"Close failed after {MAX_CLOSE_ATTEMPTS} attempts — manual intervention required"
             logger.critical(f"Trade {trade.id}: {trade.error}")
-            try:
-                get_notifier().notify_error(f"🚨 Trade {trade.id}: {trade.error}")
-            except Exception:
-                pass
             return False
 
         params = trade.execution_params or trade.metadata.get("execution_params") or ExecutionParams()
@@ -1052,7 +1033,6 @@ class LifecycleManager:
             trade.state = TradeState.OPEN
             trade.opened_at = time.time()
             logger.info(f"Trade {trade.id}: all open legs filled → OPEN")
-            self._notify_trade_opened(trade)
 
         elif result == "failed":
             logger.error(f"Trade {trade.id}: fill manager exhausted requote rounds")

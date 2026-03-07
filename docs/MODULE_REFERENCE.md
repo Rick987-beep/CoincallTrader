@@ -83,8 +83,8 @@ ctx.position_monitor.start()
 ### Key Classes
 | Class | Purpose |
 |-------|---------|
-| `TradingContext` | DI container: auth, market_data, executor, rfq_executor, smart_executor, account_manager, position_monitor, lifecycle_manager, persistence (optional), notifier (optional) |
-| `StrategyConfig` | Declarative definition: name, legs, entry/exit conditions, execution_mode, max_concurrent, max_trades_per_day, cooldown, execution_params, rfq_params, on_trade_closed |
+| `TradingContext` | DI container: auth, market_data, executor, rfq_executor, smart_executor, account_manager, position_monitor, lifecycle_manager, persistence (optional) |
+| `StrategyConfig` | Declarative definition: name, legs, entry/exit conditions, execution_mode, max_concurrent, max_trades_per_day, cooldown, execution_params, rfq_params, on_trade_opened, on_trade_closed |
 | `StrategyRunner` | Tick-driven executor: checks entries, resolves legs, creates trades, delegates to LifecycleManager. Exposes `stats` property. |
 
 ### Entry Condition Factories
@@ -182,13 +182,14 @@ Enriched option dict or `None`:
 
 ### StrategyRunner Lifecycle
 1. `tick(snapshot)` is called on each PositionMonitor update
-2. `_check_closed_trades()` fires `on_trade_closed` for newly finished trades
-3. Entry conditions checked — all must return `True`
-4. `resolve_legs()` converts `LegSpec` list to concrete `TradeLeg` list
-5. `LifecycleManager.create()` creates trade with exit conditions
-6. `LifecycleManager.open()` begins execution
-7. Subsequent ticks advance lifecycle (fill checks, exit evaluations)
-8. `runner.stop()` for graceful shutdown
+2. `_check_opened_trades()` fires `on_trade_opened` for newly opened trades
+3. `_check_closed_trades()` fires `on_trade_closed` for newly finished trades
+4. Entry conditions checked — all must return `True`
+5. `resolve_legs()` converts `LegSpec` list to concrete `TradeLeg` list
+6. `LifecycleManager.create()` creates trade with exit conditions
+7. `LifecycleManager.open()` begins execution
+8. Subsequent ticks advance lifecycle (fill checks, exit evaluations)
+9. `runner.stop()` for graceful shutdown
 9. `runner.stats` for win/loss/hold-time aggregates
 
 ---
@@ -327,7 +328,7 @@ params = ExecutionParams(phases=[
 
 **Price pre-validation:** `place_all()` validates prices for ALL legs before placing ANY orders. If one leg has no orderbook liquidity, no orders are placed at all. This prevents the partial-placement race condition where one leg fills while the other's cancel arrives too late.
 
-**Circuit breaker:** `_close_limit()` tracks close attempts per trade. After 10 failed attempts, the trade transitions to `FAILED` and a Telegram alert is sent. This prevents infinite retry loops when market conditions make closing impossible.
+**Circuit breaker:** `_close_limit()` tracks close attempts per trade. After 10 failed attempts, the trade transitions to `FAILED` with a critical log. This prevents infinite retry loops when market conditions make closing impossible.
 
 ```python
 # Close orders are always reduce_only — set automatically by _close_limit()

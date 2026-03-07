@@ -16,7 +16,6 @@ Designed for the dashboard kill switch:
   - Runs in a background thread (non-blocking)
   - Disables all strategy runners before closing
   - Cancels all lifecycle-managed orders and marks trades CLOSED
-  - Sends Telegram progress notifications
   - Safe to re-run (skips already-closed positions)
 """
 
@@ -31,7 +30,6 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional
 if TYPE_CHECKING:
     from account_manager import AccountManager
     from strategy import StrategyRunner
-    from telegram_notifier import TelegramNotifier
     from trade_execution import TradeExecutor
     from trade_lifecycle import LifecycleManager
 
@@ -90,12 +88,10 @@ class PositionCloser:
         account_manager: "AccountManager",
         executor: "TradeExecutor",
         lifecycle_manager: "LifecycleManager",
-        notifier: Optional["TelegramNotifier"] = None,
     ):
         self._am = account_manager
         self._executor = executor
         self._lm = lifecycle_manager
-        self._notifier = notifier
         self._running = False
         self._status = "idle"
         self._thread: Optional[threading.Thread] = None
@@ -155,17 +151,11 @@ class PositionCloser:
             positions = self._am.get_positions(force_refresh=True)
             if not positions:
                 self._status = "done"
-                self._notify("✅ <b>Kill switch</b>: no open positions — nothing to close")
                 logger.info("Kill switch: no open positions found")
                 return
 
             # 5. Build leg trackers
             legs = self._build_legs(positions)
-            self._notify(
-                f"🔴 <b>KILL SWITCH</b> activated\n"
-                f"Closing {len(legs)} position(s)...\n"
-                + "\n".join(f"  • {l.symbol} {l.side_label} {l.qty}" for l in legs)
-            )
 
             # 6. Phase 1: mark price
             self._status = "phase1"
@@ -199,7 +189,6 @@ class PositionCloser:
         except Exception as e:
             logger.error(f"Kill switch error: {e}", exc_info=True)
             self._status = f"error: {e}"
-            self._notify(f"⚠️ <b>Kill switch error</b>: {e}")
         finally:
             self._running = False
             # Trigger clean shutdown of the main process so crash flag
@@ -364,14 +353,5 @@ class PositionCloser:
 
         summary = "\n".join(lines)
         logger.warning(f"Kill switch summary:\n{summary}")
-        self._notify(summary)
 
         self._status = "done" if not remaining else f"done ({len(remaining)} still open)"
-
-    def _notify(self, message: str) -> None:
-        """Send a Telegram notification (if notifier available)."""
-        if self._notifier:
-            try:
-                self._notifier.send(message)
-            except Exception:
-                pass

@@ -33,6 +33,7 @@ from strategy import (
     profit_target,
     time_exit,
 )
+from telegram_notifier import get_notifier
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +65,19 @@ CHECK_INTERVAL = 30                 # seconds between entry/exit evaluations
 
 # ─── Trade Result Callback ──────────────────────────────────────────────────
 
+def _on_trade_opened(trade, account) -> None:
+    """Send Telegram notification when straddle trade opens."""
+    try:
+        get_notifier().notify_trade_opened(
+            strategy_name="ATM Straddle",
+            trade_id=trade.id,
+            legs=trade.open_legs,
+            entry_cost=trade.total_entry_cost(),
+        )
+    except Exception:
+        pass
+
+
 def _on_trade_closed(trade, account) -> None:
     """
     Called by the framework when a trade transitions to CLOSED or FAILED.
@@ -81,6 +95,18 @@ def _on_trade_closed(trade, account) -> None:
         f"Hold: {hold_seconds / 60:.1f} min  |  "
         f"Entry cost: ${entry_cost:.2f}"
     )
+
+    try:
+        get_notifier().notify_trade_closed(
+            strategy_name="ATM Straddle",
+            trade_id=trade.id,
+            pnl=pnl,
+            roi=roi,
+            hold_minutes=hold_seconds / 60,
+            entry_cost=entry_cost,
+        )
+    except Exception:
+        pass
 
 
 # ─── Strategy Factory ──────────────────────────────────────────────────────
@@ -132,5 +158,6 @@ def atm_straddle() -> StrategyConfig:
         check_interval_seconds=CHECK_INTERVAL,
 
         # ── Callbacks ────────────────────────────────────────────────────
+        on_trade_opened=_on_trade_opened,
         on_trade_closed=_on_trade_closed,
     )

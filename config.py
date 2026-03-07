@@ -18,6 +18,16 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # =============================================================================
+# DEPLOYMENT TARGET
+# =============================================================================
+
+# Deployment target: development (macOS) or production (Windows Server)
+DEPLOYMENT_TARGET = os.getenv('DEPLOYMENT_TARGET', 'development').lower()
+
+if DEPLOYMENT_TARGET not in ['development', 'production']:
+    raise ValueError(f"Invalid DEPLOYMENT_TARGET: '{DEPLOYMENT_TARGET}'. Must be 'development' or 'production'")
+
+# =============================================================================
 # ENVIRONMENT SELECTION
 # =============================================================================
 
@@ -93,6 +103,7 @@ def validate_config():
 validate_config()
 
 # Print configuration status
+print(f"[CONFIG] Deployment: {DEPLOYMENT_TARGET.upper()}")
 print(f"[CONFIG] Environment: {ENVIRONMENT.upper()}")
 print(f"[CONFIG] Base URL: {BASE_URL}")
 print(f"[CONFIG] API Key: {API_KEY[:20]}..." if API_KEY else "[CONFIG] API Key: NOT SET")

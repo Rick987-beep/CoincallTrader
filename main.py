@@ -63,6 +63,9 @@ def _recover_trades(ctx, runners):
     objects, re-attaches exit conditions from the matching strategy
     configs, and verifies positions on the exchange.
 
+    Additionally loads the order ledger (active_orders.json) so the
+    OrderManager knows about in-flight orders from the previous session.
+
     This is idempotent: a clean snapshot with no active trades simply
     returns 0.  The crash-flag file is no longer used — the snapshot
     combined with exchange verification is the source of truth.
@@ -70,6 +73,23 @@ def _recover_trades(ctx, runners):
     Returns:
         Number of active trades recovered, or None on critical failure.
     """
+    # ── Step 1: Load order ledger (before trade restore) ────────────────
+    # This populates OrderManager so it can track orders from the previous
+    # session.  If the file doesn't exist, that's fine — clean start.
+    try:
+        order_manager = ctx.lifecycle_manager.order_manager
+        order_manager.load_snapshot()
+        # Poll every recovered order for its true exchange state
+        order_manager.poll_all()
+        logger.info("Order ledger loaded and polled")
+    except Exception as e:
+        # Non-fatal: we can still recover trades without the order ledger.
+        # Orders from the previous session will be "forgotten" and the
+        # PENDING_CLOSE guard may place fresh close orders, but reduce_only
+        # and the circuit breaker provide defence in depth.
+        logger.warning(f"Order ledger recovery failed (non-fatal): {e}")
+
+    # ── Step 2: Load trade snapshot ─────────────────────────────────────
     snapshot_file = "logs/trades_snapshot.json"
     if not os.path.exists(snapshot_file):
         logger.warning("No trades snapshot found — nothing to recover")
@@ -165,6 +185,19 @@ def _recover_trades(ctx, runners):
                 r._known_closed_ids.add(trade.id)
             if trade.state == TradeState.OPEN:
                 r._known_open_ids.add(trade.id)
+
+    # ── Step 3: Reconcile order ledger against exchange ─────────────────
+    # Flags any orphaned orders (on exchange but not in our ledger) or
+    # stale ledger entries (in ledger but not on exchange).
+    try:
+        exchange_open_orders = ctx.account_manager.get_open_orders(force_refresh=True)
+        if exchange_open_orders is not None:
+            warnings = order_manager.reconcile(exchange_open_orders)
+            if warnings:
+                for w in warnings:
+                    logger.warning(f"Order reconciliation: {w}")
+    except Exception as e:
+        logger.warning(f"Order reconciliation skipped: {e}")
 
     return recovered_active
 

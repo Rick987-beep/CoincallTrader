@@ -1,6 +1,6 @@
 # CoincallTrader — Module Reference
 
-**Last Updated:** March 5, 2026
+**Last Updated:** March 9, 2026
 
 Internal documentation for the CoincallTrader application modules.
 For Coincall exchange API endpoints, see [API_REFERENCE.md](API_REFERENCE.md).
@@ -194,45 +194,60 @@ Enriched option dict or `None`:
 
 ---
 
-## Trade Lifecycle
+## Trade Lifecycle (Data Layer)
 
-See [trade_lifecycle.py](../trade_lifecycle.py) for the trade state machine implementation.
+See [trade_lifecycle.py](../trade_lifecycle.py) — pure data module containing dataclasses, enums, and PnL helpers. No state-machine logic.
 
-### Quick Start
-```python
-from trade_lifecycle import lifecycle_manager, profit_target, max_loss, max_hold_hours
-from rfq import OptionLeg
+### Module Split (v1.0.0)
 
-# Define a strangle
-legs = [
-    OptionLeg('BTCUSD-28FEB26-58000-P', 'BUY', 0.5),
-    OptionLeg('BTCUSD-28FEB26-78000-C', 'BUY', 0.5),
-]
+The original monolithic `trade_lifecycle.py` was split into three focused modules:
 
-# Create a trade with exit conditions
-trade = lifecycle_manager.create(
-    legs=legs,
-    exit_conditions=[profit_target(0.50), max_loss(0.80), max_hold_hours(24)],
-    execution_mode='rfq',
-    label='long strangle'
-)
+| Module | Responsibility | Lines |
+|--------|---------------|-------|
+| `trade_lifecycle.py` | Data: `TradeState`, `TradeLeg`, `TradeLifecycle`, `RFQParams`, `ExitCondition`, PnL helpers | ~450 |
+| `lifecycle_engine.py` | State machine: `LifecycleEngine` (ticks, state transitions, creates router + order manager) | ~500 |
+| `execution_router.py` | Routing: `ExecutionRouter` (dispatches open/close to limit/rfq/smart executor) | ~400 |
 
-# Open via RFQ
-lifecycle_manager.open(trade.trade_id)
+**Backward compatibility:** `from trade_lifecycle import LifecycleManager` still works — it resolves to `LifecycleEngine` via a `__getattr__` lazy re-export.
 
-# tick() is called automatically by PositionMonitor — evaluates exits
-# Or force-close manually:
-lifecycle_manager.force_close(trade.trade_id)
-```
-
-### Key Classes
+### Key Classes (trade_lifecycle.py)
 | Class | Purpose |
 |-------|---------|
 | `TradeState` | Enum: PENDING_OPEN → OPENING → OPEN → PENDING_CLOSE → CLOSING → CLOSED \| FAILED |
 | `TradeLeg` | Single leg: symbol, qty, side, order_id, fill_price, filled_qty |
-| `TradeLifecycle` | Groups legs with exit conditions; computes PnL, Greeks (pro-rated by our qty share). Optional `execution_params` and `rfq_params` typed fields. |
-| `LifecycleManager` | State machine: `create()`, `open()`, `close()`, `tick()`, `force_close()`. Close orders use `reduce_only=True` and a 10-attempt circuit breaker. |
+| `TradeLifecycle` | Groups legs with exit conditions; computes PnL, Greeks (pro-rated by our qty share). Optional `execution_params` and `rfq_params` typed fields. Serializable via `to_dict()/from_dict()`. |
 | `RFQParams` | Typed RFQ config: `timeout_seconds`, `min_improvement_pct`, `fallback_mode` |
+| `ExitCondition` | Named tuple: `(name, check_fn)` — callable `(AccountSnapshot, TradeLifecycle) → bool` |
+
+### Key Classes (lifecycle_engine.py)
+| Class | Purpose |
+|-------|---------|
+| `LifecycleEngine` | State machine: `create()`, `open()`, `close()`, `tick()`, `force_close()`, `kill_all()`, `cancel()`, `restore_trade()`. Owns `ExecutionRouter` and `OrderManager`. Exposes `order_manager` property. |
+
+### Key Classes (execution_router.py)
+| Class | Purpose |
+|-------|---------|
+| `ExecutionRouter` | Routes open/close to correct executor. Mode auto-detection by notional: single-leg → limit, multi-leg ≥$50k → rfq, ≥$10k → smart, <$10k → limit fallback. Close circuit breaker (10 attempts → FAILED). All close orders enforce `reduce_only=True`. |
+
+### Quick Start
+```python
+from strategy import build_context, StrategyConfig, StrategyRunner
+from trade_lifecycle import profit_target, max_loss, max_hold_hours
+
+# build_context() creates LifecycleEngine (with OrderManager + ExecutionRouter) internally
+ctx = build_context()
+
+# Strategies interact via StrategyConfig — never touch LifecycleEngine directly
+config = StrategyConfig(
+    name="example",
+    legs=strangle(qty=0.01, side=1),
+    exit_conditions=[profit_target(50), max_hold_hours(4)],
+    execution_mode="limit",
+)
+
+runner = StrategyRunner(config, ctx)
+ctx.position_monitor.on_update(runner.tick)
+```
 
 ### Exit Condition Factories
 | Factory | Signature | Description |
@@ -251,6 +266,66 @@ The lifecycle tracks our filled quantity vs. the exchange's total position quant
 - `_our_share(leg, pos)` = `our_filled_qty / exchange_total_qty` (clamped to [0, 1])
 - Applied to `structure_pnl()`, `structure_delta()`, `structure_greeks()`
 - Prevents contamination when the account has positions from other sources
+
+---
+
+## Order Manager
+
+See [order_manager.py](../order_manager.py) — central order ledger preventing duplicate and runaway orders.
+
+### Purpose
+Every order placement and cancellation goes through `OrderManager`. It wraps `TradeExecutor` and adds:
+- **Idempotent placement** — dedup key `(lifecycle_id, leg_index, purpose)` prevents duplicate orders
+- **Supersession chains** — `requote_order()` atomically cancels old + places new + links them
+- **Hard caps** — 30 orders per lifecycle, 4 pending per symbol
+- **Safety enforcement** — close/unwind orders always force `reduce_only=True`
+- **JSONL audit** — every state change appended to `logs/order_audit.jsonl`
+- **JSON snapshots** — `logs/active_orders.json` for crash recovery
+- **Exchange reconciliation** — `reconcile()` detects orphans and stale entries
+
+### Key Classes
+| Class | Purpose |
+|-------|---------|
+| `OrderRecord` | Dataclass: order_id, lifecycle_id, leg_index, purpose, symbol, side, qty, price, status, filled_qty, supersedes/superseded_by |
+| `OrderPurpose` | Enum: `OPEN_LEG`, `CLOSE_LEG`, `UNWIND` |
+| `OrderStatus` | Enum: `PENDING`, `PLACED`, `PARTIAL`, `FILLED`, `CANCELLED`, `FAILED` |
+| `OrderManager` | Central ledger: `place_order()`, `cancel_order()`, `cancel_all()`, `requote_order()`, `poll_all()`, `reconcile()`, `persist_snapshot()`, `load_snapshot()` |
+
+### Quick Start
+```python
+from order_manager import OrderManager, OrderPurpose
+
+# OrderManager wraps an executor (created automatically by LifecycleEngine)
+om = OrderManager(executor)
+
+# Place an order (idempotent — returns existing if already placed)
+record = om.place_order(
+    lifecycle_id="trade-123",
+    leg_index=0,
+    purpose=OrderPurpose.OPEN_LEG,
+    symbol="BTCUSD-28MAR26-100000-C",
+    side=1, qty=0.1, price=500.0,
+)
+
+# Requote (atomic cancel + replace + chain)
+new_record = om.requote_order(record.order_id, new_price=510.0)
+
+# Poll all live orders from exchange
+om.poll_all()
+
+# Reconcile against exchange state
+warnings = om.reconcile(exchange_open_orders)
+
+# Persist for crash recovery
+om.persist_snapshot()
+```
+
+### Integration Points
+- `LimitFillManager` routes through `OrderManager` when present (backward compatible — works without it)
+- `LifecycleEngine` creates and owns the `OrderManager` instance
+- `LifecycleEngine.tick()` checks `has_live_orders()` before allowing close (PENDING_CLOSE guard)
+- `position_closer.py` calls `order_manager.cancel_all()` after `kill_all()`
+- `main.py` crash recovery: `load_snapshot()` → `poll_all()` → `reconcile()`
 
 ### RFQParams Dataclass
 
@@ -575,23 +650,23 @@ if result.success:
 | `aggressive_wait_seconds` | 5.0 | Max wait per aggressive attempt |
 | `aggressive_retry_pause` | 1.0 | Pause between aggressive attempts |
 
-### Integration with LifecycleManager
+### Integration with LifecycleEngine
 
 **Opening trades:**
 ```python
-from trade_lifecycle import LifecycleManager
+from lifecycle_engine import LifecycleEngine
 
-manager = LifecycleManager()
-trade = manager.create(
+engine = LifecycleEngine(...)
+trade = engine.create(
     legs=legs,
     execution_mode="smart",
     smart_config=smart_config
 )
-manager.open(trade.id)
+engine.open(trade.id)
 ```
 
 **Closing trades:**
-Currently requires direct SmartOrderbookExecutor call (LifecycleManager smart close mode coming soon).
+Currently requires direct SmartOrderbookExecutor call (LifecycleEngine smart close mode coming soon).
 
 ### Use Cases
 

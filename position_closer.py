@@ -139,6 +139,17 @@ class PositionCloser:
             killed = self._lm.kill_all()
             logger.warning(f"Kill switch: {killed} lifecycle trade(s) terminated")
 
+            # 1b. Cancel every order tracked in the central ledger.
+            # kill_all() cancels via fill managers and leg order_ids, but
+            # the OrderManager may track additional orders (e.g. from
+            # requote chains).  This is belt-and-suspenders.
+            try:
+                om_cancelled = self._lm.order_manager.cancel_all()
+                if om_cancelled:
+                    logger.warning(f"Kill switch: {om_cancelled} order(s) cancelled via OrderManager")
+            except Exception as e:
+                logger.warning(f"Kill switch: OrderManager cancel_all failed: {e}")
+
             # 2. Stop all strategy runners (sets _enabled=False, no new trades)
             for r in runners:
                 r.stop()

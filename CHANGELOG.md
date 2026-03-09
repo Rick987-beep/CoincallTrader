@@ -5,6 +5,72 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0] - 2026-03-09
+
+### Added — Order Management & Structural Split
+
+Major architectural release: central order ledger preventing duplicate/runaway orders, and structural split of the monolithic `trade_lifecycle.py` into three focused modules.
+
+#### Phase 1: Core Safety — OrderManager
+
+- **`order_manager.py`** (NEW, ~600 lines) — Central order ledger wrapping `TradeExecutor`. Every order placement and cancellation goes through here.
+  - **Idempotent placement:** Dedup key `(lifecycle_id, leg_index, purpose)` — calling `place_order()` twice returns the existing live order instead of creating a duplicate
+  - **Supersession chains:** `requote_order()` atomically cancels the old order, places a new one, and links them via `superseded_by`/`supersedes` fields
+  - **Hard caps:** 30 orders per lifecycle, 4 pending per symbol — prevents runaway order accumulation
+  - **Safety enforcement:** `CLOSE_LEG` and `UNWIND` purposes always force `reduce_only=True` regardless of caller
+  - **JSONL audit log:** Every state change appended to `logs/order_audit.jsonl` (append-only, never truncated)
+  - **JSON snapshots:** `logs/active_orders.json` written on `persist_snapshot()` for crash recovery
+  - **`poll_all()`** — Batch poll all live orders from exchange, update statuses
+  - **`reconcile(exchange_orders)`** — Compare ledger against exchange open orders, detect orphans and stale entries
+  - **`has_live_orders(lifecycle_id)`** — PENDING_CLOSE guard used by tick() to prevent double-close
+- **`trade_execution.py`** — `LimitFillManager._place_single()` and `_requote_unfilled()` now route through `OrderManager` when present. Backward compatible — works without it.
+
+#### Phase 2: Structural Split
+
+- **`trade_lifecycle.py`** (TRIMMED, ~450 lines) — Now data-only: `TradeState`, `TradeLeg`, `TradeLifecycle`, `RFQParams`, `ExitCondition`, PnL helpers (`structure_pnl`, `executable_pnl`, `structure_greeks`). All state-machine logic removed.
+- **`lifecycle_engine.py`** (NEW, ~500 lines) — `LifecycleEngine` class (renamed from `LifecycleManager`). Full state machine: `create()`, `open()`, `close()`, `tick()`, `force_close()`, `kill_all()`, `cancel()`, `restore_trade()`. Creates and owns `ExecutionRouter` and `OrderManager`. Exposes `order_manager` property.
+- **`execution_router.py`** (NEW, ~400 lines) — `ExecutionRouter` class. Routes open/close to correct executor:
+  - Single leg → always "limit"
+  - Multi-leg, notional ≥ $50k → "rfq"
+  - Multi-leg, $10k ≤ notional < $50k → "smart"
+  - Multi-leg, notional < $10k → "limit" (fallback)
+  - Close circuit breaker: 10 attempts → FAILED with critical log
+  - All close orders enforce `reduce_only=True`
+- **Backward compatibility:** `from trade_lifecycle import LifecycleManager` still works — resolves to `LifecycleEngine` via `__getattr__` lazy re-export. All existing strategy code and tests unchanged.
+
+#### Integration Updates
+
+- **`position_closer.py`** — Added `order_manager.cancel_all()` call after `kill_all()` in `_run()`. Belt-and-suspenders: both lifecycle-level and order-level cleanup on kill switch.
+- **`main.py` crash recovery** — Three-step recovery:
+  1. Load order ledger via `order_manager.load_snapshot()` + `poll_all()` to get true exchange state
+  2. (Existing) Load `trades_snapshot.json`, verify exchange positions, normalize states
+  3. Reconcile order ledger against exchange open orders via `reconcile()`
+
+### Testing
+
+- **`tests/test_order_manager.py`** (NEW) — 85 assertions: idempotency, supersession chains, hard caps, persistence round-trip, reconciliation, cancel_all
+- **`tests/test_phase2_structural.py`** (NEW) — 71 assertions: backward-compat imports, ExecutionRouter open/close/circuit-breaker, LifecycleEngine API surface, position_closer integration, crash recovery code paths, persistence round-trip, mode auto-detection, strategy import chain
+- All existing tests pass unchanged: execution_timing 40/40, strategy_framework 72/72, atm_straddle 34/34, strategy_layer 50/51
+
+### Files Changed
+- NEW: `order_manager.py` (~600 lines)
+- NEW: `lifecycle_engine.py` (~500 lines)
+- NEW: `execution_router.py` (~400 lines)
+- NEW: `tests/test_order_manager.py` (85 assertions)
+- NEW: `tests/test_phase2_structural.py` (71 assertions)
+- MODIFIED: `trade_lifecycle.py` (1389 → ~450 lines, data-only + lazy re-export)
+- MODIFIED: `trade_execution.py` (LimitFillManager routes through OrderManager)
+- MODIFIED: `position_closer.py` (+cancel_all() on kill)
+- MODIFIED: `main.py` (crash recovery: order ledger load + poll + reconcile)
+
+### Architecture Notes
+- `OrderManager` wraps `TradeExecutor` (not vice versa) — existing executor code unaffected
+- `LifecycleEngine` is the single owner of `OrderManager` and `ExecutionRouter`
+- Strategies never interact with `OrderManager` or `ExecutionRouter` directly — they set `execution_mode` on `StrategyConfig` and everything flows through `LifecycleEngine`
+- Circular import between the three split modules resolved via `__getattr__` lazy import in `trade_lifecycle.py`
+
+---
+
 ## [0.9.4] - 2026-03-07
 
 ### Changed — Telegram Notifications Moved to Strategy Level

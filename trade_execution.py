@@ -267,9 +267,11 @@ class LimitFillManager:
     helper that trade_lifecycle drives via its tick loop.
     """
 
-    def __init__(self, executor: "TradeExecutor", params: Optional[ExecutionParams] = None):
+    def __init__(self, executor: "TradeExecutor", params: Optional[ExecutionParams] = None,
+                 order_manager: Optional[Any] = None):
         self._executor = executor
         self._params = params or ExecutionParams()
+        self._order_manager = order_manager  # Optional OrderManager for ledger tracking
         self._legs: List[_LegFillState] = []
         self._round_started_at: float = time.time()
 
@@ -278,6 +280,10 @@ class LimitFillManager:
         self._phase_index: int = 0
         self._phase_started_at: float = time.time()
         self._last_reprice_at: float = time.time()
+
+        # OrderManager context (set by place_all when order_manager is active)
+        self._lifecycle_id: Optional[str] = None
+        self._purpose: Optional[Any] = None
 
     # -- Public API -----------------------------------------------------------
 
@@ -291,7 +297,8 @@ class LimitFillManager:
             return phases[self._phase_index]
         return None
 
-    def place_all(self, legs: List[Dict[str, Any]], reduce_only: bool = False) -> bool:
+    def place_all(self, legs: List[Dict[str, Any]], reduce_only: bool = False,
+                   lifecycle_id: Optional[str] = None, purpose: Optional[Any] = None) -> bool:
         """
         Place initial limit orders for all legs.
 
@@ -299,11 +306,15 @@ class LimitFillManager:
             legs: List of dicts with keys: symbol, qty, side, order_id (out).
                   Each dict is a TradeLeg-like object (duck-typed).
             reduce_only: If True, all orders are placed with reduceOnly flag.
+            lifecycle_id: Trade lifecycle ID (for OrderManager tracking).
+            purpose: OrderPurpose enum value (for OrderManager tracking).
 
         Returns:
             True if all orders placed successfully.
             On failure, already-placed orders are cancelled.
         """
+        self._lifecycle_id = lifecycle_id
+        self._purpose = purpose
         self._legs = []
         self._reduce_only = reduce_only  # BUG-2026-03-05: remember for requotes
         now = time.time()
@@ -332,11 +343,8 @@ class LimitFillManager:
                 return False  # no orders placed yet — nothing to cancel
             leg_data.append((leg, symbol, qty, side, price))
 
-        for leg, symbol, qty, side, price in leg_data:
-            result = self._executor.place_order(
-                symbol=symbol, qty=qty, side=side, order_type=1, price=price,
-                reduce_only=reduce_only,  # BUG-2026-03-05: pass reduce_only to exchange
-            )
+        for idx, (leg, symbol, qty, side, price) in enumerate(leg_data):
+            result = self._place_single(symbol, qty, side, price, reduce_only, idx)
             if not result:
                 logger.error(f"LimitFillManager: failed to place order for {symbol}")
                 self.cancel_all()
@@ -344,7 +352,7 @@ class LimitFillManager:
 
             state = _LegFillState(
                 symbol=symbol, qty=qty, side=side,
-                order_id=str(result.get('orderId', '')),
+                order_id=str(result.get('orderId', '') if isinstance(result, dict) else getattr(result, 'order_id', '')),
             )
             self._legs.append(state)
 
@@ -384,28 +392,50 @@ class LimitFillManager:
             return self._check_legacy()
 
     def _poll_fills(self) -> None:
-        """Poll order status for all unfilled legs."""
+        """Poll order status for all unfilled legs.
+
+        When OrderManager is active, reads status from the ledger (which was
+        already updated by poll_all() at the top of tick).  Otherwise, polls
+        the exchange directly via TradeExecutor.
+        """
         for ls in self._legs:
             if ls.is_filled or not ls.order_id:
                 continue
             try:
-                info = self._executor.get_order_status(ls.order_id)
-                if info:
-                    executed = float(info.get('fillQty', 0))
-                    if executed > ls.filled_qty:
-                        ls.filled_qty = executed
-                        ls.fill_price = float(info.get('avgPrice', 0)) or ls.fill_price
-                        logger.info(
-                            f"LimitFillManager: {ls.symbol} filled "
-                            f"{ls.filled_qty}/{ls.qty} @ {ls.fill_price}"
-                        )
-                    # Detect externally-cancelled orders
-                    state_code = info.get('state')
-                    if state_code == 3 and not ls.is_filled:
-                        logger.warning(
-                            f"LimitFillManager: {ls.symbol} order {ls.order_id} was cancelled externally "
-                            f"(filled {ls.filled_qty}/{ls.qty})"
-                        )
+                if self._order_manager:
+                    record = self._order_manager.poll_order(ls.order_id)
+                    if record:
+                        if record.filled_qty > ls.filled_qty:
+                            ls.filled_qty = record.filled_qty
+                            ls.fill_price = record.avg_fill_price or ls.fill_price
+                            logger.info(
+                                f"LimitFillManager: {ls.symbol} filled "
+                                f"{ls.filled_qty}/{ls.qty} @ {ls.fill_price}"
+                            )
+                        if record.is_terminal and not ls.is_filled:
+                            logger.warning(
+                                f"LimitFillManager: {ls.symbol} order {ls.order_id} "
+                                f"reached terminal state {record.status.value} "
+                                f"(filled {ls.filled_qty}/{ls.qty})"
+                            )
+                else:
+                    info = self._executor.get_order_status(ls.order_id)
+                    if info:
+                        executed = float(info.get('fillQty', 0))
+                        if executed > ls.filled_qty:
+                            ls.filled_qty = executed
+                            ls.fill_price = float(info.get('avgPrice', 0)) or ls.fill_price
+                            logger.info(
+                                f"LimitFillManager: {ls.symbol} filled "
+                                f"{ls.filled_qty}/{ls.qty} @ {ls.fill_price}"
+                            )
+                        # Detect externally-cancelled orders
+                        state_code = info.get('state')
+                        if state_code == 3 and not ls.is_filled:
+                            logger.warning(
+                                f"LimitFillManager: {ls.symbol} order {ls.order_id} was cancelled externally "
+                                f"(filled {ls.filled_qty}/{ls.qty})"
+                            )
             except Exception as e:
                 logger.error(f"LimitFillManager: error checking {ls.order_id}: {e}")
 
@@ -478,7 +508,10 @@ class LimitFillManager:
         for ls in self._legs:
             if ls.order_id and not ls.is_filled:
                 try:
-                    self._executor.cancel_order(ls.order_id)
+                    if self._order_manager:
+                        self._order_manager.cancel_order(ls.order_id)
+                    else:
+                        self._executor.cancel_order(ls.order_id)
                     logger.info(f"LimitFillManager: cancelled {ls.order_id} for {ls.symbol}")
                 except Exception as e:
                     logger.warning(f"LimitFillManager: cancel failed for {ls.order_id}: {e}")
@@ -504,49 +537,95 @@ class LimitFillManager:
 
     # -- Internal -------------------------------------------------------------
 
+    def _place_single(self, symbol: str, qty: float, side: int,
+                      price: float, reduce_only: bool, leg_index: int) -> Optional[Any]:
+        """Place a single order — routes through OrderManager if available."""
+        if self._order_manager and self._lifecycle_id and self._purpose:
+            record = self._order_manager.place_order(
+                lifecycle_id=self._lifecycle_id,
+                leg_index=leg_index,
+                purpose=self._purpose,
+                symbol=symbol,
+                side=side,
+                qty=qty,
+                price=price,
+                reduce_only=reduce_only,
+            )
+            if record:
+                return {"orderId": record.order_id}
+            return None
+        else:
+            return self._executor.place_order(
+                symbol=symbol, qty=qty, side=side, order_type=1, price=price,
+                reduce_only=reduce_only,  # BUG-2026-03-05: pass reduce_only to exchange
+            )
+
     def _requote_unfilled(self) -> None:
         """Cancel stale orders and re-place at fresh prices (phase-aware)."""
         self._round_started_at = time.time()  # reset timeout for legacy mode
 
-        for ls in self._legs:
+        for idx, ls in enumerate(self._legs):
             if ls.is_filled:
                 continue
             if not ls.order_id:
                 continue
 
-            # Cancel stale order
-            try:
-                self._executor.cancel_order(ls.order_id)
-                logger.info(f"LimitFillManager: cancelled stale order {ls.order_id} for {ls.symbol}")
-            except Exception as e:
-                logger.warning(f"LimitFillManager: cancel failed for {ls.order_id}: {e}")
+            price = self._get_price_for_current_mode(ls.symbol, ls.side)
+            if price is None:
+                logger.error(f"LimitFillManager: no price for {ls.symbol} on requote")
+                continue
 
-            # Re-place at fresh price
-            try:
-                price = self._get_price_for_current_mode(ls.symbol, ls.side)
-                if price is None:
-                    logger.error(f"LimitFillManager: no price for {ls.symbol} on requote")
-                    continue
-                result = self._executor.place_order(
-                    symbol=ls.symbol,
-                    qty=ls.remaining_qty,
-                    side=ls.side,
-                    order_type=1,
-                    price=price,
-                    reduce_only=getattr(self, '_reduce_only', False),  # BUG-2026-03-05
-                )
-                if result:
-                    ls.order_id = str(result.get('orderId', ''))
-                    ls.requote_count += 1
-                    logger.info(
-                        f"LimitFillManager: requoted {ls.side_label} "
-                        f"{ls.remaining_qty}x {ls.symbol} @ ${price} "
-                        f"(round {ls.requote_count})"
+            if self._order_manager:
+                # Use OrderManager's atomic requote (cancel + replace + chain)
+                try:
+                    new_record = self._order_manager.requote_order(
+                        ls.order_id, new_price=price, new_qty=ls.remaining_qty,
                     )
-                else:
-                    logger.error(f"LimitFillManager: requote failed for {ls.symbol}")
-            except Exception as e:
-                logger.error(f"LimitFillManager: requote exception for {ls.symbol}: {e}")
+                    if new_record:
+                        ls.order_id = new_record.order_id
+                        ls.requote_count += 1
+                        # Sync any fills captured during the poll inside requote
+                        if new_record.filled_qty > 0:
+                            ls.filled_qty += new_record.filled_qty
+                        logger.info(
+                            f"LimitFillManager: requoted {ls.side_label} "
+                            f"{ls.remaining_qty}x {ls.symbol} @ ${price} "
+                            f"(round {ls.requote_count}) [via OrderManager]"
+                        )
+                    else:
+                        # requote returned None — order was fully filled during poll
+                        logger.info(f"LimitFillManager: {ls.symbol} filled during requote")
+                except Exception as e:
+                    logger.error(f"LimitFillManager: requote exception for {ls.symbol}: {e}")
+            else:
+                # Legacy path: direct cancel + re-place
+                try:
+                    self._executor.cancel_order(ls.order_id)
+                    logger.info(f"LimitFillManager: cancelled stale order {ls.order_id} for {ls.symbol}")
+                except Exception as e:
+                    logger.warning(f"LimitFillManager: cancel failed for {ls.order_id}: {e}")
+
+                try:
+                    result = self._executor.place_order(
+                        symbol=ls.symbol,
+                        qty=ls.remaining_qty,
+                        side=ls.side,
+                        order_type=1,
+                        price=price,
+                        reduce_only=getattr(self, '_reduce_only', False),  # BUG-2026-03-05
+                    )
+                    if result:
+                        ls.order_id = str(result.get('orderId', ''))
+                        ls.requote_count += 1
+                        logger.info(
+                            f"LimitFillManager: requoted {ls.side_label} "
+                            f"{ls.remaining_qty}x {ls.symbol} @ ${price} "
+                            f"(round {ls.requote_count})"
+                        )
+                    else:
+                        logger.error(f"LimitFillManager: requote failed for {ls.symbol}")
+                except Exception as e:
+                    logger.error(f"LimitFillManager: requote exception for {ls.symbol}: {e}")
 
     # -- Pricing Helpers -------------------------------------------------------
 

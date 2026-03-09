@@ -1,8 +1,8 @@
 # CoincallTrader Architecture & Development Plan
 
-**Version:** 3.1  
-**Date:** March 4, 2026  
-**Status:** v0.9.0 — Hardened Operations (Phase 8 complete)
+**Version:** 4.0  
+**Date:** March 9, 2026  
+**Status:** v1.0.0 — Order Management & Structural Split (Phase 9 complete)
 
 ---
 
@@ -12,34 +12,29 @@ This document outlines the transformation of CoincallTrader from a simple option
 
 ---
 
-## Current State (Phase 5 complete)
+## Current State (v1.0.0)
 
 ### Implemented
 - ✅ **Authentication** — HMAC-SHA256 signing (`auth.py`), JSON + form-urlencoded
 - ✅ **Configuration** — Environment switching via `.env`, strategy params in code (`config.py`)
-- ✅ **Market data** — Option chains, orderbooks, BTC price, option details (`market_data.py`)
-- ✅ **Option selection** — Expiry/strike/delta filtering + `LegSpec` declarative resolution + compound `find_option()` with multi-constraint support + **DTE-based expiry** (`option_selection.py`)
-- ✅ **Structure templates** — `straddle()`, `strangle()` → return `List[LegSpec]` for plug-in to `StrategyConfig` (`option_selection.py`)
-- ✅ **Order execution** — Limit orders, get/cancel/status queries; **ExecutionPhase** for phased pricing (mark → mid → aggressive), **ExecutionParams** with optional phases list (`trade_execution.py`)
-- ✅ **RFQ execution** — Block trades for $50k+ notional multi-leg structures; **orderbook comparison fix** (correct side selection for buy/sell, unified improvement formula) (`rfq.py`)
+- ✅ **Market data** — Option chains, orderbooks, BTC price, option details; 30s TTL cache (`market_data.py`)
+- ✅ **Option selection** — Expiry/strike/delta filtering + `LegSpec` declarative resolution + compound `find_option()` + DTE-based expiry + `straddle()` / `strangle()` templates (`option_selection.py`)
+- ✅ **Order execution** — Limit orders with phased pricing (mark → mid → aggressive) via `ExecutionPhase` / `ExecutionParams`; `LimitFillManager` routes through `OrderManager` when present (`trade_execution.py`)
+- ✅ **Order management** — Central order ledger preventing duplicate orders, idempotent placement, supersession chains, JSONL audit log, JSON snapshots, `reconcile()` against exchange state (`order_manager.py`)
+- ✅ **RFQ execution** — Block trades for $50k+ notional multi-leg structures with orderbook comparison (`rfq.py`)
 - ✅ **Smart orderbook execution** — Chunked quoting with aggressive fallback (`multileg_orderbook.py`)
-- ✅ **Trade lifecycle** — State machine (PENDING_OPEN → … → CLOSED), exit conditions, multi-leg native; **RFQParams** typed config (`trade_lifecycle.py`)
-- ✅ **Exit conditions** — `profit_target`, `max_loss`, `max_hold_hours`, **`time_exit`** (absolute clock), **`utc_datetime_exit`** (specific datetime), `account_delta_limit`, `structure_delta_limit`, `leg_greek_limit` (`trade_lifecycle.py`, `strategy.py`)
+- ✅ **Trade lifecycle (data)** — `TradeState`, `TradeLeg`, `TradeLifecycle`, `RFQParams`, `ExitCondition` dataclasses and PnL helpers (`trade_lifecycle.py`)
+- ✅ **Lifecycle engine** — State machine (PENDING_OPEN → OPENING → OPEN → PENDING_CLOSE → CLOSING → CLOSED/FAILED), tick-driven advancement, `LifecycleEngine` class (`lifecycle_engine.py`)
+- ✅ **Execution router** — Routes open/close to correct executor (limit, rfq, smart) with mode auto-detection by notional, close circuit breaker (10 attempts), reduce_only enforcement (`execution_router.py`)
+- ✅ **Exit conditions** — `profit_target`, `max_loss`, `max_hold_hours`, `time_exit`, `utc_datetime_exit`, `account_delta_limit`, `structure_delta_limit`, `leg_greek_limit` (`trade_lifecycle.py`, `strategy.py`)
 - ✅ **Position monitoring** — Background polling, `AccountSnapshot`/`PositionSnapshot`, live Greeks (`account_manager.py`)
-- ✅ **Strategy framework** — `TradingContext` DI, `StrategyConfig` (with `execution_params`, `rfq_params`), `StrategyRunner`, 7 entry condition factories, dry-run mode (`strategy.py`)
-- ✅ **Strategy lifecycle** — `max_trades_per_day` gate, `on_trade_closed` callback, `stats` property (`strategy.py`)
+- ✅ **Strategy framework** — `TradingContext` DI, `StrategyConfig`, `StrategyRunner`, 7 entry condition factories, dry-run mode (`strategy.py`)
 - ✅ **Scheduling** — `time_window()`, `utc_time_window()`, `weekday_filter()` as entry conditions; `utc_datetime_exit()` for precise close scheduling
-- ✅ **Account info** — Equity, available margin, IM/MM amounts, margin utilisation, aggregated Greeks
-- ✅ **Logging** — File + console logging to `logs/trading.log` (audit trail)
-- ✅ **Phase 1 Hardening** — Request timeouts (30s), @retry decorator with exponential backoff (1-2-4s), main loop error isolation (max 10 consecutive errors before exit) (`auth.py`, `retry.py`, `main.py`)
-- ✅ **Phase 2 Reliability** — Market data caching with 30s TTL & max 100 entries (`market_data.py`), trade state persistence to `logs/trade_state.json` every 60s for crash recovery (`persistence.py`), background health check logging every 5 minutes (`health_check.py`), fixed `max_concurrent_trades=2` for daily rolling positions
-- ✅ **Configurable Execution Timing** — `ExecutionPhase` dataclass for phased limit pricing (aggressive/mid/top_of_book/mark with duration, buffer, reprice interval); `RFQParams` typed dataclass replacing loose metadata keys; wired through `StrategyConfig` and `TradeLifecycle` with full backward compatibility (`trade_execution.py`, `trade_lifecycle.py`, `strategy.py`)
-- ✅ **Telegram Notifications** — Fire-and-forget alerts via Bot API: trade opens/closes (PnL, ROI), daily account summary, startup/shutdown, critical errors. Wired at framework level — all strategies get notifications automatically (`telegram_notifier.py`)
-- ✅ **Web Dashboard** — Real-time browser UI (Flask + htmx) running as daemon thread. Account summary, strategy cards with Pause/Resume/Stop controls, positions table, live log tail, kill switch. Password-protected via `DASHBOARD_PASSWORD` env var (`dashboard.py`, `templates/`)
-- ✅ **Crash Recovery** — `TradeLifecycle.to_dict()/from_dict()` serialization, `LifecycleManager.restore_trade()`, crash flag (`logs/.running`), `_recover_trades()` in `main.py` with exchange position verification. All-or-nothing: fails fast to manual intervention if state is inconsistent (`main.py`, `trade_lifecycle.py`)
-- ✅ **Kill Switch** — `PositionCloser` two-phase mark-price position closer for the dashboard kill switch. Phase 1: mark price (5 min, reprice 30s). Phase 2: aggressive ±10% off mark (2 min, reprice 15s). Runs in background thread with Telegram progress notifications. `LifecycleManager.kill_all()` emergency method terminates all lifecycle trades (`position_closer.py`, `trade_lifecycle.py`, `dashboard.py`)
-- ✅ **Self-Shutdown Bug Fix** — Removed `_enabled=False` side effect from `max_trades_per_day` gate, removed auto-shutdown when all runners disabled, moved `_check_closed_trades` above `_enabled` guard (`strategy.py`, `main.py`)
-- ✅ **Telegram Enhancements** — Daily summary at fixed 07:00 UTC (wall-clock gated, immune to restarts), position details in summary, pause/resume/stop notifications (`telegram_notifier.py`)
+- ✅ **Telegram Notifications** — Strategy-level opt-in via `get_notifier()` singleton; `on_trade_opened` / `on_trade_closed` callbacks (`telegram_notifier.py`)
+- ✅ **Web Dashboard** — Real-time browser UI (Flask + htmx), account summary, strategy controls, positions, log tail, kill switch (`dashboard.py`, `templates/`)
+- ✅ **Crash Recovery** — Trade snapshot persistence + order ledger load + exchange reconciliation on restart (`main.py`)
+- ✅ **Kill Switch** — `PositionCloser` two-phase mark-price closer + `order_manager.cancel_all()` cleanup (`position_closer.py`)
+- ✅ **Resilience** — Request timeouts (30s), `@retry` with exponential backoff, main loop error isolation, health check logging (`auth.py`, `retry.py`, `health_check.py`)
 
 ### Not yet implemented
 - ⬜ Multi-instrument support (futures, spot)
@@ -78,22 +73,25 @@ Key facts:
 ### Current Directory Structure
 ```
 CoincallTrader/
-├── main.py                 # Entry point — wires TradingContext, registers runners
+├── main.py                 # Entry point — wires TradingContext, registers runners, crash recovery
 ├── strategy.py             # Strategy framework (TradingContext, StrategyConfig, StrategyRunner)
 ├── config.py               # Environment config (.env loading)
 ├── auth.py                 # HMAC-SHA256 API authentication with timeouts & retries
 ├── retry.py                # @retry decorator with exponential backoff
 ├── market_data.py          # Option chains, orderbooks, BTC price; TTLCache caching
 ├── option_selection.py     # LegSpec, resolve_legs(), select_option(), find_option(), straddle(), strangle()
-├── trade_execution.py      # Order placement, cancellation, status queries; ExecutionPhase, ExecutionParams
-├── trade_lifecycle.py      # TradeState machine, TradeLeg, LifecycleManager, RFQParams, exit conditions (incl. time_exit)
+├── trade_execution.py      # Order placement, cancellation, status queries; ExecutionPhase, ExecutionParams, LimitFillManager
+├── order_manager.py        # Central order ledger — idempotent placement, supersession, JSONL audit, reconciliation
+├── trade_lifecycle.py      # Data-only: TradeState, TradeLeg, TradeLifecycle, RFQParams, ExitCondition, PnL helpers
+├── lifecycle_engine.py     # State machine: LifecycleEngine — drives trades through states, owns ExecutionRouter + OrderManager
+├── execution_router.py     # Routes open/close to correct executor (limit/rfq/smart) with mode auto-detection
 ├── multileg_orderbook.py   # Smart chunked multi-leg execution
 ├── rfq.py                  # RFQ block-trade execution ($50k+ notional)
 ├── account_manager.py      # AccountSnapshot, PositionMonitor, margin/equity queries
 ├── persistence.py          # Trade history log (append-only JSONL)
-├── position_closer.py      # Emergency two-phase position closer (kill switch)
+├── position_closer.py      # Emergency two-phase position closer (kill switch) + order_manager.cancel_all()
 ├── health_check.py         # HealthChecker: background health logging every 5 minutes
-├── telegram_notifier.py    # Telegram Bot API notifications (fire-and-forget)
+├── telegram_notifier.py    # Telegram Bot API notifications (fire-and-forget, strategy opt-in)
 ├── dashboard.py            # Web dashboard (Flask + htmx, daemon thread)
 ├── templates/              # Dashboard HTML templates (Jinja2 + htmx)
 │   ├── dashboard.html      # Main page with auto-polling panels
@@ -115,17 +113,19 @@ CoincallTrader/
 │   ├── API_REFERENCE.md
 │   └── MODULE_REFERENCE.md
 ├── tests/
+│   ├── test_order_manager.py        # 85/85 OrderManager unit tests
+│   ├── test_phase2_structural.py    # 71/71 structural split + integration tests
 │   ├── test_strategy_framework.py   # 72/72 unit assertions
 │   ├── test_strategy_layer.py       # 50 strategy layer assertions
-│   ├── test_atm_straddle.py         # ATM straddle strategy unit tests
+│   ├── test_atm_straddle.py         # 34/34 ATM straddle strategy unit tests
 │   ├── test_execution_timing.py     # 40/40 ExecutionPhase, RFQParams, phased execution
 │   ├── test_dashboard.py            # Standalone dashboard test with mock data
 │   └── test_complex_option_selection.py  # 32/32 compound selection assertions
-├── logs/                   # Runtime logs (gitignored)
+├── logs/                   # Runtime logs + order audit (gitignored)
 └── archive/                # Legacy code (gitignored)
 ```
 
-**Current size:** 16 Python modules + 6 HTML templates, ~7,000 lines total
+**Current size:** 19 Python modules + 6 HTML templates, ~9,000 lines total
 
 ### Future additions (when needed)
 - `persistence/` — SQLite state storage and crash recovery
@@ -585,27 +585,60 @@ Chose **Flask + htmx** over FastAPI — simpler, no async rewrite, single `<scri
 
 ---
 
-### Phase 8: Persistence & Recovery (1-2 days)
+### Phase 8: Persistence & Recovery ✅ PARTIAL (March 4, 2026)
 **Goal:** Enable queryable state persistence and crash recovery beyond current file logging.
 
-**Already done:**
-- All trades, orders, and state transitions logged to `logs/trading.log`
-- `LifecycleManager` tracks all trades in memory during runtime
+**Done:**
+- ✅ `TradeLifecycle.to_dict()/from_dict()` serialization — full round-trip for all trade fields
+- ✅ `LifecycleManager.restore_trade()` — re-inject recovered trades into active tracking
+- ✅ `_persist_all_trades()` — writes `logs/trades_snapshot.json` on every tick
+- ✅ `_recover_trades()` in `main.py` — loads snapshot, verifies exchange positions, normalizes states
+- ✅ Order ledger persistence via `OrderManager` — `active_orders.json` snapshot + JSONL audit
+- ✅ Crash recovery loads order ledger → polls exchange → reconciles stale orders
 
-**Remaining tasks:**
-1. Create SQLite backend for structured persistence:
-   - Trade lifecycles (state, legs, timestamps)
-   - Order history (order_id, fill_price, fill_qty)
-   - Strategy state (last run, cooldown, active trades)
-2. Startup recovery:
-   - Load persisted trades on restart
-   - Reconcile with exchange position state
-   - Resume StrategyRunners
+**Remaining:**
+- ⬜ SQLite backend for structured persistence (trade lifecycles, order history, strategy state)
 
-**Deliverables:**
-- [ ] `persistence.py` — SQLite read/write
-- [ ] Database schema
-- [ ] Startup recovery logic in `main.py`
+---
+
+### Phase 9: Order Management & Structural Split ✅ COMPLETE (March 9, 2026)
+**Goal:** Prevent duplicate/runaway orders with a central order ledger and split the monolithic trade_lifecycle.py into focused modules.
+
+See [ORDER_MANAGEMENT_PLAN.md](ORDER_MANAGEMENT_PLAN.md) for the original design spec.
+
+**Phase 1 — Core Safety (OrderManager):**
+- `order_manager.py` (~600 lines) — Central order ledger wrapping `TradeExecutor`
+  - Idempotent placement: `(lifecycle_id, leg_index, purpose)` dedup key
+  - Supersession chains: `requote_order()` atomically cancels + replaces + links
+  - Hard caps: 30 orders/lifecycle, 4 pending/symbol
+  - Safety enforcement: close/unwind always `reduce_only=True`
+  - JSONL audit log: `logs/order_audit.jsonl` (append-only)
+  - JSON snapshots: `logs/active_orders.json` (overwrite on persist)
+  - `poll_all()` — batch poll all live orders from exchange
+  - `reconcile(exchange_orders)` — detect orphans and stale entries
+  - `has_live_orders(lifecycle_id)` — PENDING_CLOSE guard to prevent double-close
+- `trade_execution.py` — `LimitFillManager` routes through `OrderManager` when present (backward compatible)
+- `lifecycle_engine.py` — tick() checks `has_live_orders()` before allowing close
+
+**Phase 2 — Structural Split:**
+- `trade_lifecycle.py` trimmed to ~450 lines (data-only): `TradeState`, `TradeLeg`, `TradeLifecycle`, `RFQParams`, `ExitCondition`, PnL helpers
+- `lifecycle_engine.py` (~500 lines): `LifecycleEngine` class — state machine, tick advancement, creates/owns `ExecutionRouter` + `OrderManager`
+- `execution_router.py` (~400 lines): `ExecutionRouter` class — routes open/close to limit/rfq/smart executor, mode auto-detection, close circuit breaker
+- Backward compatibility: `from trade_lifecycle import LifecycleManager` → `LifecycleEngine` via `__getattr__` lazy re-export
+- `position_closer.py` — added `order_manager.cancel_all()` after `kill_all()` for belt-and-suspenders
+- `main.py` crash recovery — Step 1: load order ledger + poll; Step 3: reconcile against exchange
+
+**Testing:**
+- `tests/test_order_manager.py` — 85/85 assertions (idempotency, supersession, caps, persistence, reconcile)
+- `tests/test_phase2_structural.py` — 71/71 assertions (imports, routing, circuit breaker, integration)
+- All existing tests pass unchanged: execution_timing 40/40, strategy_framework 72/72, atm_straddle 34/34, strategy_layer 50/51
+
+**Key Design Decisions:**
+1. OrderManager wraps TradeExecutor (not vice versa) — existing code unaffected
+2. Idempotency key prevents duplicate orders even on tick re-entry
+3. Supersession chains preserve audit trail across requotes
+4. `has_live_orders()` gate prevents racing the close path while fills are pending
+5. `__getattr__` lazy import breaks circular dependency without changing consumer code
 
 ---
 
@@ -618,9 +651,10 @@ Chose **Flask + htmx** over FastAPI — simpler, no async rewrite, single `<scri
 | 3 | **Phase 3: Smart Orderbook Execution** | ✅ Done | Chunked orderbook execution for trades below RFQ minimum |
 | 4 | **Phase 4: Strategy Framework** | ✅ Done | Declarative strategies, entry/exit conditions, DI, dry-run |
 | 5 | Phase 5: Multi-Instrument | 2-3 days | Futures and spot support |
-| 6 | Phase 6: Account Alerts | 1 day | Margin alerts, wallet, P&L history |
+| 6 | Phase 6: Account Alerts | ✅ Partial | Margin alerts via Telegram; wallet & P&L history remaining |
 | 7 | **Phase 7: Dashboard** | ✅ Done | Web monitoring + controls (Flask + htmx) |
-| 8 | Phase 8: Persistence | 1-2 days | State persistence and crash recovery |
+| 8 | **Phase 8: Persistence** | ✅ Partial | Trade snapshots + order ledger; SQLite remaining |
+| 9 | **Phase 9: Order Management** | ✅ Done | Central order ledger + structural split |
 
 **Total estimated effort:** 15-22 days of focused development (12-14 days completed)
 

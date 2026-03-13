@@ -138,7 +138,14 @@ class ExecutionRouter:
     # ── Open implementations ─────────────────────────────────────────────
 
     def _open_rfq(self, trade: TradeLifecycle) -> bool:
-        """Open via RFQ — atomic multi-leg execution."""
+        """Open via RFQ — atomic multi-leg execution.
+
+        Supports phased execution when trade.metadata contains:
+            rfq_phased: True
+            rfq_initial_wait_seconds: int (default 30)
+            rfq_mark_floor_pct: float (default 2.2)
+            rfq_relax_after_seconds: int (default 300)
+        """
         rfq_legs = [
             OptionLeg(
                 instrument=leg.symbol,
@@ -152,12 +159,25 @@ class ExecutionRouter:
         rfq_timeout = rp.timeout_seconds if rp else trade.metadata.get("rfq_timeout_seconds", 60)
         min_improvement = rp.min_improvement_pct if rp else trade.metadata.get("rfq_min_improvement_pct", -999.0)
 
-        result: RFQResult = self._rfq_executor.execute(
-            legs=rfq_legs,
-            action=trade.rfq_action,
-            timeout_seconds=rfq_timeout,
-            min_improvement_pct=min_improvement,
-        )
+        # Phased execution: strategy can opt in via metadata.
+        # When phased, metadata timeout overrides rfq_params (which is for close).
+        if trade.metadata.get("rfq_phased"):
+            phased_timeout = trade.metadata.get("rfq_timeout_seconds", rfq_timeout)
+            result: RFQResult = self._rfq_executor.execute_phased(
+                legs=rfq_legs,
+                action=trade.rfq_action,
+                timeout_seconds=phased_timeout,
+                initial_wait_seconds=trade.metadata.get("rfq_initial_wait_seconds", 30),
+                mark_floor_pct=trade.metadata.get("rfq_mark_floor_pct", 2.2),
+                relax_after_seconds=trade.metadata.get("rfq_relax_after_seconds", 300),
+            )
+        else:
+            result: RFQResult = self._rfq_executor.execute(
+                legs=rfq_legs,
+                action=trade.rfq_action,
+                timeout_seconds=rfq_timeout,
+                min_improvement_pct=min_improvement,
+            )
         trade.rfq_result = result
 
         if result.success:

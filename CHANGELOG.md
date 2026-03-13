@@ -5,6 +5,80 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0] - 2026-03-13
+
+### Added
+
+#### Daily Put Sell Strategy (`strategies/daily_put_sell.py`)
+Automated 1–2 DTE OTM put selling with trend filter and multi-layered exit logic.
+
+**Entry conditions:**
+- **EMA-20 trend filter** — Only sells puts when BTC > daily EMA-20 (Binance klines)
+- **Time window** — Configurable UTC entry window (default 03:00–04:00)
+- **Minimum margin** — Requires ≥20% available margin
+
+**Execution:**
+- **Open:** Phased RFQ execution (30s silent → gated at 2.2% of mark → relaxed after 5min)
+- **Take profit:** Proactive limit buy order placed immediately after open at 10% of entry premium
+- **Stop loss:** Exit at 70% loss (mark PnL), close via standard RFQ with 15s timeout
+- **Expiry:** If neither TP nor SL fires, option expires worthless (full win)
+
+**Lifecycle features:**
+- `on_trade_opened` — Places TP limit order, sends Telegram notification
+- `on_trade_closed` — Cancels orphaned TP order, logs PnL, sends Telegram notification
+- `on_runner_created` hook — Captures `TradingContext` for callback use
+- `_tp_filled_exit()` — Custom exit condition detecting TP limit order fill
+- `max_concurrent_trades=2` — Handles expiry overlap between consecutive days
+
+**Backtest results (2024-01-01 to 2025-03-10):**
+Win rate: 93.1% | Avg winner: $27.81 | Avg loser: -$44.29
+Profit factor: 8.52 | Total return: +66.2% | Max drawdown: -3.8%
+
+#### EMA Filter Module (`ema_filter.py`)
+Binance BTCUSDT Perpetual daily kline fetcher with EMA-20 calculation.
+- `get_ema20()` — Returns current EMA-20 value
+- `is_btc_above_ema20()` — Boolean trend check
+- `ema20_filter()` — Entry condition factory for `StrategyConfig`
+- 1-hour kline cache with stale-cache fallback on API errors
+- Standard recursive EMA formula seeded with SMA of first N values
+
+#### Phased RFQ Execution (`rfq.py` — `execute_phased()`)
+Three-phase quote acceptance for better-than-market fills:
+1. **Initial wait** (0–30s): Collect quotes silently
+2. **Gated** (30s–5min): Accept if within 2.2% of orderbook baseline
+3. **Relaxed** (5min+): Accept any quote
+
+Configured per-strategy via `metadata` keys: `rfq_phased`, `rfq_initial_wait_seconds`,
+`rfq_mark_floor_pct`, `rfq_relax_after_seconds`.
+
+#### Phased RFQ Routing (`execution_router.py`)
+`_open_rfq()` detects `trade.metadata["rfq_phased"]` and routes to `execute_phased()`
+with strategy-specific timeout/floor/relaxation parameters.
+
+### Fixed
+
+#### RFQ Single-Leg Direction (`rfq.py`)
+- Coincall requires single-leg RFQs to be submitted with side="BUY"
+- `create_rfq()` now auto-flips single-leg SELL to BUY for submission
+- Quote acceptance still uses the actual trade direction (sell-side quotes)
+- Two-way quotes from market makers are filtered by the `action` parameter
+
+#### Stop Loss PnL Mode (`strategies/daily_put_sell.py`)
+- Changed `max_loss()` from `pnl_mode="executable"` to `pnl_mode="mark"`
+- Executable PnL uses ask price (cost to close), which on wide-spread OTM options
+  can show -125% loss immediately after opening (bid $20 / ask $46)
+- Mark PnL uses mid-price, preventing false SL triggers from wide spreads
+
+### Files Changed
+- NEW: `ema_filter.py` — EMA-20 trend filter (Binance klines)
+- NEW: `strategies/daily_put_sell.py` — Daily put sell strategy
+- MODIFIED: `rfq.py` — `execute_phased()`, single-leg BUY fix
+- MODIFIED: `execution_router.py` — Phased RFQ routing
+- MODIFIED: `strategies/__init__.py` — Registered `daily_put_sell`
+- MODIFIED: `main.py` — Added `daily_put_sell` to STRATEGIES, DEBUG logging
+
+---
+
 ## [1.0.4] - 2026-03-13
 
 ### Fixed

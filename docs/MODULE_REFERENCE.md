@@ -1,6 +1,6 @@
 # CoincallTrader — Module Reference
 
-**Last Updated:** March 12, 2026
+**Last Updated:** March 13, 2026
 
 Internal documentation for the CoincallTrader application modules.
 For Coincall exchange API endpoints, see [API_REFERENCE.md](API_REFERENCE.md).
@@ -98,6 +98,7 @@ ctx.position_monitor.start()
 | `max_account_delta(limit)` | `float → EntryCondition` | Block if account delta exceeds threshold |
 | `max_margin_utilization(pct)` | `float → EntryCondition` | IM/equity ceiling |
 | `no_existing_position_in(symbols)` | `list[str] → EntryCondition` | Block if already positioned in given symbols |
+| `ema20_filter()` | `→ EntryCondition` | Block if BTC is below daily EMA-20 (via Binance klines). See `ema_filter.py`. |
 
 ### Structure Templates
 | Helper | Signature | Description |
@@ -191,6 +192,85 @@ Enriched option dict or `None`:
 8. Subsequent ticks advance lifecycle (fill checks, exit evaluations)
 9. `runner.stop()` for graceful shutdown
 9. `runner.stats` for win/loss/hold-time aggregates
+
+---
+
+## EMA Filter (`ema_filter.py`)
+
+Fetches BTCUSDT Perpetual daily klines from Binance public API and computes a 20-period EMA.
+Used as an entry condition for strategies that only trade when price is above the daily EMA-20.
+
+### Public API
+| Function | Signature | Description |
+|----------|-----------|-------------|
+| `get_ema20()` | `→ Optional[float]` | Current daily EMA-20 value for BTCUSDT |
+| `is_btc_above_ema20()` | `→ bool` | True if latest close > EMA-20 (fail-safe: returns False on error) |
+| `ema20_filter()` | `→ EntryCondition` | Factory for `StrategyConfig.entry_conditions` |
+
+### Implementation Details
+- **Data source:** Binance Futures public API (`fapi.binance.com/fapi/v1/klines`), no API key required
+- **Cache:** 1-hour TTL; stale cache returned as fallback on API errors
+- **EMA formula:** Standard recursive: `EMA_t = close_t × α + EMA_{t-1} × (1 - α)`, seeded with SMA of first N values
+- **Default:** 30 daily candles fetched, EMA-20 computed
+
+### Usage
+```python
+from ema_filter import ema20_filter, get_ema20, is_btc_above_ema20
+
+# As strategy entry condition
+config = StrategyConfig(
+    entry_conditions=[ema20_filter(), ...],
+    ...
+)
+
+# Standalone usage
+ema = get_ema20()          # e.g. 68807.97
+above = is_btc_above_ema20()  # True/False
+```
+
+---
+
+## Daily Put Sell Strategy (`strategies/daily_put_sell.py`)
+
+Automated daily OTM put selling strategy with EMA-20 trend filter.
+
+### Strategy Logic
+1. **Entry:** Sell 1–2 DTE BTC put at -0.10 delta during 03:00–04:00 UTC, only when BTC > EMA-20
+2. **TP:** Proactive limit buy at 10% of entry premium (capture 90% of premium)
+3. **SL:** Exit at 70% mark-price loss via standard RFQ (15s timeout)
+4. **Expiry:** If neither fires, option expires worthless (full win)
+
+### Parameters (module-level constants)
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `QTY` | `0.8` | BTC per leg |
+| `TARGET_DELTA` | `-0.10` | OTM put delta target |
+| `DTE` | `2` | Days to expiry |
+| `ENTRY_HOUR_START/END` | `3/4` | UTC entry window |
+| `MIN_MARGIN_PCT` | `20` | Minimum available margin % |
+| `STOP_LOSS_PCT` | `70` | Max loss % of entry premium |
+| `TP_CAPTURE_PCT` | `0.90` | TP = buy back at 10% of entry |
+| `RFQ_OPEN_TIMEOUT` | `300` | Phased RFQ open timeout (5min) |
+| `RFQ_INITIAL_WAIT` | `30` | Silent quote collection period |
+| `RFQ_MARK_FLOOR_PCT` | `2.2` | Phase 2 max deviation from mark |
+| `RFQ_CLOSE_TIMEOUT` | `15` | SL close RFQ timeout |
+
+### Framework Features Used
+- `LegSpec` with delta-based strike selection
+- Entry: `time_window()`, `ema20_filter()`, `min_available_margin_pct()`
+- Exit: `max_loss(mark)`, custom `_tp_filled_exit()`
+- Execution: phased RFQ open, standard RFQ close, limit fallback
+- Callbacks: `on_trade_opened`, `on_trade_closed`, `on_runner_created`
+- `max_concurrent_trades=2`, `max_trades_per_day=1`
+
+### RFQ Phased Execution
+The strategy uses phased RFQ for opening (via `execute_phased()` in `rfq.py`):
+- **Phase 1 (0–30s):** Collect quotes silently
+- **Phase 2 (30s–5min):** Accept if within 2.2% of orderbook baseline
+- **Phase 3 (5min+):** Accept any quote
+- **Fallback:** Limit order if RFQ fails
+
+Configured via `metadata` keys: `rfq_phased=True`, `rfq_initial_wait_seconds`, `rfq_mark_floor_pct`, `rfq_relax_after_seconds`.
 
 ---
 

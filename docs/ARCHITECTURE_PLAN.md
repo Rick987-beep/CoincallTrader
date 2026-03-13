@@ -1,8 +1,8 @@
 # CoincallTrader Architecture & Development Plan
 
-**Version:** 4.0  
-**Date:** March 9, 2026  
-**Status:** v1.0.0 — Order Management & Structural Split (Phase 9 complete)
+**Version:** 5.0  
+**Date:** March 13, 2026  
+**Status:** v1.1.0 — Daily Put Sell Strategy + EMA Filter + Phased RFQ
 
 ---
 
@@ -21,18 +21,20 @@ This document outlines the transformation of CoincallTrader from a simple option
 - ✅ **Option selection** — Expiry/strike/delta filtering + `LegSpec` declarative resolution + compound `find_option()` + DTE-based expiry + `straddle()` / `strangle()` templates (`option_selection.py`)
 - ✅ **Order execution** — Limit orders with phased pricing (mark → mid → aggressive) via `ExecutionPhase` / `ExecutionParams`; `LimitFillManager` routes through `OrderManager` when present (`trade_execution.py`)
 - ✅ **Order management** — Central order ledger preventing duplicate orders, idempotent placement, supersession chains, JSONL audit log, JSON snapshots, `reconcile()` against exchange state (`order_manager.py`)
-- ✅ **RFQ execution** — Block trades for $50k+ notional multi-leg structures with orderbook comparison (`rfq.py`)
+- ✅ **RFQ execution** — Block trades for $50k+ notional multi-leg structures with orderbook comparison; single-leg RFQ support (auto-flips to BUY for Coincall API); phased execution with mark-price floor and time-based relaxation (`rfq.py`)
 - ✅ **Smart orderbook execution** — Chunked quoting with aggressive fallback (`multileg_orderbook.py`). Standalone module — not integrated into ExecutionRouter.
 - ✅ **Trade lifecycle (data)** — `TradeState`, `TradeLeg`, `TradeLifecycle`, `RFQParams`, `ExitCondition` dataclasses and PnL helpers (`trade_lifecycle.py`)
 - ✅ **Lifecycle engine** — State machine (PENDING_OPEN → OPENING → OPEN → PENDING_CLOSE → CLOSING → CLOSED/FAILED), tick-driven advancement, `LifecycleEngine` class (`lifecycle_engine.py`)
-- ✅ **Execution router** — Routes open/close to correct executor (limit, rfq) with mode auto-detection by notional, close circuit breaker (10 attempts), reduce_only enforcement (`execution_router.py`)
+- ✅ **Execution router** — Routes open/close to correct executor (limit, rfq) with mode auto-detection by notional, close circuit breaker (10 attempts), reduce_only enforcement; phased RFQ routing via `metadata["rfq_phased"]` (`execution_router.py`)
 - ✅ **Exit conditions** — `profit_target`, `max_loss`, `max_hold_hours`, `time_exit`, `utc_datetime_exit`, `account_delta_limit`, `structure_delta_limit`, `leg_greek_limit` (`trade_lifecycle.py`, `strategy.py`)
 - ✅ **Position monitoring** — Background polling, `AccountSnapshot`/`PositionSnapshot`, live Greeks (`account_manager.py`)
 - ✅ **Strategy framework** — `TradingContext` DI, `StrategyConfig`, `StrategyRunner`, 7 entry condition factories, dry-run mode (`strategy.py`)
 - ✅ **Scheduling** — `time_window()`, `utc_time_window()`, `weekday_filter()` as entry conditions; `utc_datetime_exit()` for precise close scheduling
 - ✅ **Telegram Notifications** — Strategy-level opt-in via `get_notifier()` singleton; `on_trade_opened` / `on_trade_closed` callbacks (`telegram_notifier.py`)
 - ✅ **Web Dashboard** — Real-time browser UI (Flask + htmx), account summary, strategy controls, positions, log tail, kill switch (`dashboard.py`, `templates/`)
-- ✅ **Crash Recovery** — Trade snapshot persistence + order ledger load + exchange reconciliation on restart (`main.py`)
+- ✅ **Crash Recovery** — Trade snapshot persistence + order ledger load + exchange reconciliation on restart; corrupt file quarantine with null-byte detection (`main.py`)
+- ✅ **EMA Filter** — BTC trend filter via Binance daily klines, EMA-20 with 1hr cache, entry condition factory (`ema_filter.py`)
+- ✅ **Daily Put Sell Strategy** — Automated OTM put selling: EMA-20 filter, phased RFQ open, limit TP, RFQ SL, mark-price stop loss (`strategies/daily_put_sell.py`)
 - ✅ **Kill Switch** — `PositionCloser` two-phase mark-price closer + `order_manager.cancel_all()` cleanup (`position_closer.py`)
 - ✅ **Resilience** — Request timeouts (30s), `@retry` with exponential backoff, main loop error isolation, health check logging (`auth.py`, `retry.py`, `health_check.py`)
 
@@ -78,6 +80,7 @@ CoincallTrader/
 ├── config.py               # Environment config (.env loading)
 ├── auth.py                 # HMAC-SHA256 API authentication with timeouts & retries
 ├── retry.py                # @retry decorator with exponential backoff
+├── ema_filter.py            # EMA-20 trend filter (Binance daily klines, 1hr cache)
 ├── market_data.py          # Option chains, orderbooks, BTC price; TTLCache caching
 ├── option_selection.py     # LegSpec, resolve_legs(), select_option(), find_option(), straddle(), strangle()
 ├── trade_execution.py      # Order placement, cancellation, status queries; ExecutionPhase, ExecutionParams, LimitFillManager
@@ -105,7 +108,8 @@ CoincallTrader/
 │   ├── __init__.py
 │   ├── blueprint_strangle.py  # Blueprint strategy — starting template for traders
 │   ├── atm_straddle.py        # Daily ATM straddle with profit target + time exit
-│   └── test_strangle_11mar.py  # Test strangle (11 Mar live test)
+│   ├── atm_straddle_index_move.py  # ATM straddle with BTC index move exit
+│   └── daily_put_sell.py      # Daily OTM put sell — EMA filter, phased RFQ, limit TP, mark SL
 ├── requirements.txt
 ├── .env                    # API keys + dashboard password (gitignored)
 ├── docs/
@@ -125,7 +129,7 @@ CoincallTrader/
 └── archive/                # Legacy code (gitignored)
 ```
 
-**Current size:** 19 Python modules + 7 HTML templates, ~9,000 lines total
+**Current size:** 21 Python modules + 7 HTML templates, ~10,000 lines total
 
 ### Future additions (when needed)
 - `persistence/` — SQLite state storage and crash recovery

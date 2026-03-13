@@ -19,7 +19,7 @@ import time
 
 from strategy import build_context, StrategyRunner
 from trade_lifecycle import TradeLifecycle, TradeState
-from strategies import blueprint_strangle, atm_straddle, atm_straddle_index_move
+from strategies import blueprint_strangle, atm_straddle, atm_straddle_index_move, daily_put_sell
 from persistence import TradeStatePersistence
 from health_check import HealthChecker
 from dashboard import start_dashboard
@@ -31,7 +31,7 @@ from config import ENVIRONMENT
 
 os.makedirs("logs", exist_ok=True)
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.DEBUG,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     handlers=[
         logging.FileHandler("logs/trading.log"),
@@ -47,8 +47,9 @@ logger = logging.getLogger(__name__)
 
 STRATEGIES = [
     # atm_straddle,
-    atm_straddle_index_move,
+    # atm_straddle_index_move,
     # blueprint_strangle,
+    daily_put_sell,
 ]
 
 # =============================================================================

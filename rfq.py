@@ -221,12 +221,17 @@ class RFQExecutor:
             API response with requestId, expiryTime, state, etc.
             None if creation failed.
         """
-        if len(legs) < 2:
-            logger.warning("RFQ requires at least 2 legs for block trade")
-            # Note: Coincall may allow single-leg RFQs for large sizes
+        # Coincall requires single-leg RFQs to be submitted as BUY.
+        # Market makers return two-way quotes; we pick the side we want
+        # during quote acceptance (via the 'action' parameter).
+        if len(legs) == 1 and legs[0].side == "SELL":
+            logger.info("Single-leg RFQ: flipping to BUY for RFQ submission (will pick SELL quote)")
+            api_legs = [{"instrumentName": legs[0].instrument, "side": "BUY", "qty": str(legs[0].qty)}]
+        else:
+            api_legs = [leg.to_api_format() for leg in legs]
         
         payload = {
-            "legs": [leg.to_api_format() for leg in legs]
+            "legs": api_legs
         }
         
         try:
@@ -649,4 +654,198 @@ class RFQExecutor:
         else:
             logger.warning(f"RFQ {request_id} failed: {result.message}")
         
+        return result
+
+    # -------------------------------------------------------------------------
+    # Phased Execution (mark-price floor with relaxation)
+    # -------------------------------------------------------------------------
+
+    def execute_phased(
+        self,
+        legs: List[OptionLeg],
+        action: str = "sell",
+        timeout_seconds: int = 300,
+        initial_wait_seconds: int = 30,
+        mark_floor_pct: float = 2.2,
+        relax_after_seconds: int = 300,
+        poll_interval_seconds: int = 3,
+    ) -> RFQResult:
+        """
+        Phased RFQ execution with mark-price floor and time-based relaxation.
+
+        Designed for strategies (e.g. daily put selling) that want better-than-
+        orderbook pricing but will accept market-level fills as a deadline
+        approaches.
+
+        Phases:
+          1. **Initial wait** (0 → initial_wait_seconds): Collect quotes
+             silently — do not accept anything yet.
+          2. **Gated** (initial_wait → relax_after_seconds): Accept quotes
+             that are within mark_floor_pct of the mark (orderbook baseline).
+             "Within" means the quote is at most mark_floor_pct% *worse* than
+             the orderbook — i.e. min_improvement >= -mark_floor_pct.
+          3. **Relaxed** (relax_after_seconds → timeout): Accept any quote
+             (equivalent to min_improvement = -999).
+
+        This method is strategy-specific (daily_put_sell) and does NOT modify
+        the core execute() flow.
+
+        Args:
+            legs: Option legs for the RFQ.
+            action: "buy" or "sell".
+            timeout_seconds: Total maximum wait time.
+            initial_wait_seconds: Seconds to wait before considering any quote.
+            mark_floor_pct: Max % *worse* than orderbook to accept in phase 2.
+            relax_after_seconds: Seconds after which any quote is accepted.
+            poll_interval_seconds: Polling interval for quotes.
+
+        Returns:
+            RFQResult.
+        """
+        result = RFQResult(success=False, request_id="")
+        want_to_buy = action.lower() == "buy"
+        action_str = "BUYING" if want_to_buy else "SELLING"
+
+        logger.info(
+            f"Starting phased RFQ: {action_str} {len(legs)} leg(s), "
+            f"wait={initial_wait_seconds}s, floor={mark_floor_pct}%, "
+            f"relax_after={relax_after_seconds}s, timeout={timeout_seconds}s"
+        )
+
+        # Step 1: Orderbook baseline
+        orderbook_cost = self.get_orderbook_cost(legs, action=action)
+        if orderbook_cost is not None:
+            result.orderbook_cost = orderbook_cost
+            logger.info(f"Orderbook cost baseline: {orderbook_cost:.2f}")
+        else:
+            logger.warning("No orderbook baseline — will accept any quote after initial wait")
+
+        # Step 2: Create RFQ
+        rfq_data = self.create_rfq(legs)
+        if not rfq_data:
+            result.message = "Failed to create RFQ"
+            return result
+
+        request_id = rfq_data.get("requestId")
+        result.request_id = request_id
+        result.state = RFQState.ACTIVE
+
+        expiry_time = rfq_data.get("expiryTime", 0)
+        if expiry_time:
+            rfq_timeout = min(timeout_seconds, (expiry_time - int(time.time() * 1000)) / 1000)
+        else:
+            rfq_timeout = timeout_seconds
+
+        logger.info(f"Phased RFQ {request_id} active, timeout={rfq_timeout:.0f}s")
+
+        # Step 3: Phased polling loop
+        start_time = time.time()
+        accepted = False
+
+        try:
+            while time.time() - start_time < rfq_timeout and not accepted:
+                elapsed = time.time() - start_time
+
+                quotes = self.get_quotes(request_id)
+
+                # Filter valid quotes
+                now_ms = int(time.time() * 1000)
+                valid_quotes = []
+                for q in quotes:
+                    if q.state != "OPEN":
+                        continue
+                    if want_to_buy and not q.is_we_buy:
+                        continue
+                    if not want_to_buy and not q.is_we_sell:
+                        continue
+                    if q.expiry_time and q.expiry_time < now_ms + 1000:
+                        continue
+                    valid_quotes.append(q)
+
+                if valid_quotes:
+                    valid_quotes.sort(key=lambda q: q.total_cost)
+
+                    # Log best quote
+                    best = valid_quotes[0]
+                    improvement = (
+                        self.calculate_improvement(best.total_cost, orderbook_cost)
+                        if orderbook_cost is not None else 0.0
+                    )
+
+                    # Phase 1: Initial wait — log but don't accept
+                    if elapsed < initial_wait_seconds:
+                        logger.info(
+                            f"[Phase 1 — waiting] {elapsed:.0f}s / "
+                            f"{initial_wait_seconds}s  |  best quote: "
+                            f"${best.total_cost:.2f} ({improvement:+.1f}% vs book)"
+                        )
+                        time.sleep(poll_interval_seconds)
+                        continue
+
+                    # Phase 2: Gated — accept if within mark_floor_pct of book
+                    if elapsed < relax_after_seconds:
+                        min_ok = -mark_floor_pct
+                        if orderbook_cost is not None and improvement < min_ok:
+                            logger.info(
+                                f"[Phase 2 — gated] {elapsed:.0f}s  |  "
+                                f"best={improvement:+.1f}% (need >= {min_ok:+.1f}%), waiting..."
+                            )
+                            time.sleep(poll_interval_seconds)
+                            continue
+                        phase_label = "Phase 2 — gated"
+                    else:
+                        # Phase 3: Relaxed — accept anything
+                        phase_label = "Phase 3 — relaxed"
+
+                    # Try to accept
+                    for q in valid_quotes:
+                        imp = (
+                            self.calculate_improvement(q.total_cost, orderbook_cost)
+                            if orderbook_cost is not None else 0.0
+                        )
+                        logger.info(
+                            f"[{phase_label}] Accepting quote {q.quote_id}: "
+                            f"${abs(q.total_cost):.2f} ({imp:+.1f}% vs book)"
+                        )
+                        accept_response = self.accept_quote(request_id, q.quote_id)
+                        if accept_response:
+                            result.success = True
+                            result.quote_id = q.quote_id
+                            result.state = RFQState.FILLED
+                            result.legs = accept_response.get("legs", q.legs)
+                            result.total_cost = q.total_cost
+                            result.improvement_pct = imp
+                            result.message = (
+                                f"{action_str} filled ({phase_label}): "
+                                f"${abs(q.total_cost):.2f} ({imp:+.1f}% vs book)"
+                            )
+                            accepted = True
+                            break
+                        else:
+                            logger.warning(f"Quote {q.quote_id} accept failed, trying next...")
+
+                if accepted:
+                    break
+
+                time.sleep(poll_interval_seconds)
+
+            if not accepted:
+                result.message = f"No quotes accepted within {rfq_timeout:.0f}s timeout"
+                self.cancel_rfq(request_id)
+                result.state = RFQState.CANCELLED
+
+        except Exception as e:
+            logger.error(f"Error during phased RFQ execution: {e}")
+            result.message = f"Execution error: {e}"
+            try:
+                self.cancel_rfq(request_id)
+            except Exception:
+                pass
+            result.state = RFQState.CANCELLED
+
+        if result.success:
+            logger.info(f"Phased RFQ {request_id} completed: {result.message}")
+        else:
+            logger.warning(f"Phased RFQ {request_id} failed: {result.message}")
+
         return result

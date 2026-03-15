@@ -31,13 +31,22 @@ from config import ENVIRONMENT
 
 os.makedirs("logs", exist_ok=True)
 logging.basicConfig(
-    level=logging.DEBUG,
+    level=logging.WARNING,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     handlers=[
         logging.FileHandler("logs/trading.log"),
         logging.StreamHandler(),
     ],
 )
+# Strategy-critical events (trade open/close, conditions triggered) log at
+# INFO or WARNING level.  Set the root to WARNING to suppress routine DEBUG
+# chatter; promote our own loggers to INFO so we still see trade events.
+for _name in ("__main__", "strategy", "trade_lifecycle", "trade_execution",
+              "rfq", "account_manager", "dashboard", "persistence",
+              "strategies.daily_put_sell", "strategies.atm_straddle",
+              "strategies.blueprint_strangle", "order_manager",
+              "ema_filter", "telegram_notifier"):
+    logging.getLogger(_name).setLevel(logging.INFO)
 logger = logging.getLogger(__name__)
 
 

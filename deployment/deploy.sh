@@ -2,24 +2,29 @@
 # ===========================================================================
 # CoincallTrader — One-Button Deploy
 #
-# Syncs local code to the Ubuntu VPS, installs deps, and restarts the
-# systemd service.  Run from your dev machine (macOS).
+# Single source of truth: everything (code, .env, config) lives on the
+# dev machine and is rsynced to the Ubuntu VPS.  The only server-side
+# patch is DEPLOYMENT_TARGET, which is auto-set to 'production' after
+# each sync.  No separate --env step, no server-side config to maintain.
 #
 # Prerequisites:
-#   - .deploy.env in the project root (see .deploy.env for template)
+#   - .deploy.env in the project root (SSH connection settings)
 #   - SSH key access to the VPS
 #   - Server set up via: ./deployment/deploy.sh --setup
 #
 # Usage:
-#   ./deployment/deploy.sh              Full deploy (stop → sync → deps → start)
+#   ./deployment/deploy.sh              Full deploy (stop → sync → patch → deps → start)
 #   ./deployment/deploy.sh --dry-run    Preview what rsync would transfer
 #   ./deployment/deploy.sh --setup      Run one-time server setup (first use)
-#   ./deployment/deploy.sh --env        Copy local .env to the VPS
 #   ./deployment/deploy.sh --stop       Stop the service
 #   ./deployment/deploy.sh --start      Start the service
 #   ./deployment/deploy.sh --restart    Restart the service
+#   ./deployment/deploy.sh --clean      Clean restart (wipe logs/state, start fresh)
 #   ./deployment/deploy.sh --status     Show service status
 #   ./deployment/deploy.sh --logs       Tail live logs (Ctrl+C to stop)
+#   ./deployment/deploy.sh --health     Quick health check (disk, memory, uptime)
+#   ./deployment/deploy.sh --update     Update OS packages on the VPS
+#   ./deployment/deploy.sh --reboot     Reboot VPS, wait, verify service
 #   ./deployment/deploy.sh --ssh        Open an SSH session to the VPS
 #   ./deployment/deploy.sh --help       Show this help
 # ===========================================================================
@@ -86,15 +91,15 @@ cmd_deploy() {
     check_connection
     ok "Connected to $VPS_HOST"
 
-    step "Stopping service on VPS"
-    remote "sudo systemctl stop $VPS_SERVICE 2>/dev/null || true"
-    ok "Service stopped (or was not running)"
-
     step "Syncing code to $VPS_HOST:$VPS_APP_DIR"
     local rsync_opts="-azv --delete --exclude-from=$SCRIPT_DIR/rsync-exclude.txt"
     if [[ "$dry_run" == "--dry-run" ]]; then
         rsync_opts="$rsync_opts --dry-run"
         warn "DRY RUN — no files will be transferred"
+    else
+        step "Stopping service on VPS"
+        remote "sudo systemctl stop $VPS_SERVICE 2>/dev/null || true"
+        ok "Service stopped (or was not running)"
     fi
 
     local ssh_cmd="ssh $SSH_OPTS"
@@ -108,6 +113,10 @@ cmd_deploy() {
         echo -e "\n${YELLOW}Dry run complete — no changes made on the server.${NC}"
         return
     fi
+
+    step "Patching .env for production"
+    remote "sed -i 's/^DEPLOYMENT_TARGET=.*/DEPLOYMENT_TARGET=production/' $VPS_APP_DIR/.env"
+    ok "DEPLOYMENT_TARGET set to production"
 
     step "Installing / updating Python dependencies"
     remote "cd $VPS_APP_DIR && .venv/bin/pip install -q -r requirements.txt"
@@ -150,29 +159,7 @@ cmd_setup() {
     ssh $SSH_OPTS "$VPS_HOST" "bash -s" < "$SCRIPT_DIR/server-setup.sh"
 
     echo -e "\n${GREEN}Server setup complete!${NC}"
-    echo -e "Next: copy your .env file with:  ${CYAN}./deployment/deploy.sh --env${NC}"
-    echo -e "Then deploy with:                ${CYAN}./deployment/deploy.sh${NC}"
-}
-
-cmd_env() {
-    # Copy the local .env file to the VPS
-    local env_file="$PROJECT_ROOT/.env"
-    if [[ ! -f "$env_file" ]]; then
-        fail ".env file not found at $env_file"
-    fi
-
-    step "Copying .env to VPS (with DEPLOYMENT_TARGET=production)"
-    check_connection
-
-    # Copy to a temp file, override DEPLOYMENT_TARGET for the server
-    local tmp_env
-    tmp_env=$(mktemp)
-    sed 's/^DEPLOYMENT_TARGET=.*/DEPLOYMENT_TARGET=production/' "$env_file" > "$tmp_env"
-
-    # shellcheck disable=SC2086
-    scp $SSH_OPTS "$tmp_env" "$VPS_HOST:$VPS_APP_DIR/.env"
-    rm -f "$tmp_env"
-    ok ".env copied to $VPS_HOST:$VPS_APP_DIR/.env (DEPLOYMENT_TARGET set to production)"
+    echo -e "Next: deploy with:  ${CYAN}./deployment/deploy.sh${NC}"
 }
 
 cmd_stop() {
@@ -376,7 +363,6 @@ Commands:
   (no args)    Full deploy: stop → sync → deps → start
   --dry-run    Preview rsync changes (nothing transferred)
   --setup      One-time server setup (run once on fresh VPS)
-  --env        Copy .env to the VPS
   --stop       Stop the service
   --start      Start the service
   --restart    Restart the service
@@ -398,8 +384,7 @@ Configuration:
 
 First-time setup:
   1.  ./deployment/deploy.sh --setup    (prepare the VPS)
-  2.  ./deployment/deploy.sh --env      (copy .env credentials)
-  3.  ./deployment/deploy.sh            (deploy & start)
+  2.  ./deployment/deploy.sh            (deploy & start)
 EOF
 }
 
@@ -409,7 +394,6 @@ EOF
 case "${1:-}" in
     --dry-run)    cmd_deploy --dry-run ;;
     --setup)      cmd_setup ;;
-    --env)        cmd_env ;;
     --stop)       cmd_stop ;;
     --start)      cmd_start ;;
     --restart)    cmd_restart ;;

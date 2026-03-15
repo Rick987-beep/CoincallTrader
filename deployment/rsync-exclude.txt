@@ -1,8 +1,9 @@
 # ===========================================================================
 # CoincallTrader — rsync Exclusion List
 #
-# Files and directories listed here are NOT synced to the VPS.
-# The production server only gets the application code it needs to run.
+# Files listed here are NOT synced to the VPS.  Everything else —
+# including .env — IS synced.  The deploy script patches
+# DEPLOYMENT_TARGET=production on the server after each sync.
 #
 # Used by: deployment/deploy.sh (passed via --exclude-from)
 # ===========================================================================
@@ -19,8 +20,7 @@ __pycache__/
 .git/
 .gitignore
 
-# ── Secrets & local config (these live on the VPS separately) ───────────
-.env
+# ── Local deploy config (SSH settings — not needed on VPS) ─────────────
 .deploy.env
 
 # ── Logs & runtime data (preserved on the VPS across deploys) ───────────

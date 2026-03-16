@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.1] - 2026-03-16
+
+### Added
+- **Deribit market data test** (`tests/deribit/test_deribit_market_data.py`) — explored instrument list, ticker, orderbook, index price shapes; confirmed BTC-denominated pricing and always-populated Greeks
+- **Deribit account data test** (`tests/deribit/test_deribit_account.py`) — explored account summary, positions, open orders, trade history; confirmed unsigned size + direction field, portfolio margining, 47 account fields
+- **Deribit order round-trip test** (`tests/deribit/test_deribit_orders.py`) — full lifecycle on testnet: place→read→modify→cancel, place→fill→verify position→close→verify gone, edge cases (reduce_only, min size, invalid instrument); 27/27 checks passed
+- **Deribit symbol translation test** (`tests/deribit/test_deribit_symbols.py`) — parse+reconstruct round-trip for all 1134 testnet and 918 production BTC options; zero failures, no decimal strikes, date verification
+- **Deribit resilience test** (`tests/deribit/test_deribit_resilience.py`) — rate limit probing (25 rapid calls, no throttle), error shapes for invalid token/scope/instrument, token refresh lifecycle (old token invalidated after refresh)
+
 ## [1.2.0] - 2026-03-16
 
 ### Added

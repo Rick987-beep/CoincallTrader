@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0] - 2026-03-16
+
+### Added
+- **Deribit migration plan** (`docs/MIGRATION_PLAN_DERIBIT.md`) — comprehensive 950+ line plan covering exchange abstraction layer, module-by-module migration, RFQ/Block Trade abstraction design, phased rollout, and live integration test plan
+- **Deribit auth test** (`tests/deribit/test_auth_quick.py`) — verified connectivity to both testnet and production accounts
+
+### Fixed
+- **Order reconciliation key mismatch** (`order_manager.py`) — fixed `orderId` → `order_id` in exchange open-order set used for ledger reconciliation
+
 ## [1.1.0] - 2026-03-13
 
 ### Added

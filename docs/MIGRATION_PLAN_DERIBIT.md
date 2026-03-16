@@ -21,6 +21,7 @@
 10. [Migration Phases & Sequencing](#10-migration-phases--sequencing)
 11. [Risk Register](#11-risk-register)
 12. [Open Questions & Decisions Required](#12-open-questions--decisions-required)
+13. [Deribit API Field Reference (Test Findings)](#13-deribit-api-field-reference-test-findings)
 
 ---
 
@@ -1205,6 +1206,544 @@ exchanges/
 8. **Block RFQ anonymous vs disclosed?** Anonymous RFQs require targeting ≥5 MMs. Disclosed RFQs can target 1 MM but reveal our identity. For maximizing competition, anonymous is better. But if we have a preferred MM relationship, disclosed enables targeted quoting. Recommend: **anonymous by default** — maximum competition, and we have no established MM relationships on Deribit yet.
 
 9. **Phased RFQ execution on Deribit — poll or trigger?** Our current `rfq_phased` logic polls quotes and manually decides when to accept. Deribit's `good_til_cancelled` trigger orders automate this — place a crossing order at desired price, update it over time. Should we use triggers from Phase 2 or stick with polling for parity? Recommend: **polling in Phase 2** (simpler, matches Coincall behavior), **trigger orders in Phase 4** (better execution, less API traffic).
+
+---
+
+## 13. Deribit API Field Reference (Test Findings)
+
+> **Purpose:** Concrete, verified field-level reference for the AI agent building the abstraction layer. All data from live tests against Deribit testnet and production (March 2026). Test scripts in `tests/deribit/`.
+
+---
+
+### 13.1 Authentication & Token Lifecycle
+
+**Endpoint:** `POST /api/v2/public/auth` (JSON-RPC 2.0 body)
+
+**Grant types tested:**
+- `client_credentials` — initial auth; requires `client_id` + `client_secret`
+- `refresh_token` — uses `refresh_token` from a previous auth response
+
+**Auth response fields:**
+```
+access_token        string    Bearer token for Authorization header
+refresh_token       string    Single-use token for refresh grant
+expires_in          int       Token TTL in seconds (observed: 900 on both envs)
+token_type          string    Always "bearer"
+scope               string    Space-separated scopes (e.g., "account:read trade:read_write block_rfq:read_write ...")
+```
+
+**Verified behaviors:**
+- Token TTL: **900 seconds** (15 minutes) on both testnet and production
+- **Refresh invalidates the old token immediately.** After a `refresh_token` grant, the previous `access_token` returns error code `13009` (`unauthorized`, reason: `invalid_token`). This means: refresh MUST be atomic — swap old→new in one step, never let a request use the old token after refresh.
+- **Refresh token is also single-use.** A new `refresh_token` is issued with each refresh; the old one is consumed.
+- Both `access_token` and `refresh_token` change on every refresh (verified: `Token changed? YES`, `Refresh token changed? YES`).
+- Using the API: `Authorization: Bearer <access_token>` header on all private endpoints.
+
+**Scopes confirmed on our keys (both envs):**
+`account:read`, `trade:read_write`, `wallet:read`, `block_rfq:read_write`, `block_rfq_id:read_write`, and more. Full scope confirmed via auth response.
+
+---
+
+### 13.2 Error Response Format
+
+All Deribit errors come back as **HTTP 400** with a JSON-RPC error body. There are no 401, 403, or 429 HTTP status codes — you must inspect the JSON error code.
+
+**Standard error shape:**
+```json
+{
+  "jsonrpc": "2.0",
+  "error": {
+    "code": <int>,
+    "message": "<string>",
+    "data": {
+      "reason": "<string>",
+      "param": "<string>"      // optional, present for param-specific errors
+    }
+  },
+  "testnet": true/false
+}
+```
+
+**Observed error codes:**
+
+| Code | Message | When | `data.reason` |
+|------|---------|------|---------------|
+| `13009` | `unauthorized` | Invalid/expired/no token | `invalid_token` |
+| `-32601` | `Method not found` | Non-existent API method | — |
+| `-32602` | `Invalid params` | Bad parameter value | `instrument not found`, `must conform to tick size`, `must be a multiple of the minimum order size` |
+| `11030` | `other_reject invalid_reduce_only_order` | `reduce_only=true` with no position | — |
+
+**Key for abstraction:** Error detection must check `"error" in response_json`, NOT HTTP status code. All errors are HTTP 400.
+
+---
+
+### 13.3 Rate Limits
+
+**Observed (from account summary `limits` field):**
+
+| Category | Rate | Burst |
+|----------|------|-------|
+| Non-matching engine (reads) | 20/s | 100 |
+| Trading (orders) | 5/s | 20 |
+| Cancel all | 5/s | 20 |
+| Block RFQ maker | 10/s | 20 |
+| Spot | 5/s | 20 |
+
+**Rapid-fire test results:**
+- 25 calls in 1.8s (testnet) and 1.87s (production) — **zero throttling** observed.
+- Latency: 60–116ms per call (testnet), 61–86ms (production).
+- No HTTP 429 responses; Deribit's throttling mechanism (when it triggers) returns a JSON-RPC error, not an HTTP status code.
+
+**Practical implication:** Our 10s polling interval is very conservative. Even at 1 call/70ms we'd be within limits. But stay well below trading burst (20) for order operations.
+
+---
+
+### 13.4 Index Price
+
+**Official BTC/USD composite index:**
+```
+GET /api/v2/public/get_index_price?index_name=btc_usd
+```
+
+**This is the correct endpoint for the BTC spot index.** It returns Deribit's official composite index price (weighted across multiple spot exchanges), NOT the perpetual futures price. The perpetual (`BTC-PERPETUAL`) trades at a different price due to funding rate premium/discount.
+
+**Response:**
+```json
+{
+  "index_price": 73843.48,
+  "estimated_delivery_price": 73843.48
+}
+```
+
+| Index Name | Asset |
+|------------|-------|
+| `btc_usd` | Bitcoin |
+| `eth_usd` | Ethereum |
+
+**Where index appears elsewhere:**
+- Ticker response: `index_price` field
+- Position data: `index_price` field
+- Trade data: `index_price` field
+- Account summary: NOT included (must fetch separately)
+
+**NOTE:** `underlying_price` in ticker is a float (e.g., `73678.09`) — this is the forward price (slightly different from spot index). `underlying_index` in the orderbook returns a *string* like `"BTC-20MAR26"` (the futures delivery name), NOT a number.
+
+---
+
+### 13.5 Market Data — Instruments
+
+**Endpoint:** `GET /api/v2/public/get_instruments?currency=BTC&kind=option&expired=false`
+
+**Instrument count (March 2026):** 1134 testnet, 918 production. 11 unique expiry dates, 95–122 unique strikes.
+
+**Full field list (per instrument):**
+```
+instrument_name          "BTC-20MAR26-74000-C"
+instrument_id            int
+strike                   float        (always integer values, no decimals observed)
+expiration_timestamp     int (ms)     Unix millis; settlement at 08:00 UTC on expiry date
+option_type              "call" | "put"
+is_active                bool
+kind                     "option"
+instrument_type          "reversed"   (BTC-margined options are "reversed" contracts)
+contract_size            1.0          (1 option = 1 BTC notional)
+min_trade_amount         0.1          (minimum order size in contracts)
+tick_size                0.0001       (base tick — but see tick_size_steps below)
+tick_size_steps           [{"above_price": 0.005, "tick_size": 0.0005}]
+maker_commission         0.0003       (0.03%)
+taker_commission         0.0003       (0.03%)
+base_currency            "BTC"
+counter_currency         "USD"
+quote_currency           "BTC"
+settlement_currency      "BTC"
+settlement_period        "week" | "month" | "quarter"
+creation_timestamp       int (ms)
+state                    "open"
+price_index              "btc_usd"
+block_trade_min_trade_amount   25     (25 BTC for block/RFQ trades)
+block_trade_tick_size    0.0001
+```
+
+**Tick size rules (critical for order placement):**
+```
+Price < 0.005 BTC  →  tick = 0.0001
+Price >= 0.005 BTC →  tick = 0.0005
+```
+This is encoded in the `tick_size_steps` field. **Orders at invalid tick sizes are rejected** with code `-32602` ("must conform to tick size").
+
+**Symbol format:** `{UNDERLYING}-{D}[D]{MMM}{YY}-{STRIKE}-{C|P}`
+- Day can be 1 or 2 digits: `3APR26` or `20MAR26`
+- Strike: always integer (no decimal points observed in 2052 instruments across both envs)
+- Regex: `^([A-Z]+)-(\d{1,2})([A-Z]{3})(\d{2})-(\d+)-([CP])$`
+- **Round-trip verified:** parse→reconstruct matches 100% for all 1134 testnet and 918 production instruments.
+
+**Active futures (non-option, for filtering):**
+```
+BTC-20MAR26, BTC-27MAR26, BTC-24APR26, BTC-29MAY26,
+BTC-26JUN26, BTC-25SEP26, BTC-25DEC26, BTC-PERPETUAL
+```
+Our option parser correctly rejects all of these.
+
+---
+
+### 13.6 Market Data — Ticker
+
+**Endpoint:** `GET /api/v2/public/ticker?instrument_name=BTC-20MAR26-74000-C`
+
+**All prices are in BTC** (e.g., `mark_price: 0.021` = $1,551 USD at $73,861 underlying).
+
+**Full field list:**
+```
+mark_price               float     Option price in BTC
+best_bid_price           float     Best bid in BTC (can be 0 if no bids)
+best_ask_price           float     Best ask in BTC (can be 0 if no asks)
+best_bid_amount          float     Size at best bid (in contracts)
+best_ask_amount          float     Size at best ask (in contracts)
+last_price               float     Last traded price in BTC
+index_price              float     Current spot index ($)
+underlying_price         float     Forward price ($) — slightly different from index
+underlying_index         string    Forward reference (e.g., "SYN.BTC-20MAR26")
+mark_iv                  float     Mark implied volatility (%)
+bid_iv                   float     Bid implied volatility (%)
+ask_iv                   float     Ask implied volatility (%)
+interest_rate            float     Risk-free interest rate used
+open_interest            float     Open interest (in contracts)
+volume                   float     24h volume (in contracts)
+settlement_price         float     Previous settlement price
+estimated_delivery_price float     Est. delivery price at settlement
+min_price                float     Minimum allowed order price
+max_price                float     Maximum allowed order price
+state                    string    "open" | "closed"
+timestamp                int (ms)  Server timestamp
+
+greeks:
+  delta                  float     Option delta (per contract)
+  gamma                  float     Option gamma
+  vega                   float     Option vega
+  theta                  float     Option theta
+  rho                    float     Option rho
+
+stats:
+  high                   float     24h high
+  low                    float     24h low
+  price_change           float     24h price change (%)
+  volume                 float     24h volume
+  volume_usd             float     24h volume in USD
+```
+
+**Greeks are ALWAYS populated** — even for deep OTM options (tested: strike 105000 with delta 0.02142). No null/None values observed.
+
+---
+
+### 13.7 Market Data — Orderbook
+
+**Endpoint:** `GET /api/v2/public/get_order_book?instrument_name=...&depth=10`
+
+**Response includes the full ticker data PLUS:**
+```
+bids      [[price, amount], [price, amount], ...]     Descending price
+asks      [[price, amount], [price, amount], ...]     Ascending price
+change_id int                                          Sequence number for WS sync
+```
+
+**Note:** `underlying_index` in the orderbook response returns a string like `"BTC-20MAR26"` (the futures reference), not a float. This is different from the ticker's `underlying_price` which is a float.
+
+---
+
+### 13.8 Account Summary
+
+**Endpoint:** `POST /api/v2/private/get_account_summary` with `{currency: "BTC"}` or `{currency: "USDC"}`
+
+**BTC and USDC accounts have identical field structures** (verified: zero fields only in BTC, zero fields only in USDC).
+
+**Full field list (47 fields):**
+```
+equity                           float     Total equity in account currency
+balance                          float     Cash balance (deposits - withdrawals + realized PnL)
+available_funds                  float     Funds available for new orders
+available_withdrawal_funds       float     Max withdrawable amount
+initial_margin                   float     Currently used initial margin
+maintenance_margin               float     Currently used maintenance margin
+margin_balance                   float     Balance used for margin calculations
+projected_initial_margin         float     IM including projected moves
+projected_maintenance_margin     float     MM including projected moves
+projected_close_out_margin       float     
+close_out_margin                 float     
+currency                         string    "BTC" or "USDC"
+margin_model                     string    "cross_pm" (cross portfolio margin)
+portfolio_margining_enabled      bool      true
+cross_collateral_enabled         bool      true
+
+session_upl                      float     Unrealized PnL this session
+session_rpl                      float     Realized PnL this session
+total_pl                         float     Total PnL
+options_pl                       float     PnL from options
+futures_pl                       float     PnL from futures
+futures_session_rpl              float
+futures_session_upl              float
+options_session_rpl              float
+options_session_upl              float
+
+delta_total                      float     Portfolio delta
+delta_total_map                  dict
+options_delta                    float
+options_gamma                    float     Portfolio gamma
+options_gamma_map                dict
+options_vega                     float     Portfolio vega
+options_vega_map                 dict
+options_theta                    float     Portfolio theta
+options_theta_map                dict
+options_value                    float     Total mark-to-market value of options
+projected_delta_total            float
+
+spot_reserve                     float
+locked_balance                   float
+fee_balance                      float
+additional_reserve               float
+disable_kyc_verification         bool
+
+total_equity_usd                 float     Equity converted to USD
+total_initial_margin_usd         float     IM in USD
+total_maintenance_margin_usd     float     MM in USD
+total_margin_balance_usd         float     Margin balance in USD
+total_delta_total_usd            float     Delta in USD terms
+
+limits                           dict      Rate limit info (see 13.3)
+change_margin_model_api_limit    dict      {timeframe, rate}
+```
+
+**Key comparison with Coincall:**
+
+| Concept | Coincall | Deribit |
+|---------|----------|---------|
+| Equity | `equity` | `equity` |
+| Available margin | `availableMargin` | `available_funds` |
+| Initial margin | `imAmount` | `initial_margin` |
+| Maintenance margin | `mmAmount` | `maintenance_margin` |
+| Unrealized PnL | `upnl` | `session_upl` |
+| Realized PnL | `rpnl` | `session_rpl` |
+| Currency | Always USD-denominated | Account currency (BTC or USDC) |
+
+**Critical difference:** Deribit reports margin and equity **in account currency** (BTC or USDC), not USD. Use `total_equity_usd` etc. for cross-currency USD comparisons.
+
+---
+
+### 13.9 Positions
+
+**Endpoint:** `POST /api/v2/private/get_positions` with `{currency: "BTC", kind: "option"}`
+
+**Position field list (19 fields):**
+```
+instrument_name          string     "BTC-20MAR26-74000-C"
+kind                     string     "option"
+size                     float      Contract count (UNSIGNED — always >= 0)
+direction                string     "buy" | "sell" | "zero" (for closed/zero-size positions)
+average_price            float      Average entry price in BTC
+average_price_usd        float      Average entry price in USD
+mark_price               float      Current mark price in BTC
+index_price              float      Current BTC index price ($)
+settlement_price         float
+initial_margin           float      IM for this position (0 for long options)
+maintenance_margin       float      MM for this position (0 for long options)
+floating_profit_loss     float      Unrealized PnL in BTC
+floating_profit_loss_usd float      Unrealized PnL in USD
+realized_profit_loss     float      Realized PnL in BTC
+total_profit_loss        float      Total PnL in BTC
+delta                    float      Position delta (total, not per-contract)
+gamma                    float      Position gamma (total)
+vega                     float      Position vega (total)
+theta                    float      Position theta (total)
+```
+
+**CRITICAL: Size is UNSIGNED with separate direction field.**
+- Coincall uses signed size (negative = short).
+- Deribit uses unsigned `size` + `direction` ("buy"/"sell"/"zero").
+- The abstraction layer MUST normalize this. A Deribit `{size: 0.1, direction: "sell"}` = Coincall `{qty: -0.1}`.
+
+**Position Greeks are TOTAL, not per-contract.** A 0.1 contract position at delta 0.4974/contract shows `delta: 0.04974`.
+
+**Long options have 0 margin.** Observed: `initial_margin: 0.0`, `maintenance_margin: 0.0` for a long call. Short option positions would show non-zero margin.
+
+**Closed positions:** Deribit can return positions with `size: 0, direction: "zero"` — these are historical entries, not active. Filter by `size > 0` for active positions.
+
+---
+
+### 13.10 Orders
+
+**Placement:** `POST /api/v2/private/buy` or `/private/sell` (separate endpoints per side)
+
+**Request parameters:**
+```json
+{
+  "instrument_name": "BTC-20MAR26-74000-C",
+  "amount": 0.1,
+  "type": "limit",
+  "price": 0.021,
+  "label": "my_strategy_001",
+  "reduce_only": false
+}
+```
+
+**Response shape:** `{order: {...}, trades: [...]}`
+- `trades` is populated if the order fills immediately (even partially).
+- For a limit order below market, `trades` is empty `[]`.
+
+**Order field list (23 fields):**
+```
+order_id                 string     "88058021064" (numeric string)
+order_state              string     "open" | "filled" | "cancelled" | "rejected" | "untriggered"
+order_type               string     "limit" | "market" | "stop_limit" | ...
+instrument_name          string
+direction                string     "buy" | "sell"
+price                    float      Limit price in BTC
+amount                   float      Total order size (contracts)
+filled_amount            float      How much has been filled so far
+contracts                float      Same as amount (echoed)
+average_price            float      Avg fill price (0 if unfilled)
+label                    string     Round-trips perfectly — visible in order, open-order list, AND trade history
+time_in_force            string     "good_til_cancelled" (default)
+creation_timestamp       int (ms)
+last_update_timestamp    int (ms)
+post_only                bool
+reduce_only              bool
+replaced                 bool       Set to true after an edit (order_id stays the same!)
+cancel_reason            string     Present only on cancelled orders. Observed: "user_request"
+api                      bool       true if order was placed via API (vs web UI)
+web                      bool       true if order was placed via web UI
+mmp                      bool       Market maker protection flag
+is_liquidation           bool
+risk_reducing            bool
+user_id                  int
+```
+
+**Verified behaviors:**
+- **`order_id` does NOT change after edit.** The `replaced` flag goes from `false` to `true`, but the ID stays the same. This simplifies order tracking vs exchanges where edits create new IDs.
+- **`label` round-trips through all endpoints:** order placement response, `get_order_state`, `get_open_orders_by_currency`, and `get_user_trades_by_currency`. Max 64 chars.
+- **Immediate fill:** Placing a buy at `best_ask` filled immediately — `order_state: "filled"`, `trades: [1 trade]` in the same response.
+- **Near-fill latency:** Closing a position at `best_bid` went to `order_state: "open"` initially, then `"filled"` on the first 2s poll.
+
+**Order state transitions (observed):**
+```
+Place far below market  →  "open"
+Edit price              →  "open" (replaced=true)
+Cancel                  →  "cancelled" (cancel_reason="user_request")
+Place at best_ask       →  "filled" (immediate)
+Place at best_bid       →  "open" → poll → "filled"
+```
+
+---
+
+### 13.11 Trade History
+
+**Endpoint:** `POST /api/v2/private/get_user_trades_by_currency` with `{currency: "BTC", count: N}`
+
+**Response shape:** `{trades: [...], has_more: bool}` — paginated.
+
+**Trade field list (28 fields):**
+```
+trade_id                 string     "225388371"
+order_id                 string     Links to the originating order
+instrument_name          string
+direction                string     "buy" | "sell"
+price                    float      Execution price in BTC
+amount                   float      Filled amount (contracts)
+contracts                float      Same as amount
+fee                      float      Fee in BTC
+fee_currency             string     "BTC"
+iv                       float      Implied volatility at execution
+mark_price               float      Mark price at time of trade
+index_price              float      Index price at time of trade
+underlying_price         float      Underlying forward price at time of trade
+profit_loss              float      PnL for this trade (0 for opens, nonzero for closes)
+state                    string     "filled"
+timestamp                int (ms)
+trade_seq                int        Sequential trade number
+matching_id              string|null
+order_type               string     "limit" | "market" | ...
+label                    string     From the originating order (confirmed: visible in trade history!)
+post_only                bool
+reduce_only              bool
+risk_reducing            bool
+mmp                      bool
+self_trade               bool
+api                      bool       true if order was placed via API
+tick_direction            int        Price movement indicator
+liquidity                string     "M" (maker) | "T" (taker)
+user_id                  int
+```
+
+---
+
+### 13.12 Fee Structure
+
+**Observed fees (our account — both testnet and production):**
+
+| | Rate | Example |
+|-|------|---------|
+| **Maker** | 0.03% (0.0003 per 1.0 BTC contract) | 0.1 contracts → fee 0.00003 BTC |
+| **Taker** | 0.03% (0.0003 per 1.0 BTC contract) | 0.1 contracts → fee 0.00003 BTC |
+
+**Maker and taker fees are identical on our account.** This may vary for other fee tiers.
+
+The `liquidity` field in trade history indicates `"M"` (maker) or `"T"` (taker).
+
+**Fee in instrument metadata:** `maker_commission: 0.0003`, `taker_commission: 0.0003` — these match the observed fees.
+
+**Note:** In Test 4, buying at `best_ask` (crossing the spread) is a **taker** trade, and selling at `best_bid` (crossing the spread) is also a **taker** trade. Both showed fee = 0.00003 BTC (0.03%). The `liquidity` field would show `"T"` for these. The original Test 4 analysis incorrectly labeled these as "maker fee" — corrected here.
+
+---
+
+### 13.13 Advanced Order Pricing Modes
+
+**Not yet tested — documented for future reference.**
+
+Deribit supports three pricing modes when placing orders:
+
+| Mode | `type` suffix | How it works |
+|------|---------------|-------------|
+| **BTC price** | `"limit"` (default) | Price in BTC. This is what we tested. `price: 0.021` means 0.021 BTC. |
+| **USD price** | `"limit"` with `advanced: "usd"` | Price in USD. Deribit dynamically converts to BTC using the current index. Useful for strategies that think in dollar terms. |
+| **IV price** | `"limit"` with `advanced: "implv"` | Price in implied volatility. `price: 55.0` means 55% IV. Deribit dynamically computes the BTC price from the IV using its own pricing model. |
+
+**Example (IV order):**
+```json
+{
+  "instrument_name": "BTC-20MAR26-74000-C",
+  "amount": 0.1,
+  "type": "limit",
+  "price": 55.0,
+  "advanced": "implv"
+}
+```
+
+**Why this matters:**
+- USD pricing removes the need to manually convert dollar targets to BTC prices. If a strategy says "I want to sell this call for $1,500", we can send `price: 1500, advanced: "usd"` instead of computing `1500 / index_price`.
+- IV pricing enables volatility-based strategies — "sell at 60% IV" without computing option prices ourselves. The exchange handles the Black-Scholes conversion in real time.
+- Both modes dynamically adjust the effective BTC price over time as spot moves, which is powerful for GTC orders.
+
+**Decision:** Defer testing until a strategy needs it. Current strategies express prices in BTC or dollar terms that we convert ourselves. IV pricing may be valuable for volatility-targeting strategies in Phase 4.
+
+---
+
+### 13.14 Key Differences Summary (Deribit vs Coincall — Quick Reference)
+
+| Aspect | Coincall | Deribit | Abstraction Impact |
+|--------|----------|---------|-------------------|
+| Auth | HMAC sign per request | Bearer token (900s TTL + refresh) | Need token lifecycle manager |
+| Side encoding | `1`=buy, `2`=sell (ints) | Separate `/buy` and `/sell` endpoints | Router normalizes |
+| Position size | Signed (negative = short) | Unsigned + `direction` field | **Normalize in adapter** |
+| Order status | Numeric (`0`=new, `1`=filled, …) | String (`"open"`, `"filled"`, …) | Map in adapter |
+| Client order ID | `clientOrderId` | `label` (max 64 chars) | Rename in adapter |
+| Price currency | USD | BTC | **Convert in adapter** |
+| Index price | Embedded in futures ticker | Dedicated `get_index_price` | Separate call |
+| Error format | HTTP status codes | Always HTTP 400 + JSON error code | Check JSON, not HTTP |
+| order_id on edit | May change (unknown) | **Does NOT change** (`replaced=true`) | Simpler tracking |
+| Greeks in ticker | Separate call | Bundled in ticker response | Fewer API calls |
+| Position Greeks | Per-contract (?) | **Total** (size × per-contract) | Normalize to per-contract if needed |
+| Trade fee field | ? | `fee` + `fee_currency` per trade | Direct mapping |
+| Tick sizes | Uniform (?) | Variable by price level (`tick_size_steps`) | Must consult before placing |
+| Min order size | Varies | 0.1 contracts for all BTC options | Hardcode or read from instrument |
+| RFQ minimum | $50k notional | 25 BTC contracts (~$1.8M) | Threshold in exchange config |
 
 ---
 

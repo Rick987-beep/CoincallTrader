@@ -52,6 +52,22 @@ Next: Phase 2 (Deribit adapter implementation).
 - MODIFIED: All 7 test files in `tests/`
 - MODIFIED: `docs/MODULE_REFERENCE.md`, `.copilot-instructions.md`, `docs/MIGRATION_PLAN_DERIBIT.md`
 
+## [1.1.1] - 2026-03-17
+
+### Production Hotfix (deployed from `hotfix/1.1.1` branch, merged back to main)
+
+**Context:** v1.2.0 reconciliation fix was never deployed because the Deribit migration (v1.3.0-wip) had
+already altered core modules. Production was running v1.1.0. Hotfix branched from v1.1.0, applied two
+targeted fixes, deployed to production, and merged back to main.
+
+### Fixed
+- **Order reconciliation key mismatch** (`order_manager.py`) — `reconcile()` used `orderId` (camelCase) but `account_manager.get_open_orders()` returns `order_id` (snake_case). Every live order appeared "not found on exchange", causing a Telegram warning every 60 seconds.
+- **TP/SL idempotent order collision** (`execution_router.py`) — `_close_limit()` now cancels existing `CLOSE_LEG` orders (e.g. TP limit order) before placing SL close orders. Previously, `OrderManager`'s idempotent guard returned the stale TP order (at $9.50) instead of placing an aggressive close, adding ~35 seconds of SL execution delay.
+- **Test mocks** (`test_order_manager.py`, `test_phase3_hardening.py`) — reconciliation test mocks updated to use `order_id` (snake_case) matching `account_manager.get_open_orders()` output.
+
+### Incident Reference
+See `analysis/2026-03-17_overnight_sl_analysis.md` for full post-mortem of the March 17 stop-loss event.
+
 ## [1.2.1] - 2026-03-16
 
 ### Added

@@ -18,6 +18,7 @@ from typing import List, Optional
 from trade_execution import TradeExecutor, LimitFillManager, ExecutionParams
 from rfq import RFQExecutor, OptionLeg, RFQResult
 from order_manager import OrderManager, OrderPurpose
+from market_data import get_option_market_data
 
 logger = logging.getLogger(__name__)
 
@@ -144,7 +145,7 @@ class ExecutionRouter:
         Supports phased execution when trade.metadata contains:
             rfq_phased: True
             rfq_initial_wait_seconds: int (default 30)
-            rfq_mark_floor_pct: float (default 2.2)
+            rfq_min_book_improvement_pct: float (default 2.2)
             rfq_relax_after_seconds: int (default 300)
         """
         rfq_legs = [
@@ -169,7 +170,7 @@ class ExecutionRouter:
                 action=trade.rfq_action,
                 timeout_seconds=phased_timeout,
                 initial_wait_seconds=trade.metadata.get("rfq_initial_wait_seconds", 30),
-                mark_floor_pct=trade.metadata.get("rfq_mark_floor_pct", 2.2),
+                min_book_improvement_pct=trade.metadata.get("rfq_min_book_improvement_pct", 2.2),
                 relax_after_seconds=trade.metadata.get("rfq_relax_after_seconds", 300),
             )
         else:
@@ -188,6 +189,18 @@ class ExecutionRouter:
                 leg.filled_qty = leg.qty
                 if i < len(result.legs):
                     leg.fill_price = float(result.legs[i].get('price', 0.0))
+            # Log + store mark price at open for each leg
+            for leg in trade.open_legs:
+                mkt = get_option_market_data(leg.symbol)
+                if mkt:
+                    mark = mkt.get('mark_price', 0)
+                    trade.metadata[f"mark_at_open_{leg.symbol}"] = mark
+                    if mark:
+                        slip = ((leg.fill_price or 0) - mark) / mark * 100
+                        logger.info(
+                            f"[{trade.id}] {leg.symbol} mark={mark:.4f}  "
+                            f"fill={leg.fill_price:.4f}  slip={slip:+.1f}%"
+                        )
             logger.info(f"Trade {trade.id} opened via RFQ (all legs filled)")
             return True
 
@@ -261,6 +274,18 @@ class ExecutionRouter:
                 leg.filled_qty = leg.qty
                 if i < len(result.legs):
                     leg.fill_price = float(result.legs[i].get('price', 0.0))
+            # Log + store mark price at close for each leg
+            for leg in trade.close_legs:
+                mkt = get_option_market_data(leg.symbol)
+                if mkt:
+                    mark = mkt.get('mark_price', 0)
+                    trade.metadata[f"mark_at_close_{leg.symbol}"] = mark
+                    if mark:
+                        slip = ((leg.fill_price or 0) - mark) / mark * 100
+                        logger.info(
+                            f"[{trade.id}] {leg.symbol} close mark={mark:.4f}  "
+                            f"fill={leg.fill_price:.4f}  slip={slip:+.1f}%"
+                        )
             trade._finalize_close()
             logger.info(f"Trade {trade.id} closed via RFQ (PnL={trade.realized_pnl:+.4f})")
             return True

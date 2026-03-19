@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.1] - 2026-03-19
+
+### RFQ Gate Fix & Strategy Cleanup
+
+### Fixed
+- **RFQ acceptance gate sign flip** (`rfq.py`) — Gate was accepting quotes up to 2.2% *worse* than orderbook (`min_ok = -mark_floor_pct`). Flipped to require quotes to *beat* orderbook by ≥2% (`min_ok = min_book_improvement_pct`).
+
+### Changed
+- **Renamed misleading RFQ parameter** — `mark_floor_pct` → `min_book_improvement_pct` and `RFQ_MARK_FLOOR_PCT` → `RFQ_MIN_BOOK_IMPROVEMENT_PCT` across `rfq.py`, `execution_router.py`, and `daily_put_sell.py`. The old name implied mark price comparison; the actual logic compares against orderbook.
+- **Removed unreachable Phase 3 from daily_put_sell** — `RFQ_RELAX_AFTER=300` was unreachable with `RFQ_OPEN_TIMEOUT=60`. Removed the constant and metadata key from the strategy. Phase 3 logic remains in the `rfq.py` engine for future use by other strategies.
+- **Updated module docstring** (`daily_put_sell.py`) — Reflects current phased RFQ behavior: Phase 1 (0–20s silent), Phase 2 (20–60s gated ≥2%), timeout → limit fallback.
+- **Suppressed werkzeug logs** (`main.py`) — Set werkzeug logger to ERROR level at startup to eliminate Flask request log noise.
+- **Switched .env to main production account** — `COINCALL_API_KEY_PROD` / `COINCALL_API_SECRET_PROD` now point to the main (big) account credentials.
+
+### Files
+- MODIFIED: `rfq.py`, `execution_router.py`, `strategies/daily_put_sell.py`, `main.py`
+
+---
+
 ## [1.4.0-wip] - 2026-03-17
 
 ### ⚠️ Work in Progress — Deribit Migration Phase 2

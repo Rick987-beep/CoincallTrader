@@ -55,6 +55,8 @@ logging.basicConfig(
         logging.StreamHandler(),
     ],
 )
+logging.getLogger("werkzeug").setLevel(logging.ERROR)
+
 if not _DEV_MODE:
     # Production: promote only key modules to INFO, keep root at WARNING.
     for _name in ("__main__", "strategy", "trade_lifecycle", "trade_execution",
@@ -74,8 +76,8 @@ STRATEGIES = [
     # atm_straddle,
     # atm_straddle_index_move,
     # blueprint_strangle,
-    # daily_put_sell,
-    smoke_test_strangle,
+    daily_put_sell,
+    # smoke_test_strangle,
 ]
 
 # =============================================================================

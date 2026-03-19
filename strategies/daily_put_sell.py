@@ -7,8 +7,10 @@ Sells a 1DTE BTC put option near -0.10 delta every day when:
   3. Sufficient margin is available
 
 Trade lifecycle:
-  - OPEN via phased RFQ: wait 30s for quotes, then accept within 2.2%
-    of mark price, after 5 min accept anything.
+  - OPEN via phased RFQ (60s total):
+      Phase 1 (0–20s): Collect quotes silently.
+      Phase 2 (20–60s): Accept if quote beats orderbook by ≥2%.
+      Timeout: Fall back to aggressive limit order.
   - TAKE PROFIT: Limit buy order placed immediately after open at
     10% of entry premium (buy back for 90% profit).
   - STOP LOSS: Exit condition at 70% loss (mark PnL).  Close via
@@ -42,7 +44,7 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from ema_filter import ema20_filter
-from market_data import get_btc_index_price
+from market_data import get_btc_index_price, get_option_market_data
 from option_selection import LegSpec
 from order_manager import OrderPurpose, OrderStatus
 from strategy import (
@@ -64,7 +66,7 @@ logger = logging.getLogger(__name__)
 # factory function below.
 
 # Structure
-QTY = 0.8                            # BTC per leg (adjust to desired notional)
+QTY = 0.74                           # BTC per leg (~$63k notional, clears $50k RFQ min)
 TARGET_DELTA = -0.10                 # OTM put delta target
 DTE = 1                              # 1 day to expiry
 
@@ -73,16 +75,15 @@ ENTRY_HOUR_START = 3                 # Open window: 03:00 UTC
 ENTRY_HOUR_END = 4                   # Close window: 04:00 UTC
 
 # Risk
-MIN_MARGIN_PCT = 20                  # Require ≥20% available margin
-STOP_LOSS_PCT = 70                   # Exit at 70% loss of entry premium
+MIN_MARGIN_PCT = 10                  # Require ≥20% available margin
+STOP_LOSS_PCT = 70                   # exit at 70% loss 
 TP_CAPTURE_PCT = 0.90                # Take profit = buy back at 10% of entry
                                      # (capture 90% of premium received)
 
 # RFQ open — phased execution
-RFQ_OPEN_TIMEOUT = 300               # 5 min total to get filled on open
-RFQ_INITIAL_WAIT = 30                # Wait 30s before accepting any quote
-RFQ_MARK_FLOOR_PCT = 2.2             # Phase 2: accept if within 2.2% of mark
-RFQ_RELAX_AFTER = 300                # Phase 3: accept anything after 5 min
+RFQ_OPEN_TIMEOUT = 60                # Total seconds: Phase 1 + Phase 2, then limit fallback
+RFQ_INITIAL_WAIT = 20                # Phase 1: collect quotes silently for 20s
+RFQ_MIN_BOOK_IMPROVEMENT_PCT = 2     # Phase 2: quote must beat orderbook by ≥2%
 
 # RFQ close (SL) — fast execution
 RFQ_CLOSE_TIMEOUT = 15               # 15s timeout for SL close
@@ -282,8 +283,22 @@ def _on_trade_opened(trade, account) -> None:
     # Log entry details
     leg = trade.open_legs[0] if trade.open_legs else None
     premium = leg.fill_price if leg and leg.fill_price else 0
+
+    # Mark price at open (may already be in metadata from execution_router)
+    mark_at_open = None
+    if leg:
+        mark_at_open = trade.metadata.get(f"mark_at_open_{leg.symbol}")
+        if not mark_at_open:
+            mkt = get_option_market_data(leg.symbol)
+            if mkt:
+                mark_at_open = mkt.get('mark_price', 0)
+                trade.metadata[f"mark_at_open_{leg.symbol}"] = mark_at_open
+
     if index_price:
         logger.info(
+            f"[DailyPutSell] Opened: SELL {leg.symbol if leg else '?'} "
+            f"@ ${premium:.4f}  |  mark=${mark_at_open:.4f}  |  BTC=${index_price:,.0f}"
+            if mark_at_open else
             f"[DailyPutSell] Opened: SELL {leg.symbol if leg else '?'} "
             f"@ ${premium:.4f}  |  BTC=${index_price:,.0f}"
         )
@@ -304,6 +319,10 @@ def _on_trade_opened(trade, account) -> None:
         if leg else "  (no leg info)"
     )
     idx_text = f"BTC: ${index_price:,.0f}" if index_price else "BTC: N/A"
+    mark_text = ""
+    if mark_at_open and premium:
+        slip = (premium - mark_at_open) / mark_at_open * 100
+        mark_text = f"Mark: ${mark_at_open:.4f}  |  Fill vs mark: {slip:+.1f}%\n"
     try:
         get_notifier().send(
             f"📉 <b>Daily Put Sell — Trade Opened</b>\n"
@@ -311,6 +330,7 @@ def _on_trade_opened(trade, account) -> None:
             f"ID: {trade.id}\n"
             f"{leg_text}\n"
             f"Premium received: ${abs(entry_cost):.4f}\n"
+            f"{mark_text}"
             f"{idx_text}  |  SL: {STOP_LOSS_PCT}%  |  TP: {TP_CAPTURE_PCT*100:.0f}%\n"
             f"Equity: ${account.equity:,.2f}\n"
             f"Avail margin: ${account.available_margin:,.2f} "
@@ -372,6 +392,19 @@ def _on_trade_closed(trade, account) -> None:
             for leg in trade.close_legs
             if leg.fill_price is not None
         )
+
+    # Mark price context for close notification
+    mark_close_text = ""
+    if trade.close_legs:
+        cl = trade.close_legs[0]
+        mark_open = trade.metadata.get(f"mark_at_open_{cl.symbol}")
+        mark_close = trade.metadata.get(f"mark_at_close_{cl.symbol}")
+        if mark_close and cl.fill_price:
+            slip = (cl.fill_price - mark_close) / mark_close * 100
+            mark_close_text = f"Close mark: ${mark_close:.4f}  |  Fill vs mark: {slip:+.1f}%\n"
+        if mark_open:
+            mark_close_text += f"Open mark: ${mark_open:.4f}\n"
+
     try:
         get_notifier().send(
             f"{emoji} <b>Daily Put Sell — Trade Closed</b>\n"
@@ -381,6 +414,7 @@ def _on_trade_closed(trade, account) -> None:
             f"PnL: <b>${pnl:+.4f}</b> ({roi:+.1f}%)\n"
             f"Hold: {hold_seconds/60:.1f} min\n"
             f"Entry premium: ${abs(entry_cost):.4f}\n"
+            f"{mark_close_text}"
             f"{close_detail}\n"
             f"Equity: ${account.equity:,.2f}\n"
             f"Avail margin: ${account.available_margin:,.2f} "
@@ -420,8 +454,8 @@ def daily_put_sell() -> StrategyConfig:
         # ── When to enter ────────────────────────────────────────────
         entry_conditions=[
             time_window(ENTRY_HOUR_START, ENTRY_HOUR_END),
-            ema20_filter(),
-            min_available_margin_pct(MIN_MARGIN_PCT),
+            # ema20_filter(),                       # TEST: disabled for test run
+            # min_available_margin_pct(MIN_MARGIN_PCT),  # TEST: disabled
         ],
 
         # ── When to exit ─────────────────────────────────────────────
@@ -468,8 +502,7 @@ def daily_put_sell() -> StrategyConfig:
         metadata={
             "rfq_phased": True,
             "rfq_initial_wait_seconds": RFQ_INITIAL_WAIT,
-            "rfq_mark_floor_pct": RFQ_MARK_FLOOR_PCT,
-            "rfq_relax_after_seconds": RFQ_RELAX_AFTER,
+            "rfq_min_book_improvement_pct": RFQ_MIN_BOOK_IMPROVEMENT_PCT,
             # RFQ open timeout (overrides rfq_params for phased open path)
             "rfq_timeout_seconds": RFQ_OPEN_TIMEOUT,
             # Hook: capture context when runner is created

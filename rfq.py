@@ -388,42 +388,32 @@ class RFQExecutor:
     def get_orderbook_cost(self, legs: List[OptionLeg], action: str = "buy") -> Optional[float]:
         """
         Calculate the total cost to execute this structure on the orderbook.
-        
-        The `action` parameter determines what WE want to do with the
-        structure.  Each leg's side defines the structure itself (e.g. a
-        strangle is two BUY legs).  The combination of action + leg side
-        determines which orderbook side to hit:
-        
-          action="buy"  + leg BUY  → we buy this leg  → pay the ask
-          action="buy"  + leg SELL → we sell this leg → hit the bid
-          action="sell" + leg BUY  → we sell this leg → hit the bid
-          action="sell" + leg SELL → we buy this leg  → pay the ask
-        
+
+        Per-leg comparison: action determines direction for every leg.
+
+          action="buy"  → we buy each leg  → pay the ask  → positive cost (debit)
+          action="sell" → we sell each leg → hit the bid  → negative cost (credit)
+
         Args:
             legs: List of OptionLeg objects defining the structure
-            action: "buy" or "sell" — what we want to do with the structure
-            
+            action: "buy" or "sell" — what we want to do with every leg
+
         Returns:
             Total cost (positive = net debit, negative = net credit)
             None if orderbook data unavailable for any leg
         """
         total_cost = 0.0
         want_to_buy = action.lower() == "buy"
-        
+
         for leg in legs:
             try:
                 orderbook = get_option_orderbook(leg.instrument)
-                
+
                 if not orderbook:
                     logger.warning(f"No orderbook data for {leg.instrument}")
                     return None
-                
-                # Determine effective direction for this leg
-                # "Effectively buying" = (leg is BUY and we buy the structure)
-                #                     OR (leg is SELL and we sell the structure)
-                effectively_buying = (leg.side == "BUY") == want_to_buy
-                
-                if effectively_buying:
+
+                if want_to_buy:
                     # We buy this leg → pay the ask
                     asks = orderbook.get('asks', [])
                     if not asks:
@@ -439,11 +429,11 @@ class RFQExecutor:
                         return None
                     price = float(bids[0]['price'])
                     total_cost -= price * leg.qty
-                    
+
             except Exception as e:
                 logger.error(f"Error getting orderbook for {leg.instrument}: {e}")
                 return None
-        
+
         return total_cost
     
     def calculate_improvement(
@@ -666,12 +656,12 @@ class RFQExecutor:
         action: str = "sell",
         timeout_seconds: int = 300,
         initial_wait_seconds: int = 30,
-        mark_floor_pct: float = 2.2,
+        min_book_improvement_pct: float = 2.2,
         relax_after_seconds: int = 300,
         poll_interval_seconds: int = 3,
     ) -> RFQResult:
         """
-        Phased RFQ execution with mark-price floor and time-based relaxation.
+        Phased RFQ execution with orderbook-improvement gate and time-based relaxation.
 
         Designed for strategies (e.g. daily put selling) that want better-than-
         orderbook pricing but will accept market-level fills as a deadline
@@ -681,9 +671,7 @@ class RFQExecutor:
           1. **Initial wait** (0 → initial_wait_seconds): Collect quotes
              silently — do not accept anything yet.
           2. **Gated** (initial_wait → relax_after_seconds): Accept quotes
-             that are within mark_floor_pct of the mark (orderbook baseline).
-             "Within" means the quote is at most mark_floor_pct% *worse* than
-             the orderbook — i.e. min_improvement >= -mark_floor_pct.
+             that beat the orderbook by at least min_book_improvement_pct%.
           3. **Relaxed** (relax_after_seconds → timeout): Accept any quote
              (equivalent to min_improvement = -999).
 
@@ -695,7 +683,7 @@ class RFQExecutor:
             action: "buy" or "sell".
             timeout_seconds: Total maximum wait time.
             initial_wait_seconds: Seconds to wait before considering any quote.
-            mark_floor_pct: Max % *worse* than orderbook to accept in phase 2.
+            min_book_improvement_pct: Min % better than orderbook to accept in phase 2.
             relax_after_seconds: Seconds after which any quote is accepted.
             poll_interval_seconds: Polling interval for quotes.
 
@@ -708,7 +696,7 @@ class RFQExecutor:
 
         logger.info(
             f"Starting phased RFQ: {action_str} {len(legs)} leg(s), "
-            f"wait={initial_wait_seconds}s, floor={mark_floor_pct}%, "
+            f"wait={initial_wait_seconds}s, min_improvement={min_book_improvement_pct}%, "
             f"relax_after={relax_after_seconds}s, timeout={timeout_seconds}s"
         )
 
@@ -782,9 +770,9 @@ class RFQExecutor:
                         time.sleep(poll_interval_seconds)
                         continue
 
-                    # Phase 2: Gated — accept if within mark_floor_pct of book
+                    # Phase 2: Gated — accept only if quote beats book by min_book_improvement_pct
                     if elapsed < relax_after_seconds:
-                        min_ok = -mark_floor_pct
+                        min_ok = min_book_improvement_pct
                         if orderbook_cost is not None and improvement < min_ok:
                             logger.info(
                                 f"[Phase 2 — gated] {elapsed:.0f}s  |  "

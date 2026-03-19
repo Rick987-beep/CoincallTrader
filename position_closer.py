@@ -265,7 +265,7 @@ class PositionCloser:
             qty=leg.qty,
             side=leg.close_side,
             order_type=1,  # limit
-            price=round(price, 2),
+            price=price,
         )
 
         if result:
@@ -290,7 +290,7 @@ class PositionCloser:
                     continue
                 state = status.get("state", -1)
                 fill_qty = float(status.get("fillQty", 0))
-                if state == 1 or fill_qty >= leg.qty:  # FILLED
+                if state == 1 or state == "filled" or fill_qty >= leg.qty:
                     leg.filled = True
                     leg.fill_price = float(status.get("avgPrice", 0))
                     logger.info(f"Kill switch: FILLED {leg.symbol} @ ${leg.fill_price:.2f}")
@@ -301,7 +301,10 @@ class PositionCloser:
         """Refresh mark prices from fresh exchange position data."""
         try:
             positions = self._am.get_positions(force_refresh=True)
-            mark_map = {p["symbol"]: p["mark_price"] for p in positions}
+            mark_map = {}
+            for p in positions:
+                mark = p.get("_mark_price_btc") or p["mark_price"]
+                mark_map[p["symbol"]] = mark
             for leg in legs:
                 if not leg.filled and leg.symbol in mark_map:
                     leg.mark_price = mark_map[leg.symbol]
@@ -315,11 +318,14 @@ class PositionCloser:
         legs = []
         for p in positions:
             close_side = "sell" if p["trade_side"] == 1 else "buy"
+            # Use BTC-native mark price when available (Deribit),
+            # fall back to USD mark price (Coincall).
+            mark = p.get("_mark_price_btc") or p["mark_price"]
             legs.append(_CloseLeg(
                 symbol=p["symbol"],
-                qty=p["qty"],
+                qty=abs(p["qty"]),
                 close_side=close_side,
-                mark_price=p["mark_price"],
+                mark_price=mark,
             ))
         return legs
 

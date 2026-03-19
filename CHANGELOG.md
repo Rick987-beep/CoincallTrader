@@ -5,6 +5,54 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.2] - 2026-03-19
+
+### Deribit Phase 3 — Integration Testing & Compatibility Fixes
+
+### Added
+- **Account snapshot integration test** (`tests/test_deribit_integration.py`, Test 7) — 5 tests verifying account info fields, margin consistency, position structure, PositionMonitor→AccountSnapshot round-trip, and open orders. All passing on Deribit testnet.
+- **Kill switch integration test** (`tests/test_deribit_integration.py`, Test 8) — End-to-end test: place ATM call → fill → run PositionCloser → verify ALL positions closed. Asserts `closer.status == "done"`. Pending clean testnet account (illiquid position expires 20 Mar).
+- **BTC-native mark price field** (`exchanges/deribit/market_data.py`) — `_mark_btc` field added to `get_option_orderbook()` return dict for downstream BTC-price consumers.
+
+### Fixed
+- **`position_closer.py` Deribit compatibility** — Four fixes:
+  - `_check_fills`: Deribit returns `state == "filled"` (string), not `state == 1` (int). Added string check alongside int.
+  - `_place_or_reprice`: Removed `round(price, 2)` that truncated BTC prices like 0.005 → 0.01.
+  - `_build_legs`: Uses `_mark_price_btc` when available (Deribit BTC-native), `abs(qty)` for signed quantities.
+  - `_refresh_marks`: Same BTC-native mark price preference.
+- **`trade_execution.py` Deribit fixes** — Passive pricing mode uses `_mark_btc` field; relative price tolerance (0.1% instead of absolute $0.01); false fill detection checks actual order status; Phase 3 aggressive buffer increased to 10%.
+- **`execution_router.py` regression** (`d3748b4`) — Direct `from market_data import get_option_market_data` import re-introduced during refactor. Fixed to use `self._market_data.get_option_details()`. Also fixed dict key `mark_price` → `markPrice`.
+
+### Changed
+- **`strategies/smoke_test_strangle.py` rewrite** — Full rewrite for Deribit testnet validation: QTY=1.0, ATM call + OTM put structure, 3-phase execution (passive 20s → mark 20s → aggressive 10% 20s), detailed phase logging.
+- **Migration plan updated** — Phase 3 checklist reflects completed items (smoke test, account snapshot, position_closer fixes, Coincall regression). Open questions updated (orphan recovery resolved, Coincall regression done).
+
+### Test Results
+| Suite | Count | Status |
+|-------|-------|--------|
+| Unit tests (8 suites) | 97 | ✅ All passing |
+| Deribit integration (Tests 1–7) | 30 | ✅ All passing |
+| Kill switch (Test 8) | 1 | ⏳ Pending clean testnet account |
+
+### Smoke Test Validation (Deribit Testnet, 19 March)
+```
+Strategy:     smoke_test_strangle (1.0 BTC, ATM call + OTM put)
+3 runs completed:
+  Run 1: price_too_high — mark price was USD, Deribit expects BTC → fixed _mark_btc
+  Run 2: All 3 phases ran, orders accepted
+  Run 3: Both legs filled (put Phase 2, call Phase 3 aggressive)
+         Trade opened → held 63s → max_hold_hours close → both close legs filled
+         PnL = -0.0007 BTC
+```
+
+### Files
+- MODIFIED: `position_closer.py`, `trade_execution.py`, `execution_router.py`
+- MODIFIED: `exchanges/deribit/market_data.py`, `strategies/smoke_test_strangle.py`
+- MODIFIED: `tests/test_deribit_integration.py` (added Tests 7 & 8)
+- MODIFIED: `docs/MIGRATION_PLAN_DERIBIT.md`, `docs/MODULE_REFERENCE.md`
+
+---
+
 ## [1.4.1] - 2026-03-19
 
 ### RFQ Gate Fix & Strategy Cleanup

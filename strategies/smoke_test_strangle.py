@@ -1,17 +1,25 @@
 """
-Smoke Test Strangle — Phase 1 Live Verification
+Smoke Test Strangle — Deribit Adapter Verification
 
-Opens a tiny long strangle, holds ~60 seconds, then closes.
-Proves the exchange abstraction layer works end-to-end on production.
+Tests Deribit exchange adapters under slightly more complex quoting.
+Opens a 1-contract long strangle and escalates pricing across three
+phases over 60 seconds to probe orderbook + mark price handling.
+
+Phased execution (buy side escalation):
+  Phase 1 (20s): passive — post at bid (most conservative)
+  Phase 2 (20s): mark   — use Deribit mark price (BTC→USD converted)
+  Phase 3 (20s): aggressive — cross the spread at ask + buffer
 
 Expected behavior:
-  1. Opens 0.1 BTC long strangle (±0.30 delta, next expiry)
-  2. Aggressive limit fills both legs
+  1. Opens 1-contract long strangle (±0.30 delta, next expiry)
+  2. Walks through 3 pricing phases, repricing every 10s
   3. Holds for ~60 seconds (max_hold_hours exit)
-  4. Closes via aggressive limit
+  4. Closes via same phased pricing
   5. Logs result + Telegram notification
 
-Account: subaccount (~$7,300) — swap .env PROD keys before running.
+Requires:
+  EXCHANGE=deribit  TRADING_ENVIRONMENT=testnet
+  .env must have DERIBIT_CLIENT_ID_TEST / DERIBIT_CLIENT_SECRET_TEST
 """
 
 import logging
@@ -22,30 +30,40 @@ from strategy import (
     time_window,
     max_hold_hours,
 )
+from trade_execution import ExecutionParams, ExecutionPhase
 from telegram_notifier import get_notifier
 
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
 
 
 # ─── Parameters ─────────────────────────────────────────────────────────────
 
-QTY = 0.1
+QTY = 1
 CALL_DELTA = 0.30
 PUT_DELTA = -0.30
 DTE = "next"
 SIDE = "buy"
 HOLD_MINUTES = 1
 
+EXECUTION_PHASES = ExecutionParams(
+    phases=[
+        ExecutionPhase(pricing="passive",    duration_seconds=20, reprice_interval=10),
+        ExecutionPhase(pricing="mark",       duration_seconds=20, reprice_interval=10),
+        ExecutionPhase(pricing="aggressive", duration_seconds=20, reprice_interval=10, buffer_pct=10.0),
+    ]
+)
+
 
 # ─── Callbacks ──────────────────────────────────────────────────────────────
 
 def _on_trade_opened(trade, account) -> None:
-    logger.info(f"[SMOKE TEST] Trade opened: {trade.id}")
+    logger.info(f"[DERIBIT SMOKE] Trade opened: {trade.id}")
     for leg in trade.open_legs:
-        logger.info(f"  Leg: {leg.symbol}  side={leg.side}  qty={leg.qty}")
+        logger.debug(f"  Leg: {leg.symbol}  side={leg.side}  qty={leg.qty}  fill={leg.fill_price}")
     try:
         get_notifier().notify_trade_opened(
-            strategy_name="Smoke Test Strangle",
+            strategy_name="Smoke Test Strangle (Deribit)",
             trade_id=trade.id,
             legs=trade.open_legs,
             entry_cost=trade.total_entry_cost(),
@@ -61,13 +79,13 @@ def _on_trade_closed(trade, account) -> None:
     hold_seconds = trade.hold_seconds or 0
 
     logger.info(
-        f"[SMOKE TEST] Trade closed: {trade.id}  |  "
+        f"[DERIBIT SMOKE] Trade closed: {trade.id}  |  "
         f"PnL: ${pnl:+.2f}  |  ROI: {roi:+.1f}%  |  "
         f"Hold: {hold_seconds:.0f}s  |  Entry: ${entry_cost:.2f}"
     )
     try:
         get_notifier().notify_trade_closed(
-            strategy_name="Smoke Test Strangle",
+            strategy_name="Smoke Test Strangle (Deribit)",
             trade_id=trade.id,
             pnl=pnl,
             roi=roi,
@@ -82,7 +100,7 @@ def _on_trade_closed(trade, account) -> None:
 # ─── Strategy Factory ──────────────────────────────────────────────────────
 
 def smoke_test_strangle() -> StrategyConfig:
-    """Open and close a 0DTE delta-30 strangle. Minimum viable product."""
+    """Deribit testnet: 1-contract strangle with 3-phase pricing escalation."""
     return StrategyConfig(
         name="smoke_test_strangle",
 
@@ -103,6 +121,7 @@ def smoke_test_strangle() -> StrategyConfig:
         ],
 
         execution_mode="limit",
+        execution_params=EXECUTION_PHASES,
 
         max_concurrent_trades=1,
         max_trades_per_day=1,

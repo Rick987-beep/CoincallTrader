@@ -159,5 +159,6 @@ class DeribitMarketDataAdapter(ExchangeMarketData):
             "bids": to_dicts(ob.get("bids", [])),
             "asks": to_dicts(ob.get("asks", [])),
             "mark": float(ob.get("mark_price", 0)) * index_price,  # USD for notional calc
+            "_mark_btc": float(ob.get("mark_price", 0)),  # BTC-native for order pricing
             "_index_price": index_price,
         }

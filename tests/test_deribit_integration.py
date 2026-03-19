@@ -380,3 +380,245 @@ class TestResilience:
             results.append("result" in resp)
         success_rate = sum(results) / len(results)
         assert success_rate >= 0.9, f"Only {success_rate*100:.0f}% succeeded"
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Test 7: Account Snapshot Accuracy
+# ═════════════════════════════════════════════════════════════════════════════
+
+class TestAccountSnapshot:
+    """Validate that Deribit account data flows correctly through
+    DeribitAccountAdapter → PositionMonitor → AccountSnapshot."""
+
+    def test_7a_account_info_fields(self, account):
+        """get_account_info returns all required fields with sane values."""
+        info = account.get_account_info(force_refresh=True)
+        assert info is not None, "get_account_info returned None"
+
+        # Required fields
+        assert "equity" in info
+        assert "available_margin" in info
+        assert "initial_margin" in info
+        assert "maintenance_margin" in info
+        assert "unrealized_pnl" in info
+        assert "timestamp" in info
+
+        # Equity must be positive (testnet account has funds)
+        assert info["equity"] > 0, f"equity={info['equity']} should be > 0"
+        assert info["available_margin"] >= 0
+        assert info["initial_margin"] >= 0
+        assert info["maintenance_margin"] >= 0
+
+        # Deribit-specific private fields
+        assert "_equity_btc" in info, "Missing raw BTC equity"
+        assert info["_equity_btc"] > 0
+        assert "_delta_total" in info, "Missing portfolio delta"
+
+    def test_7b_account_info_consistency(self, account):
+        """available_margin = equity - initial_margin (within tolerance)."""
+        info = account.get_account_info(force_refresh=True)
+        expected_avail = info["equity"] - info["initial_margin"]
+        actual_avail = info["available_margin"]
+        # Allow 1% tolerance for rounding/timing
+        if info["equity"] > 0:
+            pct_diff = abs(actual_avail - expected_avail) / info["equity"]
+            assert pct_diff < 0.01, (
+                f"available_margin={actual_avail:.2f} != "
+                f"equity({info['equity']:.2f}) - IM({info['initial_margin']:.2f}) = {expected_avail:.2f}"
+            )
+
+    def test_7c_positions_field_structure(self, account):
+        """get_positions returns well-formed position dicts (if any exist)."""
+        positions = account.get_positions(force_refresh=True)
+        assert isinstance(positions, list)
+
+        if not positions:
+            pytest.skip("No open positions on testnet — field structure not testable")
+
+        for pos in positions:
+            assert "symbol" in pos
+            assert "qty" in pos
+            assert "trade_side" in pos
+            assert pos["trade_side"] in (1, 2), f"Unexpected trade_side: {pos['trade_side']}"
+            assert "mark_price" in pos
+            assert "unrealized_pnl" in pos
+            assert "delta" in pos
+            assert "gamma" in pos
+            assert "theta" in pos
+            assert "vega" in pos
+
+    def test_7d_position_monitor_snapshot(self, account):
+        """PositionMonitor.snapshot() produces a valid AccountSnapshot from Deribit data."""
+        from account_manager import PositionMonitor, AccountSnapshot, PositionSnapshot
+
+        monitor = PositionMonitor(account_manager=account, poll_interval=60)
+        snap = monitor.snapshot()
+
+        assert isinstance(snap, AccountSnapshot)
+        assert snap.equity > 0, f"Snapshot equity={snap.equity} should be > 0"
+        assert snap.available_margin >= 0
+        assert snap.timestamp > 0
+
+        # Positions should be a tuple of PositionSnapshot
+        assert isinstance(snap.positions, tuple)
+        for ps in snap.positions:
+            assert isinstance(ps, PositionSnapshot)
+            assert ps.symbol, "Position has empty symbol"
+            assert ps.side in ("long", "short", "unknown")
+
+        # Greeks should be numeric
+        for greek in (snap.net_delta, snap.net_gamma, snap.net_theta, snap.net_vega):
+            assert isinstance(greek, (int, float))
+
+        # margin_utilization should be a percentage
+        assert 0 <= snap.margin_utilization <= 100, (
+            f"margin_utilization={snap.margin_utilization}% out of range"
+        )
+
+    def test_7e_open_orders_structure(self, account):
+        """get_open_orders returns a list with correct field names."""
+        orders = account.get_open_orders(force_refresh=True)
+        assert isinstance(orders, list)
+
+        if not orders:
+            # No open orders is valid — just verify it's an empty list
+            return
+
+        for o in orders:
+            assert "order_id" in o
+            assert "symbol" in o
+            assert "qty" in o
+            assert "price" in o
+            assert "state" in o
+            assert "trade_side" in o
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Test 8: Kill Switch (PositionCloser)
+# ═════════════════════════════════════════════════════════════════════════════
+
+class TestKillSwitch:
+    """End-to-end test of the PositionCloser on Deribit testnet.
+
+    Flow: place an aggressive order (fills immediately) → verify position
+    exists → run PositionCloser → verify position is gone.
+
+    WARNING: This test places REAL orders on Deribit testnet.
+    """
+
+    def _find_cheap_option(self, market_data):
+        """Find an ATM call with tight spread for testing."""
+        index = market_data.get_index_price()
+        assert index and index > 0
+
+        instruments = market_data.get_option_instruments()
+        assert instruments, "No instruments available"
+
+        # Find the nearest expiry ATM call (strike closest to index)
+        # Filter to calls with expiry within 10 days
+        now_ms = time.time() * 1000
+        ten_days_ms = 10 * 24 * 3600 * 1000
+
+        candidates = []
+        for inst in instruments:
+            name = inst.get("symbolName", "")
+            if not name.endswith("-C"):
+                continue
+            exp = inst.get("expirationTimestamp", 0)
+            if exp < now_ms or exp > now_ms + ten_days_ms:
+                continue
+            strike = inst.get("strike", 0)
+            distance = abs(strike - index) / index
+            if distance < 0.05:  # within 5% of spot
+                candidates.append((distance, name))
+
+        candidates.sort()  # closest to ATM first
+        assert candidates, f"No ATM calls found (index={index})"
+
+        # Return the closest-to-ATM option
+        return candidates[0][1]
+
+    def test_8a_kill_switch_closes_position(self, executor, account, market_data):
+        """Place a position, then verify PositionCloser closes ALL positions."""
+        import signal
+        from unittest.mock import patch
+
+        # Record pre-existing positions for visibility
+        pre_positions = account.get_positions(force_refresh=True)
+        if pre_positions:
+            pre_syms = [p["symbol"] for p in pre_positions]
+            print(f"\n  Pre-existing positions ({len(pre_positions)}): {pre_syms}")
+
+        symbol = self._find_cheap_option(market_data)
+
+        # Get the ask price and place an aggressive buy to fill immediately
+        book = market_data.get_option_orderbook(symbol)
+        assert book and book.get("asks"), f"No asks for {symbol}"
+        ask_price = book["asks"][0]["price"]  # BTC-denominated
+        aggressive_price = ask_price * 1.10  # 10% above ask
+
+        # Place buy order — should fill immediately
+        result = executor.place_order(
+            symbol=symbol,
+            qty=1.0,
+            side="buy",
+            order_type=1,
+            price=aggressive_price,
+        )
+        assert result, f"Failed to place order for {symbol}"
+        order_id = result["orderId"]
+
+        # Wait for fill
+        time.sleep(2)
+        status = executor.get_order_status(order_id)
+        filled = (
+            status
+            and (status.get("state") == "filled" or float(status.get("fillQty", 0)) >= 1.0)
+        )
+
+        if not filled:
+            # Clean up and skip — testnet might have no liquidity
+            executor.cancel_order(order_id)
+            pytest.skip(f"Order {order_id} didn't fill on testnet (no liquidity)")
+
+        # Verify position exists
+        positions = account.get_positions(force_refresh=True)
+        pos_symbols = [p["symbol"] for p in positions]
+        assert symbol in pos_symbols, (
+            f"Position for {symbol} not found after fill. Positions: {pos_symbols}"
+        )
+
+        # Build a minimal LifecycleEngine mock (PositionCloser needs kill_all + order_manager)
+        class _MockOrderManager:
+            def cancel_all(self):
+                return 0
+
+        class _MockLifecycleEngine:
+            order_manager = _MockOrderManager()
+            def kill_all(self):
+                return 0
+
+        closer_mod = __import__("position_closer")
+        PositionCloser = closer_mod.PositionCloser
+
+        closer = PositionCloser(
+            account_manager=account,
+            executor=executor,
+            lifecycle_manager=_MockLifecycleEngine(),
+        )
+
+        # Patch os.kill so the test process doesn't SIGTERM itself
+        with patch("position_closer.os.kill"):
+            closer._run(runners=[])
+
+        assert closer.status == "done", (
+            f"PositionCloser ended with unexpected status: {closer.status}"
+        )
+
+        # Verify ALL positions are gone — the kill switch's contract
+        time.sleep(2)
+        positions_after = account.get_positions(force_refresh=True)
+        assert not positions_after, (
+            f"Kill switch should close ALL positions! "
+            f"Still open: {[p['symbol'] for p in positions_after]}"
+        )

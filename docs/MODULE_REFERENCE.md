@@ -1,6 +1,6 @@
 # CoincallTrader — Module Reference
 
-**Last Updated:** March 17, 2026
+**Last Updated:** March 19, 2026
 
 Internal documentation for the CoincallTrader application modules.
 For Coincall exchange API endpoints, see [API_REFERENCE.md](API_REFERENCE.md).
@@ -916,6 +916,9 @@ performs a complete shutdown sequence:
 4. Phase 2: aggressive pricing ±10% off mark (2 min, reprice every 15s)
 5. Verify positions closed on exchange
 6. Send Telegram summary
+7. `os.kill(SIGTERM)` — request clean process shutdown
+
+**Exchange compatibility:** Works with both Coincall and Deribit. Uses `_mark_price_btc` for BTC-native pricing when available (Deribit), falls back to `mark_price` USD (Coincall). Uses `abs(qty)` to handle signed quantities (Deribit). Accepts both integer (`state == 1`) and string (`state == "filled"`) fill states.
 
 Dashboard returns immediately; progress reported via Telegram and `/api/killswitch/status`.
 
@@ -1091,10 +1094,11 @@ Quick validation strategy for exchange integration testing. Not intended for pro
 
 | Parameter | Value |
 |-----------|-------|
-| Quantity | 0.1 BTC (Deribit minimum) |
-| Structure | ATM ±2 strikes strangle |
+| Quantity | 1.0 BTC |
+| Structure | ATM call + OTM put (ATM strike, ATM-2000 strike) |
 | Hold time | 60 seconds |
+| Execution | 3 phases: passive (20s) → mark (20s) → aggressive 10% (20s) |
 | Check interval | 5 seconds |
 | Max concurrent | 1 |
 
-Enters immediately (no time/day filters, no margin check), holds for 60 seconds, then exits via `max_hold_hours`. Validates the full lifecycle: option selection → order placement → fill tracking → position monitoring → close.
+Enters immediately (no time/day filters, no margin check). Uses phased execution to test different pricing modes. Validates the full lifecycle: option selection → order placement → fill tracking → position monitoring → close.

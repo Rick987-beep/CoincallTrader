@@ -145,6 +145,7 @@ class ExecutionPhase:
 
     Attributes:
         pricing: How to price orders in this phase:
+            "passive"    — best bid for buys, best ask for sells (most passive)
             "aggressive" — ask × (1 + buffer) for buys, bid / (1 + buffer) for sells
             "mid"        — (bid + ask) / 2
             "top_of_book" — best ask for buys, best bid for sells (no buffer)
@@ -163,7 +164,7 @@ class ExecutionPhase:
     reprice_interval: float = 30.0
 
     def __post_init__(self):
-        allowed = {"aggressive", "mid", "top_of_book", "mark"}
+        allowed = {"aggressive", "mid", "top_of_book", "mark", "passive"}
         if self.pricing not in allowed:
             raise ValueError(f"Unknown pricing '{self.pricing}', must be one of {allowed}")
         if self.duration_seconds < 10:
@@ -577,12 +578,14 @@ class LimitFillManager:
             # Skip requote if price hasn't changed — avoids unnecessary cancel+replace API calls
             if self._order_manager:
                 current_record = self._order_manager._orders.get(ls.order_id)
-                if current_record and abs(current_record.price - price) < 0.01:
-                    logger.info(
-                        f"LimitFillManager: skipping requote for {ls.symbol} — "
-                        f"price unchanged @ ${price}"
-                    )
-                    continue
+                if current_record and current_record.price > 0:
+                    # Use relative tolerance (0.1%) to handle both USD and BTC prices
+                    if abs(current_record.price - price) / current_record.price < 0.001:
+                        logger.info(
+                            f"LimitFillManager: skipping requote for {ls.symbol} — "
+                            f"price unchanged @ {price}"
+                        )
+                        continue
 
             if self._order_manager:
                 # Use OrderManager's atomic requote (cancel + replace + chain)
@@ -598,12 +601,16 @@ class LimitFillManager:
                             ls.filled_qty += new_record.filled_qty
                         logger.info(
                             f"LimitFillManager: requoted {ls.side_label} "
-                            f"{ls.remaining_qty}x {ls.symbol} @ ${price} "
+                            f"{ls.remaining_qty}x {ls.symbol} @ {price} "
                             f"(round {ls.requote_count}) [via OrderManager]"
                         )
                     else:
-                        # requote returned None — order was fully filled during poll
-                        logger.info(f"LimitFillManager: {ls.symbol} filled during requote")
+                        # requote returned None — check if order was actually filled
+                        old_record = self._order_manager._orders.get(ls.order_id)
+                        if old_record and old_record.status.value == "filled":
+                            logger.info(f"LimitFillManager: {ls.symbol} filled during requote")
+                        else:
+                            logger.warning(f"LimitFillManager: {ls.symbol} requote failed (cancel+replace failed)")
                 except Exception as e:
                     logger.error(f"LimitFillManager: requote exception for {ls.symbol}: {e}")
             else:
@@ -675,6 +682,12 @@ class LimitFillManager:
                 if best_bid is not None and best_ask is not None:
                     return (best_bid + best_ask) / 2
 
+            elif phase.pricing == "passive":
+                if side == "buy" and best_bid is not None:
+                    return best_bid
+                elif side == "sell" and best_ask is not None:
+                    return best_ask
+
             elif phase.pricing == "top_of_book":
                 if side == "buy" and best_ask is not None:
                     return best_ask
@@ -682,6 +695,10 @@ class LimitFillManager:
                     return best_bid
 
             elif phase.pricing == "mark":
+                # Prefer BTC-native mark (Deribit); fall back to USD mark (Coincall)
+                mark_btc = float(ob.get('_mark_btc', 0))
+                if mark_btc > 0:
+                    return mark_btc
                 mark = float(ob.get('mark', 0))
                 if mark > 0:
                     return mark

@@ -232,3 +232,84 @@ sudo systemctl stop coincalltrader
 rm -f /opt/coincalltrader/logs/*
 sudo systemctl start coincalltrader
 ```
+
+---
+
+## Multi-Instance Deployment (Coincall + Deribit)
+
+The same VPS can run multiple trading bot instances side by side — one per
+exchange.  Each instance has its own directory, systemd service, and dashboard
+port.
+
+### Architecture
+
+```
+┌─────────────────────┐     deploy.sh      ┌────────────────────────────────┐
+│   Dev Machine (Mac)  │  ───────────────▶  │  /opt/coincalltrader           │
+│                      │                    │  service: coincalltrader       │
+│  .deploy.env         │                    │  dashboard: :8080              │
+│  .deploy.deribit.env │                    └────────────────────────────────┘
+│                      │  deploy-deribit.sh ┌────────────────────────────────┐
+│                      │  ───────────────▶  │  /opt/coincalltrader-deribit   │
+│                      │                    │  service: coincalltrader-deribit│
+│                      │                    │  dashboard: :8081              │
+│                      │                    └────────────────────────────────┘
+```
+
+### How It Works
+
+The deploy system is fully parameterized via `.deploy.env` files:
+
+| Instance | Config File | App Directory | Service Name | Dashboard |
+|----------|------------|---------------|--------------|-----------|
+| Coincall | `.deploy.env` | `/opt/coincalltrader` | `coincalltrader` | `:8080` |
+| Deribit | `.deploy.deribit.env` | `/opt/coincalltrader-deribit` | `coincalltrader-deribit` | `:8081` |
+
+The Deribit dashboard port is set via `Environment=DASHBOARD_PORT=8081` in the
+systemd service file, not in `.env` (since `.env` is shared code and would
+otherwise conflict).
+
+### Deploying the Deribit Instance
+
+```bash
+# One-time server setup (creates /opt/coincalltrader-deribit, venv, opens port 8081)
+bash deployment/deploy-deribit.sh --setup
+
+# Full deploy
+bash deployment/deploy-deribit.sh
+
+# Monitor
+bash deployment/deploy-deribit.sh --logs
+bash deployment/deploy-deribit.sh --status
+bash deployment/deploy-deribit.sh --stop
+```
+
+### Files (Deribit-Specific)
+
+| File | Purpose |
+|---|---|
+| `.deploy.deribit.env` | VPS connection settings for Deribit instance (gitignored) |
+| `deployment/deploy-deribit.sh` | Wrapper that delegates to `deploy.sh` with Deribit config |
+| `deployment/server-setup-deribit.sh` | One-time VPS setup for Deribit (dir, venv, port 8081) |
+| `deployment/coincalltrader-deribit.service` | systemd unit for the Deribit instance |
+
+### Adding More Instances
+
+To add a third exchange, follow the same pattern:
+
+1. Create `.deploy.<exchange>.env` with a new `VPS_APP_DIR` and `VPS_SERVICE`
+2. Create `deployment/deploy-<exchange>.sh` (copy `deploy-deribit.sh`, change env path)
+3. Create `deployment/coincalltrader-<exchange>.service` (update paths, set unique `DASHBOARD_PORT`)
+4. Create `deployment/server-setup-<exchange>.sh` (update paths and port)
+5. Deploy: `bash deployment/deploy-<exchange>.sh --setup && bash deployment/deploy-<exchange>.sh`
+
+### Managing Both Instances
+
+```bash
+# Check both services at once (on the VPS):
+sudo systemctl status coincalltrader coincalltrader-deribit
+
+# Or via deploy scripts from dev machine:
+bash deployment/deploy.sh --status           # Coincall
+bash deployment/deploy-deribit.sh --status   # Deribit
+```

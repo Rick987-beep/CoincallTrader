@@ -35,7 +35,7 @@ class ExchangeMarketData(ABC):
     """Read-only market data queries."""
 
     @abstractmethod
-    def get_index_price(self, underlying: str = "BTC") -> Optional[float]:
+    def get_index_price(self, underlying: str = "BTC", use_cache: bool = True) -> Optional[float]:
         """Get current index/spot price for the underlying."""
         ...
 

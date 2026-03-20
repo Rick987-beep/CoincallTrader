@@ -10,8 +10,8 @@ class CoincallMarketDataAdapter(ExchangeMarketData):
     def __init__(self):
         self._inner = MarketData()
 
-    def get_index_price(self, underlying="BTC"):
-        return self._inner.get_btc_index_price()
+    def get_index_price(self, underlying="BTC", use_cache=True):
+        return self._inner.get_btc_index_price(use_cache=use_cache)
 
     def get_option_instruments(self, underlying="BTC"):
         return self._inner.get_option_instruments(underlying)

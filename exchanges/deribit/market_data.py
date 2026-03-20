@@ -30,11 +30,11 @@ class DeribitMarketDataAdapter(ExchangeMarketData):
 
     # ── ExchangeMarketData interface ─────────────────────────────────
 
-    def get_index_price(self, underlying: str = "BTC") -> Optional[float]:
+    def get_index_price(self, underlying: str = "BTC", use_cache: bool = True) -> Optional[float]:
         index_name = "btc_usd" if underlying.upper() == "BTC" else "eth_usd"
         # 10s cache to reduce API load during burst queries
         now = time.time()
-        if self._index_cache and now - self._index_cache_time < 10:
+        if use_cache and self._index_cache and now - self._index_cache_time < 10:
             return self._index_cache
 
         resp = self._auth.call("public/get_index_price", {"index_name": index_name})

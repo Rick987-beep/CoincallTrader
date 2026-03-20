@@ -5,6 +5,78 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.4] - 2026-03-20
+
+### Deribit Production Live + Multi-Instance Deployment
+
+### Critical Fixes
+- **Index price routing** — `get_btc_index_price()` in `market_data.py` was
+  hardwired to the Coincall `MarketData` class, bypassing the exchange adapter
+  layer entirely. On Deribit, this returned the wrong price (~$67k from Coincall
+  testnet instead of ~$70k from Deribit). Refactored all convenience functions
+  in `market_data.py` to route through the exchange adapter via a lazy
+  `_get_adapter()` initializer using `build_exchange()`.
+- **Take-profit logic** — Changed from option PnL-based (`dollar_profit_target`)
+  to BTC index excursion-based (`_index_excursion_tp`). TP now triggers when
+  `|BTC_now - BTC_at_entry| >= $1,000`, matching the metric from the hourly
+  excursion analysis.
+- **Entry condition signature** — `_weekday_only()` inner function had exit
+  condition signature `(account, trade)` but entry conditions only receive
+  `(account)`. Fixed to `(account)`.
+
+### Strategy Updates (`strategies/straddle_10utc.py`)
+- Execution phases changed: Phase 1 from mark-price → **mid-price** (60s, 15s
+  reprice), Phase 2 aggressive (60s, 10s reprice, 5% buffer). Derived from
+  testnet fill observations.
+- Factory function renamed `atm_str_fixpnl_deribit()` → `straddle_10utc()` for
+  consistency with filename.
+- Added `_on_trade_opened` callback that captures `entry_index_price` in trade
+  metadata for the excursion TP exit condition.
+
+### Multi-Instance Deployment
+- **Separate directory pattern** — Deribit instance deploys to
+  `/opt/coincalltrader-deribit` alongside the existing Coincall instance at
+  `/opt/coincalltrader`. Each has its own systemd service, venv, and logs.
+- **Dashboard port separation** — Coincall on `:8080`, Deribit on `:8081`
+  (configured via `Environment=DASHBOARD_PORT=8081` in the Deribit systemd unit).
+- **Parameterized deploy script** — `deploy.sh` now reads `DEPLOY_ENV` from
+  the environment if set, enabling wrapper scripts per exchange.
+- **Service-aware file selection** — `deploy.sh` picks the correct `.service`
+  file and `server-setup-*.sh` script based on `$VPS_SERVICE`.
+
+### Exchange Adapter Improvements
+- `ExchangeMarketData.get_index_price()` now accepts `use_cache: bool = True`
+  parameter across all adapters (base, Deribit, Coincall).
+- Deribit adapter honours `use_cache=False` to bypass its 10-second cache for
+  fresh prices at trade open/close.
+
+### Added
+- `deployment/deploy-deribit.sh` — One-command deploy wrapper for Deribit
+- `deployment/coincalltrader-deribit.service` — systemd unit for Deribit instance
+- `deployment/server-setup-deribit.sh` — VPS setup for Deribit (dir, venv, port 8081)
+- `smoke_test_deribit.py` — Production readiness check (auth, index price,
+  account, instruments, strategy config) without placing orders
+- Multi-instance deployment section in `UBUNTU_DEPLOYMENT.md`
+
+### Changed
+- `market_data.py` — Convenience functions route through exchange adapter
+- `exchanges/base.py` — `get_index_price()` accepts `use_cache` parameter
+- `exchanges/deribit/market_data.py` — Respects `use_cache=False`
+- `exchanges/coincall/market_data.py` — Passes `use_cache` through
+- `deployment/deploy.sh` — Parameterized `DEPLOY_ENV`, service-aware file selection
+- `deployment/rsync-exclude.txt` — Excludes `.deploy.deribit.env`
+
+### Removed
+- `strategies/test_excursion_straddle.py` — Testnet-only test strategy (archived)
+
+### First Live Trade (Deribit Production)
+- ATM straddle BTC-21MAR26-70500 (0.1 qty per leg)
+- Call filled at mid price (Phase 1), put filled aggressive (Phase 2)
+- Entry index price correctly captured from Deribit (~$70,500)
+- Excursion TP and time exit monitoring active
+
+---
+
 ## [1.4.3] - 2026-03-19
 
 ### Deribit Production Validated + New Data-Driven Strategy

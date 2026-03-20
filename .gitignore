@@ -69,6 +69,7 @@ Thumbs.db
 
 # Deployment secrets (VPS connection details)
 .deploy.env
+.deploy.deribit.env
 
 # Project specific
 archive/

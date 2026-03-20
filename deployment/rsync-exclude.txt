@@ -22,6 +22,7 @@ __pycache__/
 
 # ── Local deploy config (SSH settings — not needed on VPS) ─────────────
 .deploy.env
+.deploy.deribit.env
 
 # ── Logs & runtime data (preserved on the VPS across deploys) ───────────
 logs/

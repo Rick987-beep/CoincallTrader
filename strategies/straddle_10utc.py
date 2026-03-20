@@ -9,11 +9,11 @@ backtest (Feb 19 – Mar 19, 2026):
     Entry:      10:00 UTC daily (weekdays only)
     Expiry:     Next-day (08:00 UTC tomorrow ≈ 22h DTE at entry)
     Quantity:   0.1 BTC per leg
-    TP:         $1,000 USD net PnL (fixed dollar, not percentage)
+    TP:         $1,000 BTC index excursion (|BTC_now - BTC_entry| >= $1,000)
     Time exit:  19:00 UTC (9h after entry — hard close)
     Execution:  Two-phase orderbook limit orders
-                  Phase 1 (3 min): mark-price quoting, reprice every 30s
-                  Phase 2 (3 min): aggressive limits crossing the spread
+                  Phase 1 (1 min): mid-price quoting, reprice every 15s
+                  Phase 2 (1 min): aggressive limits crossing the spread
 
 Exchange: Deribit (BTC-denominated option prices → USD conversion at boundary)
 
@@ -25,7 +25,7 @@ BTC↔USD PnL conversion:
 
 Usage:
     # In main.py STRATEGIES list:
-    from strategies import straddle_10utc
+    from strategies.straddle_10utc import straddle_10utc
     STRATEGIES = [straddle_10utc]
 """
 
@@ -59,18 +59,18 @@ OPEN_HOUR = 10                      # Entry at 10:00 UTC
 CLOSE_HOUR = 19                     # Hard exit at 19:00 UTC (9h hold)
 CLOSE_MINUTE = 0
 
-# Take-profit — fixed dollar amount
-TP_USD = 1000.0                     # Close at +$1,000 net USD PnL
+# Take-profit — BTC index excursion
+EXCURSION_USD = 1000.0               # Close when |BTC_now - BTC_at_entry| >= $1,000
 
 # Risk / margin
 MIN_MARGIN_PCT = 20                 # Require ≥20% available margin
 
 # Execution — two-phase limit order plan
-PHASE1_SECONDS = 180                # Phase 1: 3 min at mark price
-PHASE1_REPRICE = 30                 # Reprice every 30s in phase 1
-PHASE2_SECONDS = 180                # Phase 2: 3 min aggressive
-PHASE2_BUFFER_PCT = 3.0             # Cross spread with 3% buffer
-PHASE2_REPRICE = 30                 # Reprice every 30s in phase 2
+PHASE1_SECONDS = 60                 # Phase 1: 1 min at mid price
+PHASE1_REPRICE = 15                 # Reprice every 15s in phase 1
+PHASE2_SECONDS = 60                 # Phase 2: 1 min aggressive
+PHASE2_BUFFER_PCT = 5.0             # Cross spread with 5% buffer
+PHASE2_REPRICE = 10                 # Reprice every 10s in phase 2
 
 # Operational
 CHECK_INTERVAL = 30                 # Seconds between entry/exit evaluations
@@ -80,11 +80,11 @@ STRATEGY_NAME = "ATM_Str_fixpnl_Deribit"
 # ─── Execution Configuration ────────────────────────────────────────────────
 
 def _build_execution_params() -> ExecutionParams:
-    """Two-phase limit order plan: passive mark → aggressive cross."""
+    """Two-phase limit order plan: mid-price → aggressive cross."""
     return ExecutionParams(
         phases=[
             ExecutionPhase(
-                pricing="mark",
+                pricing="mid",
                 duration_seconds=PHASE1_SECONDS,
                 reprice_interval=PHASE1_REPRICE,
             ),
@@ -102,49 +102,47 @@ def _build_execution_params() -> ExecutionParams:
 
 def _weekday_only():
     """Entry condition: skip Saturday (5) and Sunday (6)."""
-    def _check(account, trade) -> bool:
+    def _check(account) -> bool:
         return datetime.now(timezone.utc).weekday() < 5
     _check.__name__ = "weekday_only"
     return _check
 
 
-# ─── Custom Exit Condition: Fixed-Dollar Profit Target ──────────────────────
+# ─── Custom Exit Condition: Index Excursion TP ──────────────────────────────
 
-def _dollar_profit_target(usd_target: float):
+def _index_excursion_tp(excursion_usd: float):
     """
-    Exit condition: close when structure net PnL reaches +$usd_target.
+    Exit condition: close when BTC index price has moved ≥ excursion_usd
+    from the price recorded at trade open, in either direction.
 
-    PnL source (in priority order):
-      1. structure_pnl(account) — uses position unrealized_pnl from
-         DeribitAccountAdapter, which is already USD-denominated
-         (floating_profit_loss_usd).
-      2. executable_pnl() fallback — BTC-native PnL × index_price → USD.
-         Used only if structure_pnl returns 0 (position not yet reflected).
+    This mirrors the metric from the hourly excursion analysis:
+      max(|BTC_high - BTC_entry|, |BTC_entry - BTC_low|) ≥ threshold
+
+    The entry price is stored in trade.metadata["entry_index_price"]
+    by the on_trade_opened callback.
 
     Args:
-        usd_target: Dollar profit target (e.g. 1000.0 for $1,000).
+        excursion_usd: Dollar move threshold (e.g. 1000.0 for $1,000).
     """
-    label = f"dollar_tp(${usd_target:.0f})"
+    label = f"excursion_tp(${excursion_usd:.0f})"
 
     def _check(account, trade) -> bool:
-        # Primary: structure_pnl uses account position data (USD on Deribit)
-        pnl_usd = trade.structure_pnl(account)
+        entry_price = trade.metadata.get("entry_index_price")
+        if not entry_price:
+            return False  # not yet recorded — skip this tick
 
-        # Fallback: if position not yet reflected, try executable_pnl
-        if pnl_usd == 0.0 and trade.open_legs:
-            btc_pnl = trade.executable_pnl()
-            if btc_pnl is not None and btc_pnl != 0.0:
-                # Convert BTC PnL to USD using current index price
-                from market_data import get_btc_index_price
-                index_price = get_btc_index_price(use_cache=True)
-                if index_price and index_price > 0:
-                    pnl_usd = btc_pnl * index_price
+        from market_data import get_btc_index_price
+        current_price = get_btc_index_price(use_cache=True)
+        if not current_price or current_price <= 0:
+            return False
 
-        triggered = pnl_usd >= usd_target
+        move = abs(current_price - entry_price)
+        triggered = move >= excursion_usd
         if triggered:
+            direction = "↑" if current_price > entry_price else "↓"
             logger.info(
-                f"[{trade.id}] {label} triggered: PnL=${pnl_usd:+,.2f} "
-                f"≥ target ${usd_target:,.0f}"
+                f"[{trade.id}] {label} triggered: BTC moved {direction}${move:,.0f} "
+                f"(${entry_price:,.0f} → ${current_price:,.0f})"
             )
         return triggered
 
@@ -177,21 +175,25 @@ def _on_trade_opened(trade, account) -> None:
     logger.info(
         f"[{STRATEGY_NAME}] Opened: {trade.id} | "
         f"Entry cost: {entry_cost:.6f} BTC (${entry_cost_usd:,.2f}) | "
-        f"BTC=${index_price:,.0f}" if index_price else
-        f"[{STRATEGY_NAME}] Opened: {trade.id} | Entry cost: {entry_cost:.6f} BTC"
+        f"BTC=${index_price:,.0f} | "
+        f"TP: ±${EXCURSION_USD:,.0f} move"
     )
 
     try:
-        get_notifier().send(
-            f"📈 <b>{STRATEGY_NAME} — Trade Opened</b>\n"
-            f"Time: {ts}\n"
-            f"ID: {trade.id}\n"
-            f"{legs_text}\n"
-            f"Entry cost: {entry_cost:.6f} BTC (${entry_cost_usd:,.2f})\n"
-            f"BTC: ${index_price:,.0f}\n" if index_price else ""
-            f"TP target: ${TP_USD:,.0f} | Hard close: {CLOSE_HOUR}:00 UTC\n"
-            f"Equity: ${account.equity:,.2f}"
+        msg_parts = [
+            f"📈 <b>{STRATEGY_NAME} — Trade Opened</b>",
+            f"Time: {ts}",
+            f"ID: {trade.id}",
+            legs_text,
+            f"Entry cost: {entry_cost:.6f} BTC (${entry_cost_usd:,.2f})",
+        ]
+        if index_price:
+            msg_parts.append(f"BTC: ${index_price:,.0f}")
+        msg_parts.append(
+            f"TP: BTC ±${EXCURSION_USD:,.0f} move | Hard close: {CLOSE_HOUR}:00 UTC"
         )
+        msg_parts.append(f"Equity: ${account.equity:,.2f}")
+        get_notifier().send("\n".join(msg_parts))
     except Exception:
         pass
 
@@ -211,9 +213,12 @@ def _on_trade_closed(trade, account) -> None:
     roi = (pnl_btc / abs(entry_cost) * 100) if entry_cost else 0.0
 
     # Determine exit reason
+    entry_index = trade.metadata.get("entry_index_price", 0)
+    btc_move = abs(index_price - entry_index) if index_price and entry_index else 0
     exit_reason = "unknown"
-    if pnl_usd >= TP_USD * 0.9:  # within 10% of target → likely TP
-        exit_reason = f"TP (${pnl_usd:,.0f})"
+    if btc_move >= EXCURSION_USD * 0.9:  # within 10% of threshold → likely TP
+        direction = "↑" if index_price > entry_index else "↓"
+        exit_reason = f"excursion TP ({direction}${btc_move:,.0f})"
     elif hold_seconds >= (CLOSE_HOUR - OPEN_HOUR) * 3600 - 120:
         exit_reason = f"time exit ({CLOSE_HOUR}:00 UTC)"
     elif pnl_usd > 0:
@@ -239,30 +244,37 @@ def _on_trade_closed(trade, account) -> None:
             if leg.fill_price is not None
         )
     try:
-        get_notifier().send(
-            f"{emoji} <b>{STRATEGY_NAME} — Trade Closed</b>\n"
-            f"Time: {ts}\n"
-            f"ID: {trade.id}\n"
-            f"Exit: {exit_reason}\n"
-            f"PnL: <b>${pnl_usd:+,.2f}</b> ({pnl_btc:+.6f} BTC, {roi:+.1f}%)\n"
-            f"Hold: {hold_seconds/60:.1f} min\n"
-            f"Entry cost: ${entry_cost_usd:,.2f}\n"
-            f"{close_detail}\n"
-            f"BTC: ${index_price:,.0f}\n" if index_price else ""
-            f"Equity: ${account.equity:,.2f}"
-        )
+        msg_parts = [
+            f"{emoji} <b>{STRATEGY_NAME} — Trade Closed</b>",
+            f"Time: {ts}",
+            f"ID: {trade.id}",
+            f"Exit: {exit_reason}",
+            f"PnL: <b>${pnl_usd:+,.2f}</b> ({pnl_btc:+.6f} BTC, {roi:+.1f}%)",
+            f"Hold: {hold_seconds/60:.1f} min",
+            f"Entry cost: ${entry_cost_usd:,.2f}",
+        ]
+        if entry_index and index_price:
+            msg_parts.append(
+                f"BTC: ${entry_index:,.0f} → ${index_price:,.0f} "
+                f"(move: ${btc_move:+,.0f})"
+            )
+        if close_detail:
+            msg_parts.append(close_detail)
+        msg_parts.append(f"Equity: ${account.equity:,.2f}")
+        get_notifier().send("\n".join(msg_parts))
     except Exception:
         pass
 
 
 # ─── Strategy Factory ──────────────────────────────────────────────────────
 
-def atm_str_fixpnl_deribit() -> StrategyConfig:
+def straddle_10utc() -> StrategyConfig:
     """
-    ATM_Str_fixpnl_Deribit — daily long ATM straddle with $1,000 TP.
+    ATM_Str_fixpnl_Deribit — daily long ATM straddle with index excursion TP.
 
     Derived from Optimal Entry Window analysis: enters at 10:00 UTC,
-    takes profit at $1,000, hard-closes at 19:00 UTC, weekdays only.
+    closes when BTC moves $1,000 from entry, hard-closes at 19:00 UTC,
+    weekdays only.
 
     Returns a StrategyConfig for registration in main.py's STRATEGIES list.
     """
@@ -289,17 +301,17 @@ def atm_str_fixpnl_deribit() -> StrategyConfig:
 
         # ── When to exit ─────────────────────────────────────────────
         # ANY condition returning True triggers a close:
-        #   1. Dollar profit target → close at +$1,000 USD
+        #   1. Index excursion TP → close when BTC moves ±$1,000 from entry
         #   2. Time exit → hard close at 19:00 UTC (9h hold)
         exit_conditions=[
-            _dollar_profit_target(TP_USD),
+            _index_excursion_tp(EXCURSION_USD),
             time_exit(CLOSE_HOUR, CLOSE_MINUTE),
         ],
 
         # ── How to execute ───────────────────────────────────────────
         # Orderbook-based limit orders, two phases:
-        #   Phase 1: 3 min quoting at mark price
-        #   Phase 2: 3 min aggressive (cross spread with buffer)
+        #   Phase 1: 1 min quoting at mid price
+        #   Phase 2: 1 min aggressive (cross spread with buffer)
         execution_mode="limit",
         execution_params=_build_execution_params(),
 

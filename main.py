@@ -20,6 +20,7 @@ import time
 from strategy import build_context, StrategyRunner
 from trade_lifecycle import TradeLifecycle, TradeState
 from strategies import blueprint_strangle, atm_straddle, atm_straddle_index_move, daily_put_sell, smoke_test_strangle, prod_test_put
+from strategies.straddle_10utc import straddle_10utc
 from persistence import TradeStatePersistence
 from health_check import HealthChecker
 from dashboard import start_dashboard
@@ -78,7 +79,8 @@ STRATEGIES = [
     # blueprint_strangle,
     # daily_put_sell,
     # smoke_test_strangle,
-    prod_test_put,
+    # prod_test_put,
+    straddle_10utc,
 ]
 
 # =============================================================================

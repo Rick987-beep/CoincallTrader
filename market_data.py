@@ -2,16 +2,12 @@
 """
 Market Data Module
 
-Handles all market data retrieval including:
-- BTC/USDT futures prices from Coincall and Binance
-- Option instruments from Coincall
-- Option details and Greeks from Coincall
-- Option orderbook depth
+Provides exchange-agnostic convenience functions that route through
+the active exchange adapter (Coincall or Deribit).  The adapter is
+selected automatically from config.EXCHANGE at first use.
 
-Includes LRU caching with TTL (30s) for option chains and details
-to reduce API load during burst queries and handle brief outages.
-
-Environment-agnostic - works the same for testnet and production.
+Also contains the Coincall-specific MarketData class (used by the
+CoincallMarketDataAdapter) and TTLCache utility.
 """
 
 import logging
@@ -417,37 +413,61 @@ class MarketData:
 market_data = MarketData()
 
 
+# =============================================================================
+# Exchange-aware routing layer
+# =============================================================================
+# The convenience functions below route through the active exchange adapter
+# (Coincall or Deribit) so callers always get exchange-correct data.
+# The adapter is lazily initialized on first use.
+
+_exchange_market_data = None   # ExchangeMarketData instance
+
+
+def _get_adapter():
+    """Lazily build and cache the exchange market_data adapter."""
+    global _exchange_market_data
+    if _exchange_market_data is None:
+        from exchanges import build_exchange
+        components = build_exchange()
+        _exchange_market_data = components['market_data']
+    return _exchange_market_data
+
+
 # Convenience functions
 def get_btc_futures_price(use_cache: bool = True) -> float:
-    """Get BTC/USDT futures price"""
+    """Get BTC/USDT futures price (Coincall-only, kept for legacy callers)."""
     return market_data.get_btc_futures_price(use_cache)
 
 
 def get_btc_index_price(use_cache: bool = True) -> Optional[float]:
-    """Get BTCUSD index price (dedicated index endpoint with fallbacks)"""
-    return market_data.get_btc_index_price(use_cache)
+    """Get BTCUSD index price via the active exchange adapter."""
+    adapter = _get_adapter()
+    return adapter.get_index_price("BTC", use_cache=use_cache)
 
 
 def get_option_instruments(underlying: str = 'BTC') -> Optional[List[Dict[str, Any]]]:
-    """Get available option instruments"""
-    return market_data.get_option_instruments(underlying)
+    """Get available option instruments via the active exchange adapter."""
+    adapter = _get_adapter()
+    return adapter.get_option_instruments(underlying)
 
 
 def get_option_details(symbol: str) -> Optional[Dict[str, Any]]:
-    """Get option details"""
-    return market_data.get_option_details(symbol)
+    """Get option details via the active exchange adapter."""
+    adapter = _get_adapter()
+    return adapter.get_option_details(symbol)
 
 
 def get_option_greeks(symbol: str) -> Optional[Dict[str, float]]:
-    """Get option Greeks"""
+    """Get option Greeks (Coincall-only, kept for legacy callers)."""
     return market_data.get_option_greeks(symbol)
 
 
 def get_option_market_data(symbol: str) -> Optional[Dict[str, float]]:
-    """Get option market data"""
+    """Get option market data (Coincall-only, kept for legacy callers)."""
     return market_data.get_option_market_data(symbol)
 
 
 def get_option_orderbook(symbol: str) -> Optional[Dict[str, Any]]:
-    """Get option orderbook"""
-    return market_data.get_option_orderbook(symbol)
+    """Get option orderbook via the active exchange adapter."""
+    adapter = _get_adapter()
+    return adapter.get_option_orderbook(symbol)

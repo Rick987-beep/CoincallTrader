@@ -35,7 +35,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 # ── Load deploy configuration ──────────────────────────────────────────
-DEPLOY_ENV="$PROJECT_ROOT/.deploy.env"
+DEPLOY_ENV="${DEPLOY_ENV:-$PROJECT_ROOT/.deploy.env}"
 if [[ ! -f "$DEPLOY_ENV" ]]; then
     echo "Error: $DEPLOY_ENV not found."
     echo "Create it from the template — see deployment/deploy.sh --help"
@@ -125,8 +125,13 @@ cmd_deploy() {
     step "Updating systemd service file"
     local ssh_cmd="ssh $SSH_OPTS"
     # The deployment/ dir is excluded from rsync, so copy the service file directly
+    # Try service-specific file first (e.g. coincalltrader-deribit.service), fall back to default
+    local service_file="$SCRIPT_DIR/$VPS_SERVICE.service"
+    if [[ ! -f "$service_file" ]]; then
+        service_file="$SCRIPT_DIR/coincalltrader.service"
+    fi
     # shellcheck disable=SC2086
-    scp $SSH_OPTS "$SCRIPT_DIR/coincalltrader.service" "$VPS_HOST:/etc/systemd/system/$VPS_SERVICE.service"
+    scp $SSH_OPTS "$service_file" "$VPS_HOST:/etc/systemd/system/$VPS_SERVICE.service"
     remote "sudo systemctl daemon-reload"
     ok "systemd reloaded"
 
@@ -155,8 +160,14 @@ cmd_setup() {
     ok "Connected to $VPS_HOST"
 
     step "Running server setup on $VPS_HOST"
+    # Use service-specific setup script if it exists (e.g. server-setup-deribit.sh)
+    local setup_script="$SCRIPT_DIR/server-setup.sh"
+    local specific_setup="$SCRIPT_DIR/server-setup-${VPS_SERVICE#coincalltrader-}.sh"
+    if [[ "$VPS_SERVICE" != "coincalltrader" && -f "$specific_setup" ]]; then
+        setup_script="$specific_setup"
+    fi
     # shellcheck disable=SC2086
-    ssh $SSH_OPTS "$VPS_HOST" "bash -s" < "$SCRIPT_DIR/server-setup.sh"
+    ssh $SSH_OPTS "$VPS_HOST" "bash -s" < "$setup_script"
 
     echo -e "\n${GREEN}Server setup complete!${NC}"
     echo -e "Next: deploy with:  ${CYAN}./deployment/deploy.sh${NC}"

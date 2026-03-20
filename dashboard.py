@@ -33,7 +33,7 @@ from datetime import datetime, timezone
 from functools import wraps
 from typing import TYPE_CHECKING, List, Optional
 
-from flask import Flask, Response, redirect, render_template, request, session, url_for
+from flask import Flask, Response, jsonify, redirect, render_template, request, session, url_for
 from position_closer import PositionCloser
 
 if TYPE_CHECKING:
@@ -65,6 +65,7 @@ class DashboardLogHandler(logging.Handler):
 
 # Singleton handler — attached to root logger on first start
 _log_handler: Optional[DashboardLogHandler] = None
+_dashboard_start_time: float = 0.0
 
 
 def _get_log_lines(n: int = 80) -> List[str]:
@@ -272,6 +273,145 @@ def _create_app(
         """Poll kill switch progress."""
         return f'<span class="kill-status">{closer.status}</span>'
 
+    # ── Control-only endpoints (used by hub dashboard) ───────────────
+
+    def _get_account_id() -> str:
+        """Universal account identifier — works for any exchange."""
+        from config import EXCHANGE
+        if EXCHANGE == 'coincall':
+            from config import API_KEY
+            return f"cc-{API_KEY[:8]}" if API_KEY else "cc-unknown"
+        elif EXCHANGE == 'deribit':
+            from config import DERIBIT_CLIENT_ID
+            return f"db-{DERIBIT_CLIENT_ID[:8]}" if DERIBIT_CLIENT_ID else "db-unknown"
+        else:
+            return f"{EXCHANGE[:4]}-unknown"
+
+    @app.route("/control/status")
+    def control_status():
+        """Lightweight JSON status — no auth (bound to localhost only)."""
+        from config import SLOT_NAME, EXCHANGE, ENVIRONMENT
+        snap = ctx.position_monitor.latest
+        strategy_data = []
+        for r in runners:
+            st = r.stats
+            strategy_data.append({
+                "name": r.config.name,
+                "enabled": r._enabled,
+                "active_trades": len(r.active_trades),
+                "max_trades": r.config.max_concurrent_trades,
+                "stats": {
+                    "total": st.get("total", 0),
+                    "wins": st.get("wins", 0),
+                    "losses": st.get("losses", 0),
+                    "total_pnl": st.get("total_pnl", 0.0),
+                    "today_trades": st.get("today_trades", 0),
+                    "today_pnl": st.get("today_pnl", 0.0),
+                },
+            })
+
+        # Positions
+        positions_data = []
+        if snap and snap.positions:
+            for p in snap.positions:
+                positions_data.append({
+                    "symbol": p.symbol,
+                    "side": p.side,
+                    "qty": p.qty,
+                    "entry_price": p.entry_price,
+                    "mark_price": p.mark_price,
+                    "unrealized_pnl": p.unrealized_pnl,
+                    "delta": p.delta,
+                    "theta": p.theta,
+                })
+
+        # Open orders
+        orders_data = []
+        om = ctx.lifecycle_manager.order_manager
+        for rec in om._orders.values():
+            if rec.is_live:
+                orders_data.append({
+                    "order_id": rec.order_id,
+                    "symbol": rec.symbol,
+                    "side": rec.side,
+                    "qty": rec.qty,
+                    "price": rec.price,
+                    "filled_qty": rec.filled_qty,
+                    "status": rec.status.value if hasattr(rec.status, 'value') else str(rec.status),
+                    "placed_at": rec.placed_at,
+                })
+
+        # Health
+        uptime = time.time() - _dashboard_start_time if _dashboard_start_time else 0
+        snap_age = (time.time() - snap.timestamp) if snap else None
+        health_data = {
+            "uptime_secs": int(uptime),
+            "last_snapshot_age_secs": round(snap_age, 1) if snap_age is not None else None,
+            "margin_warning": (snap.margin_utilization > 80) if snap else False,
+            "low_equity_warning": (snap.equity < 100) if snap else False,
+        }
+
+        # Logs (last 50 lines)
+        log_lines = _get_log_lines(50)
+
+        result = {
+            "slot_name": SLOT_NAME,
+            "exchange": EXCHANGE,
+            "environment": ENVIRONMENT,
+            "account_id": _get_account_id(),
+            "strategies": strategy_data,
+            "positions": positions_data,
+            "open_orders": orders_data,
+            "health": health_data,
+            "logs": log_lines,
+            "account": None,
+        }
+        if snap:
+            result["account"] = {
+                "equity": snap.equity,
+                "available_margin": snap.available_margin,
+                "margin_utilization": snap.margin_utilization,
+                "unrealized_pnl": snap.unrealized_pnl,
+                "net_delta": snap.net_delta,
+                "net_theta": snap.net_theta,
+                "position_count": snap.position_count,
+                "timestamp": snap.timestamp,
+            }
+        return jsonify(result)
+
+    @app.route("/control/pause", methods=["POST"])
+    def control_pause():
+        """Pause all strategies — no auth (bound to localhost only)."""
+        for r in runners:
+            r.disable()
+        logger.info("[Control] All strategies paused by hub")
+        return jsonify({"ok": True, "action": "paused"})
+
+    @app.route("/control/resume", methods=["POST"])
+    def control_resume():
+        """Resume all strategies — no auth (bound to localhost only)."""
+        for r in runners:
+            r.enable()
+        logger.info("[Control] All strategies resumed by hub")
+        return jsonify({"ok": True, "action": "resumed"})
+
+    @app.route("/control/stop", methods=["POST"])
+    def control_stop():
+        """Stop all strategies — no auth (bound to localhost only)."""
+        for r in runners:
+            r.stop()
+        logger.info("[Control] All strategies stopped by hub")
+        return jsonify({"ok": True, "action": "stopped"})
+
+    @app.route("/control/kill", methods=["POST"])
+    def control_kill():
+        """Kill switch — close all positions (bound to localhost only)."""
+        if closer.is_running:
+            return jsonify({"ok": False, "reason": "already_running", "status": closer.status})
+        closer.start(runners)
+        logger.warning("[Control] KILL SWITCH activated by hub")
+        return jsonify({"ok": True, "action": "kill_switch_activated"})
+
     return app
 
 
@@ -288,26 +428,49 @@ def start_dashboard(
     """
     Launch the dashboard on a daemon thread.
 
-    Reads DASHBOARD_PASSWORD from the environment.  If not set, the
-    dashboard is disabled and a warning is logged.
+    Supports three modes (set DASHBOARD_MODE in .env):
+      - 'full'    : Normal dashboard with UI (default) — requires DASHBOARD_PASSWORD
+      - 'control' : Headless — only /control/* endpoints, bound to 127.0.0.1
+      - 'disabled': No dashboard at all
     """
     global _log_handler
 
-    password = os.getenv("DASHBOARD_PASSWORD", "").strip()
-    if not password:
-        logger.warning(
-            "Dashboard disabled — set DASHBOARD_PASSWORD in .env to enable"
-        )
+    from config import DASHBOARD_MODE
+
+    if DASHBOARD_MODE == "disabled":
+        logger.info("Dashboard disabled via DASHBOARD_MODE=disabled")
         return
 
     port = int(os.getenv("DASHBOARD_PORT", str(port)))
 
-    # Attach in-memory log handler to root logger
-    _log_handler = DashboardLogHandler(maxlen=_LOG_TAIL_LINES)
-    _log_handler.setFormatter(
-        logging.Formatter("%(asctime)s  %(levelname)-7s  %(name)s — %(message)s", datefmt="%H:%M:%S")
-    )
-    logging.getLogger().addHandler(_log_handler)
+    _dashboard_start_time = time.time()
+
+    if DASHBOARD_MODE == "control":
+        # Control-only mode: bind to localhost, no password required.
+        # Still attach log handler so hub can read logs via /control/status.
+        _log_handler = DashboardLogHandler(maxlen=_LOG_TAIL_LINES)
+        _log_handler.setFormatter(
+            logging.Formatter("%(asctime)s  %(levelname)-7s  %(name)s — %(message)s", datefmt="%H:%M:%S")
+        )
+        logging.getLogger().addHandler(_log_handler)
+        password = "control-mode-unused"
+        host = "127.0.0.1"
+        logger.info(f"Dashboard control endpoint on http://127.0.0.1:{port}")
+    else:
+        # Full dashboard mode: requires password
+        password = os.getenv("DASHBOARD_PASSWORD", "").strip()
+        if not password:
+            logger.warning(
+                "Dashboard disabled — set DASHBOARD_PASSWORD in .env to enable"
+            )
+            return
+
+        # Attach in-memory log handler to root logger (full mode only)
+        _log_handler = DashboardLogHandler(maxlen=_LOG_TAIL_LINES)
+        _log_handler.setFormatter(
+            logging.Formatter("%(asctime)s  %(levelname)-7s  %(name)s — %(message)s", datefmt="%H:%M:%S")
+        )
+        logging.getLogger().addHandler(_log_handler)
 
     app = _create_app(ctx, runners, password)
 
@@ -319,4 +482,4 @@ def start_dashboard(
 
     thread = threading.Thread(target=_run, name="Dashboard", daemon=True)
     thread.start()
-    logger.info(f"Dashboard started on http://{host}:{port}")
+    logger.info(f"Dashboard started on http://{host}:{port} (mode={DASHBOARD_MODE})")

@@ -127,6 +127,21 @@ def validate_config():
         )
 
 
+# =============================================================================
+# DASHBOARD MODE
+# =============================================================================
+
+# 'full' = normal dashboard with UI (default)
+# 'control' = headless mode — only control endpoints, bound to 127.0.0.1
+# 'disabled' = no dashboard at all
+DASHBOARD_MODE = os.getenv('DASHBOARD_MODE', 'full').lower()
+
+if DASHBOARD_MODE not in ['full', 'control', 'disabled']:
+    raise ValueError(f"Invalid DASHBOARD_MODE: '{DASHBOARD_MODE}'. Must be 'full', 'control', or 'disabled'")
+
+# Human-readable slot name for the hub dashboard
+SLOT_NAME = os.getenv('SLOT_NAME', '')
+
 # Validate on import
 validate_config()
 

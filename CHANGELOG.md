@@ -5,6 +5,50 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.0] - 2026-03-20
+
+### Slot Architecture — Multi-Strategy Deployment
+
+New deployment architecture for running multiple strategies in parallel on a
+single server, each in an isolated "slot" with a centralised hub dashboard.
+
+### Added
+- **Slot deployment system** — Single `deploy-slot.sh` script manages slots
+  01–10 and a hub dashboard. Each slot has its own `.env`, venv, systemd
+  service, and logs directory under `/opt/ct/slot-XX/`.
+- **Hub dashboard** (`hub/hub_dashboard.py`) — Centralised Flask + htmx
+  dashboard that auto-discovers slots by scanning `/opt/ct/slot-*` directories.
+  Shows account ID, positions, open orders, health status, and tabbed log
+  viewer per slot. Password-protected, dark theme.
+- **Control endpoint** — `DASHBOARD_MODE=control` exposes a localhost-only
+  JSON endpoint (`/control/status`) with positions, orders, health, logs, and
+  account ID. Hub reads this to aggregate slot data.
+- **systemd template units** — `ct-slot@.service` (template for slots),
+  `ct-hub.service` (hub dashboard).
+- **Deployment config files** (gitignored): `.deploy.slots.env` (SSH config),
+  `.env.slot-XX` (per-slot config), `.env.hub` (hub config).
+- Hub templates: `hub_dashboard.html`, `_hub_overview.html`,
+  `_hub_slot_detail.html`.
+
+### Changed
+- **`dashboard.py`** — `/control/status` now returns positions, open orders,
+  health (uptime, snapshot age, margin/equity warnings), recent logs, and
+  account ID. Log handler attached in control mode. Fixed stats access from
+  attribute syntax to dict `.get()` (stats property returns a dict, not object).
+- **`main.py`** — Removed stale imports of archived strategies
+  (`smoke_test_strangle`, `prod_test_put`).
+- **`deploy-slot.sh`** — Hub rsync excludes `.venv`, `.env`, `__pycache__`,
+  `test_hub_local.py`. Hub firewall port reads from `.env.hub` instead of
+  hardcoded 8080.
+
+### Deployment
+- Slot-01 deployed to production with `straddle_10utc` strategy on Deribit
+  testnet (port 8091, localhost only).
+- Hub deployed on port 8070 (external).
+- Existing legacy services on ports 8080/8081 untouched.
+
+---
+
 ## [1.4.4] - 2026-03-20
 
 ### Deribit Production Live + Multi-Instance Deployment

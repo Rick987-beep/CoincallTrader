@@ -1,0 +1,47 @@
+# ===========================================================================
+# CoincallTrader — Hub Dashboard Systemd Service
+#
+# Runs the unified hub dashboard that aggregates all slot data.
+# Publicly accessible on port 8080 (the only public-facing dashboard).
+#
+# Installation (handled by deploy-slot.sh hub --setup):
+#   cp deployment/ct-hub.service /etc/systemd/system/
+#   systemctl daemon-reload
+#   systemctl enable ct-hub
+#
+# Usage:
+#   systemctl start|stop|restart|status ct-hub
+#   journalctl -u ct-hub -f
+# ===========================================================================
+
+[Unit]
+Description=CoincallTrader — Hub Dashboard
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+
+WorkingDirectory=/opt/ct/hub
+ExecStart=/opt/ct/hub/.venv/bin/python hub_dashboard.py
+
+Environment=PYTHONUNBUFFERED=1
+
+Restart=on-failure
+RestartSec=5
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ct-hub
+
+LimitNOFILE=4096
+MemoryMax=256M
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadOnlyPaths=/opt/ct
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

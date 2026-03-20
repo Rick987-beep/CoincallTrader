@@ -1,0 +1,57 @@
+# ===========================================================================
+# CoincallTrader — Systemd Template Unit (Slot Architecture)
+#
+# A single template that manages any slot via the %i instance specifier.
+#
+# Installation (handled by deploy-slot.sh --setup):
+#   cp deployment/ct-slot@.service /etc/systemd/system/
+#   systemctl daemon-reload
+#
+# Usage:
+#   systemctl start ct-slot@01       Start slot 01
+#   systemctl stop ct-slot@03        Stop slot 03
+#   systemctl restart ct-slot@05     Restart slot 05
+#   systemctl status ct-slot@07      Status of slot 07
+#   journalctl -u ct-slot@02 -f     Tail logs for slot 02
+#
+# All slots auto-start on boot via WantedBy=multi-user.target.
+# ===========================================================================
+
+[Unit]
+Description=CoincallTrader — Slot %i
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+
+# Application directory — resolved per instance
+WorkingDirectory=/opt/ct/slot-%i
+ExecStart=/opt/ct/slot-%i/.venv/bin/python main.py
+
+# Environment
+Environment=PYTHONUNBUFFERED=1
+
+# Restart policy: restart on crash, not on clean exit.
+# 10s delay prevents tight crash loops from hammering exchange APIs.
+Restart=on-failure
+RestartSec=10
+
+# Logging: stdout/stderr → journald
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ct-slot-%i
+
+# Resource limits
+LimitNOFILE=65535
+MemoryMax=1G
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/opt/ct/slot-%i/logs
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

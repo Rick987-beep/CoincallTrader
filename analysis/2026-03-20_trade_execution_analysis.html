@@ -1,0 +1,684 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Trade Execution Analysis — 20 March 2026</title>
+  <style>
+    :root {
+      --bg: #0d1117; --surface: #161b22; --border: #30363d;
+      --text: #c9d1d9; --text-muted: #8b949e; --text-bright: #f0f6fc;
+      --green: #3fb950; --red: #f85149; --yellow: #d29922; --blue: #58a6ff;
+      --orange: #d18616; --purple: #bc8cff;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: var(--bg); color: var(--text); line-height: 1.6; padding: 2rem; }
+    .container { max-width: 1100px; margin: 0 auto; }
+    h1 { color: var(--text-bright); font-size: 1.8rem; margin-bottom: 0.3rem; }
+    h2 { color: var(--blue); font-size: 1.3rem; margin: 2rem 0 1rem; border-bottom: 1px solid var(--border); padding-bottom: 0.4rem; }
+    h3 { color: var(--text-bright); font-size: 1.1rem; margin: 1.5rem 0 0.7rem; }
+    .subtitle { color: var(--text-muted); font-size: 0.95rem; margin-bottom: 2rem; }
+    .badge { display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 0.75rem; font-weight: 600; }
+    .badge-open { background: rgba(63,185,80,0.15); color: var(--green); border: 1px solid rgba(63,185,80,0.3); }
+    .badge-closed { background: rgba(139,148,158,0.15); color: var(--text-muted); border: 1px solid rgba(139,148,158,0.3); }
+    .badge-loss { background: rgba(248,81,73,0.15); color: var(--red); border: 1px solid rgba(248,81,73,0.3); }
+    .badge-taker { background: rgba(210,150,22,0.15); color: var(--yellow); border: 1px solid rgba(210,150,22,0.3); }
+    .badge-maker { background: rgba(88,166,255,0.15); color: var(--blue); border: 1px solid rgba(88,166,255,0.3); }
+
+    table { width: 100%; border-collapse: collapse; margin: 0.5rem 0 1.5rem; background: var(--surface); border-radius: 8px; overflow: hidden; }
+    th { background: rgba(88,166,255,0.08); color: var(--blue); font-weight: 600; text-align: left; padding: 10px 14px; font-size: 0.82rem; text-transform: uppercase; letter-spacing: 0.03em; }
+    td { padding: 10px 14px; border-top: 1px solid var(--border); font-size: 0.9rem; }
+    tr:hover td { background: rgba(88,166,255,0.04); }
+    .num { font-family: 'SF Mono', 'Fira Code', monospace; text-align: right; }
+    .negative { color: var(--red); }
+    .positive { color: var(--green); }
+    .highlight { color: var(--yellow); font-weight: 600; }
+    .muted { color: var(--text-muted); }
+
+    .card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 1.2rem 1.5rem; margin: 1rem 0; }
+    .card-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 1rem; margin: 1rem 0; }
+    .metric { text-align: center; }
+    .metric .value { font-size: 1.6rem; font-weight: 700; font-family: 'SF Mono', monospace; }
+    .metric .label { font-size: 0.8rem; color: var(--text-muted); margin-top: 0.2rem; }
+
+    .timeline { border-left: 2px solid var(--border); margin: 1rem 0 1rem 1rem; padding-left: 1.5rem; }
+    .timeline .event { position: relative; margin-bottom: 1rem; }
+    .timeline .event::before { content: ''; position: absolute; left: -1.85rem; top: 0.45rem; width: 10px; height: 10px; border-radius: 50%; background: var(--border); }
+    .timeline .event.phase1::before { background: var(--blue); }
+    .timeline .event.phase2::before { background: var(--yellow); }
+    .timeline .event.fill::before { background: var(--green); }
+    .timeline .event.reject::before { background: var(--red); }
+    .timeline .time { font-family: monospace; color: var(--text-muted); font-size: 0.82rem; }
+    .timeline .desc { font-size: 0.9rem; }
+
+    .concern { background: rgba(248,81,73,0.08); border: 1px solid rgba(248,81,73,0.25); border-radius: 8px; padding: 1rem 1.2rem; margin: 1rem 0; }
+    .concern h4 { color: var(--red); margin-bottom: 0.4rem; }
+    .note { background: rgba(88,166,255,0.08); border: 1px solid rgba(88,166,255,0.25); border-radius: 8px; padding: 1rem 1.2rem; margin: 1rem 0; }
+    .note h4 { color: var(--blue); margin-bottom: 0.4rem; }
+
+    .footer { margin-top: 3rem; padding-top: 1rem; border-top: 1px solid var(--border); color: var(--text-muted); font-size: 0.8rem; }
+    @media print { body { background: #fff; color: #333; } .card, table { border: 1px solid #ddd; } th { background: #f5f5f5; color: #333; } td { border-color: #eee; } }
+  </style>
+</head>
+<body>
+<div class="container">
+
+<h1>Trade Execution Analysis</h1>
+<p class="subtitle">
+  Strategy: <strong>daily_put_sell</strong> &nbsp;|&nbsp;
+  Date: <strong>20 March 2026</strong> &nbsp;|&nbsp;
+  Account: Main Production &nbsp;|&nbsp;
+  Exchange: Coincall
+</p>
+
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<h2>1. Today's Trade — BTCUSD-21MAR26-67000-P</h2>
+
+<div class="card-grid">
+  <div class="card metric">
+    <div class="value" style="color: var(--yellow);">$90.00</div>
+    <div class="label">Fill Price (SELL)</div>
+  </div>
+  <div class="card metric">
+    <div class="value">$116.54</div>
+    <div class="label">Mark Price at Open</div>
+  </div>
+  <div class="card metric">
+    <div class="value negative">−22.8%</div>
+    <div class="label">Fill vs Mark</div>
+  </div>
+  <div class="card metric">
+    <div class="value">$72.00</div>
+    <div class="label">Orderbook Best Bid</div>
+  </div>
+</div>
+
+<table>
+  <tr><th colspan="2">Trade Details</th></tr>
+  <tr><td>Trade ID</td><td><code>7ce7e7eb-1cb</code></td></tr>
+  <tr><td>Instrument</td><td>BTCUSD-21MAR26-67000-P (1DTE BTC Put, strike $67,000)</td></tr>
+  <tr><td>Direction</td><td>SELL (short put)</td></tr>
+  <tr><td>Quantity</td><td class="num">0.8 BTC</td></tr>
+  <tr><td>BTC Index at Open</td><td class="num">$70,428</td></tr>
+  <tr><td>Moneyness</td><td class="num">4.87% OTM</td></tr>
+  <tr><td>State</td><td><span class="badge badge-open">OPEN</span></td></tr>
+  <tr><td>TP Order</td><td>BUY 0.8 × @ $9.00 (90% premium capture) — <span class="muted">pending</span></td></tr>
+  <tr><td>SL Threshold</td><td>70% of entry premium (mark PnL mode)</td></tr>
+</table>
+
+<h3>Current Position Snapshot (08:19 UTC)</h3>
+<table>
+  <tr><th>Metric</th><th>Value</th></tr>
+  <tr><td>Current Mark Price</td><td class="num">$35.87</td></tr>
+  <tr><td>Current Bid / Ask</td><td class="num">$15.00 / $40.00</td></tr>
+  <tr><td>BTC Index (now)</td><td class="num">$71,269</td></tr>
+  <tr><td>Unrealized PnL (mark)</td><td class="num positive">+$43.30 (entry $90 − mark $35.87 = $54.13 × 0.8)</td></tr>
+  <tr><td>Time Held</td><td class="num">~5h 18m</td></tr>
+</table>
+
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<h2>2. Execution Timeline</h2>
+
+<div class="timeline">
+  <div class="event phase1">
+    <div class="time">03:00:12 UTC</div>
+    <div class="desc">Entry gates passed — all conditions met</div>
+  </div>
+  <div class="event phase1">
+    <div class="time">03:00:28 UTC</div>
+    <div class="desc">Leg resolved: <strong>BTCUSD-21MAR26-67000-P</strong></div>
+  </div>
+  <div class="event phase1">
+    <div class="time">03:00:28 UTC</div>
+    <div class="desc">Orderbook baseline captured: <strong>$72.00</strong> (best bid for sell side)</div>
+  </div>
+  <div class="event phase1">
+    <div class="time">03:00:29 UTC</div>
+    <div class="desc">RFQ created (ID: 2034827387191091200), expires 04:00:29</div>
+  </div>
+  <div class="event phase1">
+    <div class="time">03:00:32 — 03:00:49</div>
+    <div class="desc"><strong>Phase 1 (Silent Collection)</strong>: 2→4 quotes received. Best: <span class="negative">$68.00 (−5.6% vs book)</span>. All quotes worse than orderbook.</div>
+  </div>
+  <div class="event phase2">
+    <div class="time">03:00:53 — 03:01:26</div>
+    <div class="desc"><strong>Phase 2 (Gated)</strong>: Quotes still at −5.6%. Gate requires ≥ +2.0% improvement over book. <span class="highlight">Correctly rejected for 37 seconds.</span></div>
+  </div>
+  <div class="event reject">
+    <div class="time">03:01:29 UTC</div>
+    <div class="desc">RFQ timeout (60s). Cancelled. No quotes accepted.</div>
+  </div>
+  <div class="event fill">
+    <div class="time">03:01:31 UTC</div>
+    <div class="desc"><strong>Limit fallback</strong>: Placed SELL 0.8 × @ $88.24 (aggressive)</div>
+  </div>
+  <div class="event fill">
+    <div class="time">03:01:43 UTC</div>
+    <div class="desc"><strong>FILLED</strong>: 0.8 BTC @ <strong>$90.00</strong> (price improved $1.76 vs order)</div>
+  </div>
+  <div class="event fill">
+    <div class="time">03:01:45 UTC</div>
+    <div class="desc">TP order placed: BUY 0.8 × @ $9.00</div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<h2>3. Price Comparison</h2>
+
+<table>
+  <tr>
+    <th>Price Source</th>
+    <th>Value</th>
+    <th>vs Mark ($116.54)</th>
+    <th>Notes</th>
+  </tr>
+  <tr>
+    <td>Mark Price</td>
+    <td class="num">$116.54</td>
+    <td class="num muted">baseline</td>
+    <td>Theoretical fair value (Black-Scholes mid)</td>
+  </tr>
+  <tr>
+    <td style="font-weight:600;">Actual Fill</td>
+    <td class="num" style="font-weight:600;">$90.00</td>
+    <td class="num negative">−22.8%</td>
+    <td>Filled above limit price (price improvement)</td>
+  </tr>
+  <tr>
+    <td>Limit Order Price</td>
+    <td class="num">$88.24</td>
+    <td class="num negative">−24.3%</td>
+    <td>Aggressive limit placed after RFQ timeout</td>
+  </tr>
+  <tr>
+    <td>Orderbook Best Bid</td>
+    <td class="num">$72.00</td>
+    <td class="num negative">−38.2%</td>
+    <td>Best visible resting bid at RFQ creation</td>
+  </tr>
+  <tr>
+    <td>Best RFQ Quote</td>
+    <td class="num">$68.00</td>
+    <td class="num negative">−41.7%</td>
+    <td>Best of 4 market maker quotes over 60s</td>
+  </tr>
+</table>
+
+<div class="concern">
+  <h4>⚠ Key Concern: Mark-to-Fill Gap</h4>
+  <p>
+    The mark price ($116.54) was <strong>29.5% above the best orderbook bid ($72.00)</strong> and <strong>71.4% above the best RFQ quote ($68.00)</strong>.
+    This suggests either: (a) thin liquidity at 03:00 UTC with wide bid-ask spreads inflating the mark, (b) stale mark price not reflecting executable levels, or (c) market makers quoting wide on 1DTE deep OTM puts.
+  </p>
+  <p>
+    The fill at $90.00 was actually <strong>25% better than the orderbook bid</strong> and <strong>32% better than RFQ quotes</strong> — the limit fallback outperformed both the orderbook and the RFQ channel.
+  </p>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<h2>4. Fees — Today's Trade</h2>
+
+<table>
+  <tr>
+    <th>Leg</th>
+    <th>Direction</th>
+    <th>Fill Price</th>
+    <th>Qty</th>
+    <th>Notional</th>
+    <th>Fee (USD)</th>
+    <th>Fee %</th>
+    <th>Maker/Taker</th>
+  </tr>
+  <tr>
+    <td>Open</td>
+    <td>SELL</td>
+    <td class="num">$90.00</td>
+    <td class="num">0.8</td>
+    <td class="num">$72.00</td>
+    <td class="num highlight">$9.00</td>
+    <td class="num">12.5%</td>
+    <td><span class="badge badge-taker">TAKER</span></td>
+  </tr>
+  <tr>
+    <td>Close (TP)</td>
+    <td>BUY</td>
+    <td class="num muted">$9.00 (pending)</td>
+    <td class="num">0.8</td>
+    <td class="num muted">$7.20</td>
+    <td class="num muted">—</td>
+    <td class="num muted">—</td>
+    <td class="muted">pending</td>
+  </tr>
+  <tr style="font-weight: 600;">
+    <td colspan="5">Total Fee (open leg)</td>
+    <td class="num highlight">$9.00</td>
+    <td class="num">12.5% of premium</td>
+    <td></td>
+  </tr>
+</table>
+
+<div class="note">
+  <h4>ℹ Fee Structure</h4>
+  <p>
+    Coincall options fee: <code>min(0.02% × qty × BTC_index, 12.5% × premium × qty)</code>.<br>
+    On this open, the 12.5% premium cap applies: 12.5% × $90 × 0.8 = <strong>$9.00</strong>.<br>
+    The notional rate would have been 0.02% × 0.8 × $70,428 = $11.27, so the cap saved $2.27.
+  </p>
+  <p>
+    <strong>Projected TP close fee:</strong> BUY @ $9.00 → 12.5% cap = 12.5% × $9 × 0.8 = <strong>$0.90</strong>.
+    Total round-trip fees (TP scenario): $9.00 + $0.90 = <strong>$9.90</strong>.
+  </p>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<h2>5. Historical Trades (Last 4 Days)</h2>
+
+<table>
+  <tr>
+    <th>Date</th>
+    <th>Instrument</th>
+    <th>Open $</th>
+    <th>Close $</th>
+    <th>PnL</th>
+    <th>Open Fee</th>
+    <th>Close Fee</th>
+    <th>Total Fees</th>
+    <th>Hold Time</th>
+    <th>Exit</th>
+    <th>Status</th>
+  </tr>
+  <tr>
+    <td>Mar 17</td>
+    <td>72000-P</td>
+    <td class="num">$95.00</td>
+    <td class="num">$160.00</td>
+    <td class="num negative">−$52.00</td>
+    <td class="num">$9.50</td>
+    <td class="num">$11.97</td>
+    <td class="num highlight">$21.47</td>
+    <td class="num">22.9 min</td>
+    <td>SL</td>
+    <td><span class="badge badge-loss">LOSS</span></td>
+  </tr>
+  <tr>
+    <td>Mar 18</td>
+    <td>71000-P</td>
+    <td class="num">$95.00</td>
+    <td class="num">$155.00</td>
+    <td class="num negative">−$48.00</td>
+    <td class="num">$9.50</td>
+    <td class="num">$11.81</td>
+    <td class="num highlight">$21.31</td>
+    <td class="num">4.5 hrs</td>
+    <td>SL</td>
+    <td><span class="badge badge-loss">LOSS</span></td>
+  </tr>
+  <tr>
+    <td>Mar 19</td>
+    <td>68000-P</td>
+    <td class="num">$100.00</td>
+    <td class="num">$150.00</td>
+    <td class="num negative">−$40.00</td>
+    <td class="num">$10.00</td>
+    <td class="num">$11.32</td>
+    <td class="num highlight">$21.32</td>
+    <td class="num">1.4 hrs</td>
+    <td>SL</td>
+    <td><span class="badge badge-loss">LOSS</span></td>
+  </tr>
+  <tr>
+    <td>Mar 20</td>
+    <td>67000-P</td>
+    <td class="num">$90.00</td>
+    <td class="num muted">—</td>
+    <td class="num positive">+$43.30 (unreal.)</td>
+    <td class="num">$9.00</td>
+    <td class="num muted">—</td>
+    <td class="num">$9.00</td>
+    <td class="num">5h 18m+</td>
+    <td class="muted">—</td>
+    <td><span class="badge badge-open">OPEN</span></td>
+  </tr>
+  <tr style="font-weight: 600; background: rgba(88,166,255,0.05);">
+    <td colspan="4">Totals (closed trades only)</td>
+    <td class="num negative">−$140.00</td>
+    <td class="num">$29.00</td>
+    <td class="num">$35.10</td>
+    <td class="num highlight">$64.10</td>
+    <td colspan="3"></td>
+  </tr>
+  <tr style="font-weight: 600; background: rgba(248,81,73,0.06);">
+    <td colspan="4">Net P&L (incl. fees)</td>
+    <td class="num negative">−$204.10</td>
+    <td colspan="6">(Realized P&L −$140 + Fees −$64.10)</td>
+  </tr>
+</table>
+
+<div class="concern">
+  <h4>⚠ Fee Impact on Closed Trades</h4>
+  <p>
+    Gross realized losses: <strong>−$140.00</strong>. Total fees on those trades: <strong>$64.10</strong>.
+    <strong>Net loss including fees: −$204.10.</strong>
+    Fees represent <strong>31.4% of total net losses</strong> and add <strong>45.8% on top of gross losses</strong>.
+  </p>
+  <p>
+    All 7 fills across 3 closed trades were <strong>taker</strong>. Fee formula: <code>min(0.02% × qty × BTC_index, 12.5% × premium × qty)</code>.
+    On low-premium opens (~$90–$100), the 12.5% cap binds. On high-premium SL closes (~$150–$160), the notional rate (0.02% × BTC index) binds.
+  </p>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<h2>6. Fee Breakdown — All Fills (Exchange API Data)</h2>
+
+<table>
+  <tr>
+    <th>Time (UTC)</th>
+    <th>Instrument</th>
+    <th>Side</th>
+    <th>Price</th>
+    <th>Qty</th>
+    <th>Fee (USD)</th>
+    <th>Maker/Taker</th>
+    <th>Order ID</th>
+  </tr>
+  <tr>
+    <td>Mar 17 03:00</td>
+    <td>72000-P</td>
+    <td>SELL</td>
+    <td class="num">$95.00</td>
+    <td class="num">0.8</td>
+    <td class="num">$9.50</td>
+    <td><span class="badge badge-taker">TAKER</span></td>
+    <td class="muted" style="font-size:0.75rem;">2033740322869219328</td>
+  </tr>
+  <tr>
+    <td>Mar 17 03:23</td>
+    <td>72000-P</td>
+    <td>BUY</td>
+    <td class="num">$160.00</td>
+    <td class="num">0.8</td>
+    <td class="num">$11.97</td>
+    <td><span class="badge badge-taker">TAKER</span></td>
+    <td class="muted" style="font-size:0.75rem;">2033746031354765312</td>
+  </tr>
+  <tr>
+    <td>Mar 18 03:00</td>
+    <td>71000-P</td>
+    <td>SELL</td>
+    <td class="num">$95.00</td>
+    <td class="num">0.8</td>
+    <td class="num">$9.50</td>
+    <td><span class="badge badge-taker">TAKER</span></td>
+    <td class="muted" style="font-size:0.75rem;">2034102731228262400</td>
+  </tr>
+  <tr>
+    <td>Mar 18 07:31</td>
+    <td>71000-P</td>
+    <td>BUY</td>
+    <td class="num">$155.00</td>
+    <td class="num">0.8</td>
+    <td class="num">$11.81</td>
+    <td><span class="badge badge-taker">TAKER</span></td>
+    <td class="muted" style="font-size:0.75rem;">2034170717192531968</td>
+  </tr>
+  <tr>
+    <td>Mar 19 03:01</td>
+    <td>68000-P</td>
+    <td>SELL</td>
+    <td class="num">$100.00</td>
+    <td class="num">0.8</td>
+    <td class="num">$10.00</td>
+    <td><span class="badge badge-taker">TAKER</span></td>
+    <td class="muted" style="font-size:0.75rem;">2034465173422608384</td>
+  </tr>
+  <tr>
+    <td>Mar 19 04:26</td>
+    <td>68000-P</td>
+    <td>BUY</td>
+    <td class="num">$150.00</td>
+    <td class="num">0.8</td>
+    <td class="num">$11.32</td>
+    <td><span class="badge badge-taker">TAKER</span></td>
+    <td class="muted" style="font-size:0.75rem;">2034486498631540736</td>
+  </tr>
+  <tr>
+    <td>Mar 20 03:01</td>
+    <td>67000-P</td>
+    <td>SELL</td>
+    <td class="num">$90.00</td>
+    <td class="num">0.8</td>
+    <td class="num">$9.00</td>
+    <td><span class="badge badge-taker">TAKER</span></td>
+    <td class="muted" style="font-size:0.75rem;">2034827649427386368</td>
+  </tr>
+  <tr style="font-weight: 600; background: rgba(88,166,255,0.05);">
+    <td colspan="5">Total Fees (7 fills)</td>
+    <td class="num highlight">$73.10</td>
+    <td colspan="2">All taker</td>
+  </tr>
+</table>
+
+<div class="note">
+  <h4>ℹ Fee Formula (verified against all 7 fills)</h4>
+  <p>
+    <code>fee = min(0.02% × qty × BTC_index_price, 12.5% × option_premium × qty)</code>
+  </p>
+  <p>
+    When the option premium is <strong>low</strong> (opens at ~$90), the <strong>12.5% premium cap</strong> binds → fee = $9.00.<br>
+    When the option premium is <strong>high</strong> (SL closes at ~$150+), the <strong>0.02% notional rate</strong> binds → fee ≈ $11–12.<br>
+    This means fees are <em>asymmetric</em>: you pay more in fees on the losing close than on the opening sell.
+  </p>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<h2>7. RFQ vs Limit Performance</h2>
+
+<div class="card">
+  <h3 style="margin-top:0;">Observation</h3>
+  <p>
+    Across all 4 recent trades, the RFQ channel has <strong>never produced an acceptable quote</strong>.
+    Market makers consistently quoted <strong>5–6% worse than the orderbook</strong>.
+    Every trade filled via the <strong>limit order fallback</strong>, which achieved prices
+    <strong>25–39% better than RFQ quotes</strong>.
+  </p>
+
+  <table style="margin-top:1rem;">
+    <tr>
+      <th>Trade</th>
+      <th>Orderbook Bid</th>
+      <th>Best RFQ Quote</th>
+      <th>RFQ vs Book</th>
+      <th>Limit Fill</th>
+      <th>Fill vs Book</th>
+    </tr>
+    <tr>
+      <td>Mar 20 — 67000-P</td>
+      <td class="num">$72.00</td>
+      <td class="num">$68.00</td>
+      <td class="num negative">−5.6%</td>
+      <td class="num">$90.00</td>
+      <td class="num positive">+25.0%</td>
+    </tr>
+  </table>
+
+  <p style="margin-top:1rem; color: var(--text-muted);">
+    <strong>Question for Coincall team:</strong> Why are RFQ market maker quotes consistently worse than
+    the visible orderbook? Are the same market makers posting on both channels? Is the RFQ price
+    calculation using the correct side (sell quotes for our sell intent)?
+  </p>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<h2>8. Bot Configuration (as deployed)</h2>
+
+<table>
+  <tr><th>Parameter</th><th>Value</th><th>Description</th></tr>
+  <tr><td>QTY</td><td class="num">0.8 BTC</td><td>Per trade notional</td></tr>
+  <tr><td>TARGET_DELTA</td><td class="num">−0.10</td><td>OTM put delta target</td></tr>
+  <tr><td>DTE</td><td class="num">1</td><td>Days to expiry</td></tr>
+  <tr><td>ENTRY_WINDOW</td><td class="num">03:00–04:00 UTC</td><td>Daily entry window</td></tr>
+  <tr><td>STOP_LOSS_PCT</td><td class="num">70%</td><td>Mark PnL stop loss</td></tr>
+  <tr><td>TP_CAPTURE_PCT</td><td class="num">90%</td><td>Buy back at 10% of entry</td></tr>
+  <tr><td>RFQ_OPEN_TIMEOUT</td><td class="num">60s</td><td>Phase 1 (20s) + Phase 2 (40s)</td></tr>
+  <tr><td>RFQ_MIN_BOOK_IMPROVEMENT</td><td class="num">2%</td><td>Phase 2 gate: quote must beat book by ≥2%</td></tr>
+  <tr><td>RFQ_CLOSE_TIMEOUT</td><td class="num">15s</td><td>SL close RFQ timeout</td></tr>
+  <tr><td>CHECK_INTERVAL</td><td class="num">15s</td><td>SL/TP evaluation frequency</td></tr>
+  <tr><td>MAX_CONCURRENT</td><td class="num">2</td><td>Max overlapping trades</td></tr>
+  <tr><td>MAX_PER_DAY</td><td class="num">1</td><td>One trade per day</td></tr>
+</table>
+
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<h2>9. Net Premium Analysis & Scenarios</h2>
+
+<p>What do we actually take home after fees and close costs? Three scenarios:</p>
+
+<table>
+  <tr>
+    <th></th>
+    <th>Scenario A:<br>Take Profit (TP)</th>
+    <th>Scenario B:<br>Expiry (worthless)</th>
+    <th>Scenario C:<br>Stop Loss (SL)</th>
+  </tr>
+  <tr>
+    <td>Close trigger</td>
+    <td>TP limit fills at $9</td>
+    <td>Option expires worthless</td>
+    <td>Mark hits 70% loss (~$153)</td>
+  </tr>
+  <tr>
+    <td>Premium received (gross)</td>
+    <td class="num">$90.00 × 0.8 = $72.00</td>
+    <td class="num">$90.00 × 0.8 = $72.00</td>
+    <td class="num">$90.00 × 0.8 = $72.00</td>
+  </tr>
+  <tr>
+    <td>Open fee</td>
+    <td class="num negative">−$9.00</td>
+    <td class="num negative">−$9.00</td>
+    <td class="num negative">−$9.00</td>
+  </tr>
+  <tr>
+    <td>Buy-to-close cost</td>
+    <td class="num negative">−$9 × 0.8 = −$7.20</td>
+    <td class="num">$0 (expires)</td>
+    <td class="num negative">~−$150 × 0.8 = −$120.00</td>
+  </tr>
+  <tr>
+    <td>Close fee</td>
+    <td class="num negative">−$0.90 <span class="muted">(12.5% cap)</span></td>
+    <td class="num">$0</td>
+    <td class="num negative">~−$11.38 <span class="muted">(0.02% rate)</span></td>
+  </tr>
+  <tr style="font-weight: 700; border-top: 2px solid var(--border);">
+    <td>Net P&L</td>
+    <td class="num positive">+$54.90</td>
+    <td class="num positive">+$63.00</td>
+    <td class="num negative">−$68.38</td>
+  </tr>
+  <tr style="font-weight: 600;">
+    <td>Total fees (round-trip)</td>
+    <td class="num highlight">$9.90 (15.3% of gross)</td>
+    <td class="num highlight">$9.00 (12.5% of gross)</td>
+    <td class="num highlight">$20.38 (28.3% of gross)</td>
+  </tr>
+  <tr>
+    <td>Return on premium</td>
+    <td class="num positive">+76.3%</td>
+    <td class="num positive">+87.5%</td>
+    <td class="num negative">−95.0%</td>
+  </tr>
+</table>
+
+<div class="card">
+  <h3 style="margin-top:0;">Key Takeaways</h3>
+  <ul style="padding-left: 1.2rem; line-height: 2;">
+    <li><strong>TP scenario:</strong> Of the $72.00 gross premium, you keep <strong>$54.90</strong> after paying $7.20 to buy back + $9.90 total fees. Fees eat <strong>15.3%</strong> of gross premium.</li>
+    <li><strong>Expiry (best case):</strong> Full premium minus open fee only = <strong>$63.00</strong>. This is 12.5% less than gross due to the open fee alone.</li>
+    <li><strong>SL scenario:</strong> You lose <strong>$68.38</strong> net — the $48.00 gross loss ($72 − $120) is amplified by <strong>$20.38 in round-trip fees</strong> (42.4% fee amplification on the loss).</li>
+    <li><strong>Asymmetric fee pain:</strong> SL fees ($20.38) are <strong>2× the TP fees ($9.90)</strong> because the high close premium on SL triggers the notional-rate fee instead of the 12.5% cap.</li>
+    <li><strong>Break-even mark price:</strong> Including fees, the trade breaks even if the put is bought back at ≤ $78.75 per contract ($72 gross − $9 open fee = $63 ÷ 0.8 = $78.75). Any close price above this results in a net loss.</li>
+  </ul>
+</div>
+
+<h3>Historical Net P&L (all fees included)</h3>
+<table>
+  <tr>
+    <th>Date</th>
+    <th>Instrument</th>
+    <th>Gross P&L</th>
+    <th>Open Fee</th>
+    <th>Close Fee</th>
+    <th>Total Fees</th>
+    <th>Net P&L</th>
+    <th>Fees as % of Gross</th>
+  </tr>
+  <tr>
+    <td>Mar 17</td>
+    <td>72000-P</td>
+    <td class="num negative">−$52.00</td>
+    <td class="num">$9.50</td>
+    <td class="num">$11.97</td>
+    <td class="num">$21.47</td>
+    <td class="num negative" style="font-weight:700;">−$73.47</td>
+    <td class="num">28.2% of premium</td>
+  </tr>
+  <tr>
+    <td>Mar 18</td>
+    <td>71000-P</td>
+    <td class="num negative">−$48.00</td>
+    <td class="num">$9.50</td>
+    <td class="num">$11.81</td>
+    <td class="num">$21.31</td>
+    <td class="num negative" style="font-weight:700;">−$69.31</td>
+    <td class="num">28.0% of premium</td>
+  </tr>
+  <tr>
+    <td>Mar 19</td>
+    <td>68000-P</td>
+    <td class="num negative">−$40.00</td>
+    <td class="num">$10.00</td>
+    <td class="num">$11.32</td>
+    <td class="num">$21.32</td>
+    <td class="num negative" style="font-weight:700;">−$61.32</td>
+    <td class="num">26.6% of premium</td>
+  </tr>
+  <tr style="font-weight: 600; background: rgba(248,81,73,0.06);">
+    <td colspan="2">Total (3 closed)</td>
+    <td class="num negative">−$140.00</td>
+    <td class="num">$29.00</td>
+    <td class="num">$35.10</td>
+    <td class="num highlight">$64.10</td>
+    <td class="num negative" style="font-weight:700;">−$204.10</td>
+    <td class="num">~28%</td>
+  </tr>
+</table>
+
+<div class="concern">
+  <h4>⚠ Fee Drag is Substantial</h4>
+  <p>
+    On winning TP trades, fees consume <strong>~15% of gross premium</strong>.<br>
+    On losing SL trades, fees add <strong>~28% on top of gross premium</strong>, amplifying losses by $20+ per trade.<br>
+    Across the 3 closed SL trades, fees added <strong>$64.10 to $140.00 in gross losses</strong>, making the actual drawdown <strong>$204.10</strong>.
+  </p>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<h2>10. Summary & Questions</h2>
+
+<div class="card">
+  <ol style="padding-left: 1.2rem; line-height: 2;">
+    <li><strong>Mark vs executable price gap:</strong> Mark was $116.54 but executable prices were $68–$90. Is the mark price model accurate for low-liquidity 1DTE puts at 03:00 UTC?</li>
+    <li><strong>RFQ quotes below orderbook:</strong> 4 market makers consistently quoted $68 (−5.6% vs $72 book). Why are RFQ quotes worse than visible liquidity?</li>
+    <li><strong>Fees at 12.5% cap:</strong> All fills hit the premium fee cap. On a $90 premium, the $9 fee is significant (10% of premium received, 12.5% of notional).</li>
+    <li><strong>3 consecutive SL exits:</strong> Prior 3 trades all hit stop loss. The strategy is encountering persistent adverse conditions (BTC selling off, puts moving ITM).</li>
+    <li><strong>Today's trade is profitable:</strong> Mark has decayed from $116.54 to $35.87 (−69%). If TP fills at $9, net premium = $90 − $9 = $81 × 0.8 = $64.80 minus ~$10 fees.</li>
+  </ol>
+</div>
+
+<div class="footer">
+  <p>Generated by CoincallTrader v1.4.1 &nbsp;|&nbsp; Data source: Coincall API + production logs (journalctl) &nbsp;|&nbsp; Report time: 20 March 2026 ~08:20 UTC</p>
+</div>
+
+</div>
+</body>
+</html>

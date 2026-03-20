@@ -313,3 +313,104 @@ sudo systemctl status coincalltrader coincalltrader-deribit
 bash deployment/deploy.sh --status           # Coincall
 bash deployment/deploy-deribit.sh --status   # Deribit
 ```
+
+> **Note:** The per-exchange deployment (`deploy.sh` / `deploy-deribit.sh`) is
+> the **legacy** approach. For new deployments, use the **Slot Architecture**
+> below — it scales to any number of strategies on a single server with a
+> centralised hub dashboard.
+
+---
+
+## Slot Architecture (Recommended)
+
+The slot architecture replaces per-exchange deploy scripts with a single
+`deploy-slot.sh` that manages isolated strategy slots and a hub dashboard.
+
+### Architecture
+
+```
+┌─────────────────────┐                     ┌──────────────────────────────────┐
+│   Dev Machine (Mac)  │  deploy-slot.sh    │   VPS (Ubuntu 24.04)             │
+│                      │  ─────────────▶    │                                  │
+│  .deploy.slots.env   │                    │   /opt/ct/                       │
+│  .env.slot-01        │                    │   ├── slot-01/  (strategy A)     │
+│  .env.slot-02        │                    │   ├── slot-02/  (strategy B)     │
+│  .env.hub            │                    │   ├── slot-03/  (strategy C)     │
+│                      │                    │   └── hub/      (dashboard)      │
+└─────────────────────┘                    └──────────────────────────────────┘
+```
+
+Each slot is fully isolated: own `.env`, own venv, own systemd service, own logs.
+The hub dashboard auto-discovers slots and aggregates their data.
+
+### Configuration Files (Dev Machine, All Gitignored)
+
+| File | Purpose |
+|---|---|
+| `.deploy.slots.env` | SSH connection (`VPS_HOST`, `SSH_KEY`) |
+| `.env.slot-XX` | Per-slot config (exchange, credentials, strategy, port) |
+| `.env.hub` | Hub dashboard config (`HUB_PASSWORD`, `HUB_PORT`) |
+
+### Port Layout
+
+| Service | Port | Scope |
+|---|---|---|
+| Hub dashboard | `HUB_PORT` in `.env.hub` (e.g. 8070) | External (firewall) |
+| Slot control endpoints | `DASHBOARD_PORT` in `.env.slot-XX` (e.g. 8091, 8092) | Localhost only |
+
+### Slot .env Template
+
+```bash
+SLOT_NAME=My Strategy Name
+EXCHANGE=deribit              # or coincall
+TRADING_ENVIRONMENT=testnet   # or production
+DEPLOYMENT_TARGET=development # auto-patched to production on deploy
+
+DASHBOARD_MODE=control        # hub reads this; use 'full' for standalone UI
+DASHBOARD_PORT=8091           # unique per slot, localhost only
+
+# Exchange credentials
+DERIBIT_CLIENT_ID_TEST=...
+DERIBIT_CLIENT_SECRET_TEST=...
+
+# Telegram
+TELEGRAM_BOT_TOKEN=...
+TELEGRAM_CHAT_ID=...
+```
+
+### Deploy Commands
+
+```bash
+# One script, slot number as parameter:
+./deployment/deploy-slot.sh 01 --setup    # One-time: create dir, venv, systemd
+./deployment/deploy-slot.sh 01            # Deploy: stop → sync → deps → start
+./deployment/deploy-slot.sh 01 --logs     # Tail live logs
+./deployment/deploy-slot.sh 01 --status   # Service status
+./deployment/deploy-slot.sh 01 --restart  # Restart without redeploy
+./deployment/deploy-slot.sh 01 --clean    # Wipe logs/state, restart
+./deployment/deploy-slot.sh 01 --destroy  # Delete entire slot
+
+# Hub:
+./deployment/deploy-slot.sh hub --setup   # One-time: dir, venv, systemd, firewall
+./deployment/deploy-slot.sh hub           # Deploy hub code
+./deployment/deploy-slot.sh hub --logs    # Tail hub logs
+
+# Overview:
+./deployment/deploy-slot.sh status        # All slots + hub at a glance
+```
+
+### Server Files
+
+| File | Purpose |
+|---|---|
+| `deployment/deploy-slot.sh` | Single deploy script for all slots + hub |
+| `deployment/ct-slot@.service` | systemd template unit (slot-01, slot-02, ...) |
+| `deployment/ct-hub.service` | systemd unit for the hub dashboard |
+| `deployment/rsync-exclude-slot.txt` | Files excluded from slot sync |
+
+### Adding a New Strategy Slot
+
+1. Create `.env.slot-XX` with a unique `DASHBOARD_PORT`
+2. `./deployment/deploy-slot.sh XX --setup` (creates dir, venv, systemd)
+3. `./deployment/deploy-slot.sh XX` (deploys code + starts)
+4. Hub auto-discovers the new slot on next page load

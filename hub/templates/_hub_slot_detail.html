@@ -1,0 +1,281 @@
+<!-- Detailed slot view (used when drilling down into a slot) -->
+<div class="slot-card" style="grid-column: 1 / -1;">
+
+  <div class="slot-header">
+    <div>
+      <span class="slot-title">{{ slot.name }}</span>
+      <span class="slot-id">#{{ slot.id }}</span>
+      {% if account_id %}
+        <span class="slot-acct-id">{{ account_id }}</span>
+      {% endif %}
+    </div>
+    <div class="slot-badges">
+      {% if live %}
+        <span class="badge badge-online">Online</span>
+      {% else %}
+        <span class="badge badge-offline">Offline</span>
+      {% endif %}
+      {% if slot.exchange %}
+        <span class="badge badge-exchange">{{ slot.exchange }}</span>
+      {% endif %}
+    </div>
+  </div>
+
+  {% if live and live.account %}
+  <div class="metrics" style="margin-bottom: 0.8rem;">
+    <div class="metric">
+      <label>Equity</label>
+      <value>${{ "%.2f"|format(live.account.equity) }}</value>
+    </div>
+    <div class="metric">
+      <label>Available Margin</label>
+      <value>${{ "%.2f"|format(live.account.available_margin) }}</value>
+    </div>
+    <div class="metric">
+      <label>Margin Used</label>
+      <value>{{ "%.1f"|format(live.account.margin_utilization) }}%</value>
+    </div>
+    <div class="metric">
+      <label>UPnL</label>
+      <value class="{{ 'positive' if live.account.unrealized_pnl >= 0 else 'negative' }}">
+        ${{ "%+.2f"|format(live.account.unrealized_pnl) }}
+      </value>
+    </div>
+    <div class="metric">
+      <label>Net Δ</label>
+      <value>{{ "%+.4f"|format(live.account.net_delta) }}</value>
+    </div>
+    <div class="metric">
+      <label>Net Θ</label>
+      <value>{{ "%+.4f"|format(live.account.net_theta) }}</value>
+    </div>
+    <div class="metric">
+      <label>Positions</label>
+      <value>{{ positions|length }}</value>
+    </div>
+    <div class="metric">
+      <label>Open Orders</label>
+      <value>{{ open_orders|length }}</value>
+    </div>
+  </div>
+  {% elif live %}
+  <p class="muted">Waiting for first account snapshot...</p>
+  {% else %}
+  <p class="muted">Slot is offline</p>
+  {% endif %}
+
+  <!-- Health panel -->
+  {% if health %}
+  <div class="detail-health-panel">
+    <span style="color: #8b949e; font-size: 0.75rem; text-transform: uppercase;">Health</span>
+    <div class="health-metrics">
+      <span>⏱ Uptime: {{ health.uptime_secs // 86400 }}d {{ (health.uptime_secs % 86400) // 3600 }}h {{ (health.uptime_secs % 3600) // 60 }}m</span>
+      {% if health.last_snapshot_age_secs is not none %}
+        <span>Last Snapshot: {{ "%.0f"|format(health.last_snapshot_age_secs) }}s ago
+          {% if health.last_snapshot_age_secs > 60 %}
+            <span class="badge badge-warn">Stale</span>
+          {% endif %}
+        </span>
+      {% endif %}
+      {% if health.margin_warning %}
+        <span class="negative">⚠ HIGH MARGIN UTILIZATION</span>
+      {% endif %}
+      {% if health.low_equity_warning %}
+        <span class="negative">⚠ LOW EQUITY</span>
+      {% endif %}
+    </div>
+  </div>
+  {% endif %}
+
+  <!-- Strategies -->
+  {% if live and live.strategies %}
+  <div style="margin-bottom: 0.8rem;">
+    <span style="color: #8b949e; font-size: 0.75rem; text-transform: uppercase;">Strategies</span>
+    {% for strat in live.strategies %}
+    <div class="strat-row">
+      <div>
+        <span class="strat-name">{{ strat.name }}</span>
+        <span class="strat-stats">
+          Active: {{ strat.active_trades }}/{{ strat.max_trades }}
+          {% if strat.stats.total > 0 %}
+            · Total: {{ strat.stats.total }}
+            · W/L: {{ strat.stats.wins }}/{{ strat.stats.losses }}
+            · PnL: <span class="{{ 'positive' if strat.stats.total_pnl >= 0 else 'negative' }}">
+                     {{ "%+.4f"|format(strat.stats.total_pnl) }}
+                   </span>
+          {% endif %}
+          {% if strat.stats.today_trades > 0 %}
+            · Today: {{ strat.stats.today_trades }}
+              ({{ "%+.4f"|format(strat.stats.today_pnl) }})
+          {% endif %}
+        </span>
+      </div>
+      {% if strat.enabled %}
+        <span class="badge badge-running">Running</span>
+      {% elif strat.active_trades > 0 %}
+        <span class="badge badge-paused">Paused</span>
+      {% else %}
+        <span class="badge badge-stopped">Stopped</span>
+      {% endif %}
+    </div>
+    {% endfor %}
+  </div>
+  {% endif %}
+
+  <!-- Open positions -->
+  {% if positions %}
+  <div style="margin-bottom: 0.8rem;">
+    <span style="color: #8b949e; font-size: 0.75rem; text-transform: uppercase;">
+      Open Positions ({{ positions|length }})
+    </span>
+    <table style="margin-top: 0.3rem;">
+      <thead>
+        <tr>
+          <th>Symbol</th>
+          <th>Side</th>
+          <th>Qty</th>
+          <th>Entry</th>
+          <th>Mark</th>
+          <th>UPnL</th>
+          <th>Δ</th>
+          <th>Θ</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for p in positions %}
+        <tr>
+          <td>{{ p.symbol }}</td>
+          <td class="{{ 'positive' if p.side == 'long' else 'negative' }}">{{ p.side }}</td>
+          <td>{{ p.qty }}</td>
+          <td>${{ "%.2f"|format(p.entry_price) }}</td>
+          <td>${{ "%.2f"|format(p.mark_price) }}</td>
+          <td class="{{ 'positive' if p.unrealized_pnl >= 0 else 'negative' }}">
+            ${{ "%+.2f"|format(p.unrealized_pnl) }}
+          </td>
+          <td>{{ "%+.4f"|format(p.delta) }}</td>
+          <td>{{ "%+.4f"|format(p.theta) }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+
+  <!-- Open orders -->
+  {% if open_orders %}
+  <div style="margin-bottom: 0.8rem;">
+    <span style="color: #8b949e; font-size: 0.75rem; text-transform: uppercase;">
+      Open Orders ({{ open_orders|length }})
+    </span>
+    <table style="margin-top: 0.3rem;">
+      <thead>
+        <tr>
+          <th>Symbol</th>
+          <th>Side</th>
+          <th>Qty</th>
+          <th>Price</th>
+          <th>Filled</th>
+          <th>Status</th>
+          <th>Age</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for o in open_orders %}
+        <tr>
+          <td>{{ o.symbol }}</td>
+          <td>{{ o.side }}</td>
+          <td>{{ o.qty }}</td>
+          <td>${{ "%.2f"|format(o.price) }}</td>
+          <td>{{ o.filled_qty }}/{{ o.qty }}</td>
+          <td>{{ o.status }}</td>
+          <td>{{ ((now - o.placed_at) // 60)|int if o.placed_at else '?' }}m</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+
+  <!-- Active trades from snapshot -->
+  {% if trades %}
+  <div style="margin-bottom: 0.8rem;">
+    <span style="color: #8b949e; font-size: 0.75rem; text-transform: uppercase;">
+      Active Trades ({{ trades|length }})
+    </span>
+    <table style="margin-top: 0.3rem;">
+      <thead>
+        <tr>
+          <th>ID</th>
+          <th>Strategy</th>
+          <th>State</th>
+          <th>Legs</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for t in trades %}
+        <tr>
+          <td>{{ t.get('id', '?')[:12] }}</td>
+          <td>{{ t.get('strategy_id', '?') }}</td>
+          <td>{{ t.get('state', '?') }}</td>
+          <td>{{ t.get('legs', [])|length }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+
+  <!-- Trade history -->
+  {% if history %}
+  <div>
+    <span style="color: #8b949e; font-size: 0.75rem; text-transform: uppercase;">
+      Trade History (last {{ history|length }})
+    </span>
+    <table style="margin-top: 0.3rem;">
+      <thead>
+        <tr>
+          <th>Strategy</th>
+          <th>PnL</th>
+          <th>Entry Cost</th>
+          <th>Hold (min)</th>
+          <th>Closed At</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for h in history|reverse %}
+        <tr>
+          <td>{{ h.get('strategy_id', '?') }}</td>
+          <td class="{{ 'positive' if h.get('pnl', 0) >= 0 else 'negative' }}">
+            {{ "%+.4f"|format(h.get('pnl', 0)) }}
+          </td>
+          <td>{{ "%.4f"|format(h.get('entry_cost', 0)) }}</td>
+          <td>{{ h.get('hold_minutes', '?') }}</td>
+          <td>{{ h.get('closed_at', '?')[:19] }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+
+  <!-- Controls -->
+  {% if live %}
+  <div class="slot-controls">
+    <button class="btn btn-green"
+            hx-post="/api/slot/{{ slot.id }}/resume"
+            hx-swap="none">Resume All</button>
+    <button class="btn"
+            hx-post="/api/slot/{{ slot.id }}/pause"
+            hx-swap="none">Pause All</button>
+    <button class="btn btn-red"
+            hx-post="/api/slot/{{ slot.id }}/stop"
+            hx-swap="none"
+            hx-confirm="Stop all strategies in {{ slot.name }}?">Stop All</button>
+    <button class="btn btn-red"
+            hx-post="/api/slot/{{ slot.id }}/kill"
+            hx-swap="none"
+            hx-confirm="KILL SWITCH: Close ALL positions in {{ slot.name }}?">Kill Switch</button>
+  </div>
+  {% endif %}
+
+</div>

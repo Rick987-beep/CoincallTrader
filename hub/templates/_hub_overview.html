@@ -1,0 +1,213 @@
+<!-- ── Summary Bar ────────────────────────────────────────────────── -->
+{% set total_equity = slots | selectattr('account') | map(attribute='account.equity') | sum %}
+{% set total_upnl = slots | selectattr('account') | map(attribute='account.unrealized_pnl') | sum %}
+{% set online_count = slots | selectattr('online') | list | length %}
+{% set total_active = slots | map(attribute='active_trades') | sum %}
+{% set total_positions = slots | map(attribute='positions') | map('length') | sum %}
+{% set total_orders = slots | map(attribute='open_orders') | map('length') | sum %}
+
+<div class="summary-bar">
+  <div class="summary-item">
+    <label>Slots</label>
+    <value>{{ online_count }}/{{ slots|length }}</value>
+  </div>
+  <div class="summary-item">
+    <label>Total Equity</label>
+    <value>${{ "%.2f"|format(total_equity) }}</value>
+  </div>
+  <div class="summary-item">
+    <label>Total UPnL</label>
+    <value class="{{ 'positive' if total_upnl >= 0 else 'negative' }}">
+      ${{ "%+.2f"|format(total_upnl) }}
+    </value>
+  </div>
+  <div class="summary-item">
+    <label>Active Trades</label>
+    <value>{{ total_active }}</value>
+  </div>
+  <div class="summary-item">
+    <label>Positions</label>
+    <value>{{ total_positions }}</value>
+  </div>
+  <div class="summary-item">
+    <label>Open Orders</label>
+    <value>{{ total_orders }}</value>
+  </div>
+</div>
+
+<!-- ── Slot Cards ────────────────────────────────────────────────── -->
+<div class="slot-grid">
+  {% for s in slots %}
+  <div class="slot-card {{ '' if s.online else 'offline' }}">
+
+    <!-- Header -->
+    <div class="slot-header">
+      <div>
+        <span class="slot-title">{{ s.name }}</span>
+        <span class="slot-id">#{{ s.id }}</span>
+        {% if s.account_id %}
+          <span class="slot-acct-id">{{ s.account_id }}</span>
+        {% endif %}
+      </div>
+      <div class="slot-badges">
+        {% if s.online %}
+          <span class="badge badge-online">Online</span>
+        {% else %}
+          <span class="badge badge-offline">Offline</span>
+        {% endif %}
+        {% if s.exchange %}
+          <span class="badge badge-exchange">{{ s.exchange }}</span>
+        {% endif %}
+        {% if s.health and s.health.margin_warning %}
+          <span class="badge badge-warn">Margin!</span>
+        {% endif %}
+      </div>
+    </div>
+
+    {% if s.online and s.account %}
+    <!-- Account metrics -->
+    <div class="metrics">
+      <div class="metric">
+        <label>Equity</label>
+        <value>${{ "%.2f"|format(s.account.equity) }}</value>
+      </div>
+      <div class="metric">
+        <label>Margin</label>
+        <value>{{ "%.1f"|format(s.account.margin_utilization) }}%</value>
+      </div>
+      <div class="metric">
+        <label>UPnL</label>
+        <value class="{{ 'positive' if s.account.unrealized_pnl >= 0 else 'negative' }}">
+          ${{ "%+.2f"|format(s.account.unrealized_pnl) }}
+        </value>
+      </div>
+      <div class="metric">
+        <label>Δ</label>
+        <value>{{ "%+.4f"|format(s.account.net_delta) }}</value>
+      </div>
+      <div class="metric">
+        <label>Pos</label>
+        <value>{{ s.positions|length }}</value>
+      </div>
+      <div class="metric">
+        <label>Orders</label>
+        <value>{{ s.open_orders|length }}</value>
+      </div>
+    </div>
+
+    <!-- Health bar -->
+    {% if s.health %}
+    <div class="health-bar">
+      <span>⏱ {{ s.health.uptime_secs // 3600 }}h {{ (s.health.uptime_secs % 3600) // 60 }}m</span>
+      {% if s.health.last_snapshot_age_secs is not none %}
+        <span>Snap {{ "%.0f"|format(s.health.last_snapshot_age_secs) }}s ago</span>
+      {% endif %}
+    </div>
+    {% endif %}
+
+    <!-- Compact positions list -->
+    {% if s.positions %}
+    <div class="compact-positions">
+      {% for p in s.positions[:4] %}
+      <div class="compact-pos-row">
+        <span class="pos-symbol">{{ p.symbol }}</span>
+        <span class="pos-side {{ 'positive' if p.side == 'long' else 'negative' }}">{{ p.side }}</span>
+        <span>{{ p.qty }}</span>
+        <span class="{{ 'positive' if p.unrealized_pnl >= 0 else 'negative' }}">
+          ${{ "%+.2f"|format(p.unrealized_pnl) }}
+        </span>
+      </div>
+      {% endfor %}
+      {% if s.positions|length > 4 %}
+      <div class="compact-pos-row muted">+{{ s.positions|length - 4 }} more</div>
+      {% endif %}
+    </div>
+    {% endif %}
+
+    {% elif s.online %}
+    <p class="muted" style="margin-bottom: 0.5rem;">Waiting for first snapshot...</p>
+    {% else %}
+    <p class="muted" style="margin-bottom: 0.5rem;">Slot is offline or not responding</p>
+    {% endif %}
+
+    <!-- Strategies -->
+    {% for strat in s.strategies %}
+    <div class="strat-row">
+      <div>
+        <span class="strat-name">{{ strat.name }}</span>
+        <span class="strat-stats">
+          {{ strat.active_trades }}/{{ strat.max_trades }}
+          {% if strat.stats.total > 0 %}
+            · W/L {{ strat.stats.wins }}/{{ strat.stats.losses }}
+            · <span class="{{ 'positive' if strat.stats.total_pnl >= 0 else 'negative' }}">
+                {{ "%+.4f"|format(strat.stats.total_pnl) }}
+              </span>
+          {% endif %}
+        </span>
+      </div>
+      {% if strat.enabled %}
+        <span class="badge badge-running">Running</span>
+      {% elif strat.active_trades > 0 %}
+        <span class="badge badge-paused">Paused</span>
+      {% else %}
+        <span class="badge badge-stopped">Stopped</span>
+      {% endif %}
+    </div>
+    {% endfor %}
+
+    {% if not s.strategies and s.online %}
+    <p class="muted" style="font-size: 0.78rem;">No strategies reported</p>
+    {% endif %}
+
+    <!-- Controls -->
+    {% if s.online %}
+    <div class="slot-controls">
+      <button class="btn btn-green"
+              hx-post="/api/slot/{{ s.id }}/resume"
+              hx-swap="none">Resume</button>
+      <button class="btn"
+              hx-post="/api/slot/{{ s.id }}/pause"
+              hx-swap="none">Pause</button>
+      <button class="btn btn-red"
+              hx-post="/api/slot/{{ s.id }}/stop"
+              hx-swap="none"
+              hx-confirm="Stop all strategies in slot {{ s.id }} ({{ s.name }})?">Stop</button>
+      <button class="btn btn-red"
+              hx-post="/api/slot/{{ s.id }}/kill"
+              hx-swap="none"
+              hx-confirm="KILL SWITCH: Close ALL positions in slot {{ s.id }} ({{ s.name }})?">Kill</button>
+    </div>
+    {% endif %}
+
+    <!-- Recent history -->
+    {% if s.recent_history %}
+    <div style="margin-top: 0.5rem; padding-top: 0.4rem; border-top: 1px solid #21262d;">
+      <span style="color: #8b949e; font-size: 0.7rem; text-transform: uppercase;">Recent</span>
+      {% for h in s.recent_history[-3:] %}
+      <div style="font-size: 0.75rem; color: #8b949e; margin-top: 0.15rem;">
+        {{ h.get('strategy_id', '?') }}
+        {% if h.get('pnl') is not none %}
+          <span class="{{ 'positive' if h.pnl >= 0 else 'negative' }}">
+            {{ "%+.4f"|format(h.pnl) }}
+          </span>
+        {% endif %}
+        {% if h.get('closed_at') %}
+          <span class="muted">{{ h.closed_at[:16] }}</span>
+        {% endif %}
+      </div>
+      {% endfor %}
+    </div>
+    {% endif %}
+
+  </div>
+  {% endfor %}
+</div>
+
+{% if not slots %}
+<div class="slot-card">
+  <p class="muted">No slots found. Deploy a slot first:</p>
+  <p style="font-size: 0.8rem; margin-top: 0.3rem; color: #8b949e;">
+    <code>./deployment/deploy-slot.sh 01 --setup</code>
+  </p>
+</div>
+{% endif %}

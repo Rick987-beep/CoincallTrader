@@ -1,11 +1,8 @@
 # ===========================================================================
-# CoincallTrader — rsync Exclusion List
+# CoincallTrader — rsync Exclusions for Slot Deployments
 #
-# Files listed here are NOT synced to the VPS.  Everything else —
-# including .env — IS synced.  The deploy script patches
-# DEPLOYMENT_TARGET=production on the server after each sync.
-#
-# Used by: deployment/deploy.sh (passed via --exclude-from)
+# Used by deploy-slot.sh when syncing the trading app to a slot.
+# Similar to rsync-exclude.txt but also excludes the hub/ directory.
 # ===========================================================================
 
 # ── Python artifacts ────────────────────────────────────────────────────
@@ -20,21 +17,26 @@ __pycache__/
 .git/
 .gitignore
 
-# ── Local deploy config (SSH settings — not needed on VPS) ─────────────
+# ── Local deploy configs (not needed on VPS) ───────────────────────────
 .deploy.env
 .deploy.deribit.env
+.deploy.slots.env
+.env.slot-*
+.env.hub
 
-# ── Logs & runtime data (preserved on the VPS across deploys) ───────────
+# ── Logs & runtime data (preserved on VPS across deploys) ──────────────
 logs/
+
+# ── Hub dashboard (deployed separately) ────────────────────────────────
+hub/
 
 # ── Development-only directories ────────────────────────────────────────
 archive/
 analysis/
 docs/
 tests/
-hub/
 
-# ── Deployment scripts (already on dev machine, not needed on VPS) ──────
+# ── Deployment scripts (not needed inside slots) ───────────────────────
 deployment/
 
 # ── OS junk ─────────────────────────────────────────────────────────────

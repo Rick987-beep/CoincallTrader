@@ -1,0 +1,318 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CoincallTrader — Hub</title>
+  <script src="https://unpkg.com/htmx.org@2.0.4"></script>
+  <style>
+    /* ── Reset & Base ───────────────────────────────────────────────── */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: "SF Mono", "Fira Code", "Cascadia Code", monospace;
+      background: #0d1117; color: #c9d1d9; padding: 1rem 1.5rem;
+      font-size: 0.85rem; line-height: 1.5;
+    }
+    a { color: #58a6ff; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+
+    /* ── Header ─────────────────────────────────────────────────────── */
+    .header {
+      display: flex; justify-content: space-between; align-items: center;
+      border-bottom: 1px solid #30363d; padding-bottom: 0.75rem; margin-bottom: 1rem;
+    }
+    .header h1 { font-size: 1.1rem; color: #58a6ff; }
+    .header-right { display: flex; align-items: center; gap: 1rem; }
+    .hub-badge {
+      display: inline-block; padding: 0.15rem 0.6rem; border-radius: 12px;
+      font-size: 0.75rem; font-weight: 600; text-transform: uppercase;
+      background: #8957e533; color: #d2a8ff; border: 1px solid #8957e5;
+    }
+
+    /* ── Slot Cards ─────────────────────────────────────────────────── */
+    .slot-grid {
+      display: grid; grid-template-columns: repeat(auto-fill, minmax(380px, 1fr));
+      gap: 1rem; margin-bottom: 1rem;
+    }
+
+    .slot-card {
+      background: #161b22; border: 1px solid #30363d; border-radius: 6px;
+      padding: 0.8rem 1rem;
+    }
+    .slot-card.offline { opacity: 0.6; }
+
+    .slot-header {
+      display: flex; justify-content: space-between; align-items: center;
+      margin-bottom: 0.6rem; border-bottom: 1px solid #21262d;
+      padding-bottom: 0.4rem;
+    }
+    .slot-title { font-weight: 600; font-size: 0.95rem; }
+    .slot-id { color: #8b949e; font-size: 0.75rem; margin-left: 0.5rem; }
+
+    .badge {
+      display: inline-block; padding: 0.1rem 0.5rem; border-radius: 10px;
+      font-size: 0.7rem; font-weight: 600;
+    }
+    .badge-online { background: #23863633; color: #3fb950; border: 1px solid #238636; }
+    .badge-offline { background: #f8514933; color: #f85149; border: 1px solid #f85149; }
+    .badge-exchange {
+      background: #1f6feb22; color: #79c0ff; border: 1px solid #1f6feb;
+      margin-left: 0.3rem;
+    }
+
+    .slot-badges { display: flex; gap: 0.3rem; align-items: center; }
+
+    /* ── Metrics ─────────────────────────────────────────────────────── */
+    .metrics { display: flex; flex-wrap: wrap; gap: 0.4rem 1.2rem; margin-bottom: 0.5rem; }
+    .metric label { color: #8b949e; font-size: 0.7rem; display: block; }
+    .metric value { font-size: 0.9rem; font-weight: 600; }
+    .positive { color: #3fb950; }
+    .negative { color: #f85149; }
+    .muted { color: #484f58; font-style: italic; }
+
+    /* ── Strategy list inside slot ──────────────────────────────────── */
+    .strat-row {
+      display: flex; justify-content: space-between; align-items: center;
+      padding: 0.3rem 0; border-bottom: 1px solid #21262d11;
+      font-size: 0.8rem;
+    }
+    .strat-row:last-child { border-bottom: none; }
+    .strat-name { font-weight: 500; }
+    .strat-stats { color: #8b949e; }
+    .badge-running { background: #23863633; color: #3fb950; border: 1px solid #238636; }
+    .badge-paused { background: #d29922; color: #0d1117; }
+    .badge-stopped { background: #f8514933; color: #f85149; border: 1px solid #f85149; }
+
+    /* ── Controls ───────────────────────────────────────────────────── */
+    .slot-controls {
+      display: flex; gap: 0.4rem; margin-top: 0.5rem; padding-top: 0.5rem;
+      border-top: 1px solid #21262d;
+    }
+    .btn {
+      padding: 0.2rem 0.6rem; border: 1px solid #30363d; border-radius: 4px;
+      background: #21262d; color: #c9d1d9; font-size: 0.7rem; cursor: pointer;
+      font-family: inherit;
+    }
+    .btn:hover { background: #30363d; }
+    .btn-green { border-color: #238636; color: #3fb950; }
+    .btn-green:hover { background: #23863644; }
+    .btn-red { border-color: #f85149; color: #f85149; }
+    .btn-red:hover { background: #f8514922; }
+    .btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+    /* ── Summary bar ────────────────────────────────────────────────── */
+    .summary-bar {
+      background: #161b22; border: 1px solid #30363d; border-radius: 6px;
+      padding: 0.6rem 1rem; margin-bottom: 1rem;
+      display: flex; gap: 2rem; align-items: center; flex-wrap: wrap;
+    }
+    .summary-item label { color: #8b949e; font-size: 0.7rem; display: block; }
+    .summary-item value { font-size: 1rem; font-weight: 700; }
+
+    /* ── Kill switch ────────────────────────────────────────────────── */
+    .kill-section {
+      display: flex; align-items: center; gap: 1rem; flex-wrap: wrap;
+      padding: 0.6rem 1rem; border: 1px solid #f8514966;
+      border-radius: 6px; background: #f8514911;
+    }
+    .kill-select { background: #0d1117; color: #c9d1d9; border: 1px solid #30363d;
+                   border-radius: 4px; padding: 0.25rem 0.5rem; font-size: 0.8rem;
+                   font-family: inherit; }
+    .kill-btn {
+      padding: 0.3rem 0.8rem; background: #da3633; border: none; border-radius: 4px;
+      color: #fff; font-weight: 700; font-size: 0.8rem; cursor: pointer;
+      font-family: inherit;
+    }
+    .kill-btn:hover { background: #f85149; }
+    .kill-result { color: #f85149; font-weight: 600; font-size: 0.8rem; }
+
+    /* ── History ─────────────────────────────────────────────────────── */
+    table { width: 100%; border-collapse: collapse; font-size: 0.78rem; }
+    th { text-align: left; color: #8b949e; font-weight: 600; padding: 0.3rem 0.5rem;
+         border-bottom: 1px solid #21262d; }
+    td { padding: 0.3rem 0.5rem; border-bottom: 1px solid #161b2244; }
+    tr:hover td { background: #161b2288; }
+
+    /* ── Account ID ─────────────────────────────────────────────────── */
+    .slot-acct-id {
+      color: #8b949e; font-size: 0.7rem; margin-left: 0.5rem;
+      background: #21262d; padding: 0.1rem 0.4rem; border-radius: 3px;
+      font-family: monospace;
+    }
+
+    /* ── Health bar (compact, in overview cards) ─────────────────────── */
+    .health-bar {
+      display: flex; gap: 1rem; font-size: 0.7rem; color: #8b949e;
+      margin-bottom: 0.4rem; padding: 0.2rem 0;
+    }
+
+    /* ── Compact positions (overview cards) ──────────────────────────── */
+    .compact-positions {
+      margin-bottom: 0.4rem; padding-top: 0.3rem; border-top: 1px solid #21262d;
+    }
+    .compact-pos-row {
+      display: flex; gap: 0.6rem; font-size: 0.72rem; padding: 0.1rem 0;
+    }
+    .pos-symbol { color: #79c0ff; min-width: 140px; }
+    .pos-side { min-width: 40px; text-transform: uppercase; font-size: 0.65rem; font-weight: 600; }
+
+    /* ── Detail health panel ────────────────────────────────────────── */
+    .detail-health-panel {
+      background: #0d1117; border: 1px solid #21262d; border-radius: 4px;
+      padding: 0.5rem 0.8rem; margin-bottom: 0.8rem;
+    }
+    .health-metrics {
+      display: flex; gap: 1.5rem; flex-wrap: wrap; font-size: 0.78rem;
+      margin-top: 0.3rem;
+    }
+
+    /* ── Warning badge ──────────────────────────────────────────────── */
+    .badge-warn {
+      background: #d2992233; color: #d29922; border: 1px solid #d29922;
+    }
+
+    /* ── Tabbed log viewer ──────────────────────────────────────────── */
+    .log-viewer {
+      background: #161b22; border: 1px solid #30363d; border-radius: 6px;
+      margin-top: 1rem;
+    }
+    .log-tabs {
+      display: flex; border-bottom: 1px solid #30363d; overflow-x: auto;
+    }
+    .log-tab {
+      padding: 0.4rem 0.8rem; font-size: 0.75rem; cursor: pointer;
+      color: #8b949e; border: none; background: none; font-family: inherit;
+      border-bottom: 2px solid transparent; white-space: nowrap;
+    }
+    .log-tab:hover { color: #c9d1d9; background: #21262d; }
+    .log-tab.active { color: #58a6ff; border-bottom-color: #58a6ff; }
+    .log-pane {
+      height: 300px; overflow-y: auto; padding: 0.5rem 0.8rem;
+      font-size: 0.72rem; line-height: 1.6; white-space: pre-wrap;
+      word-break: break-all; color: #8b949e;
+    }
+    .log-pane .log-line { display: block; }
+    .log-pane .log-line:nth-child(even) { background: #0d111722; }
+  </style>
+</head>
+<body>
+
+  <!-- ── Header ──────────────────────────────────────────────────── -->
+  <div class="header">
+    <h1>CoincallTrader — Hub</h1>
+    <div class="header-right">
+      <span class="hub-badge">Hub</span>
+      <a href="/logout" style="font-size: 0.8rem;">Logout</a>
+    </div>
+  </div>
+
+  <!-- ── Overview (auto-refreshing) ──────────────────────────────── -->
+  <div id="overview"
+       hx-get="/api/overview" hx-trigger="load, every 5s" hx-swap="innerHTML">
+    <p class="muted">Loading...</p>
+  </div>
+
+  <!-- ── Tabbed Log Viewer ───────────────────────────────────────── -->
+  <div class="log-viewer" id="log-viewer">
+    <div class="log-tabs" id="log-tabs">
+      <span class="log-tab muted" style="cursor: default; font-style: italic;">
+        Logs — select a slot
+      </span>
+    </div>
+    <div class="log-pane" id="log-pane">
+      <span class="muted">Click a slot tab to view its logs.</span>
+    </div>
+  </div>
+
+  <script>
+    // ── Log tab management ──────────────────────────────────────────
+    (function() {
+      let activeSlot = null;
+      let logInterval = null;
+
+      function initLogTabs(slots) {
+        const tabsEl = document.getElementById('log-tabs');
+        tabsEl.innerHTML = '';
+        slots.forEach(function(s) {
+          const btn = document.createElement('button');
+          btn.className = 'log-tab';
+          btn.textContent = s.name + ' #' + s.id;
+          btn.dataset.slotId = s.id;
+          btn.onclick = function() { selectSlot(s.id, s.name); };
+          tabsEl.appendChild(btn);
+        });
+      }
+
+      function selectSlot(slotId, name) {
+        activeSlot = slotId;
+        // Update tab UI
+        document.querySelectorAll('.log-tab').forEach(function(t) {
+          t.classList.toggle('active', t.dataset.slotId === slotId);
+        });
+        // Fetch immediately, then poll
+        fetchLogs(slotId);
+        if (logInterval) clearInterval(logInterval);
+        logInterval = setInterval(function() { fetchLogs(slotId); }, 5000);
+      }
+
+      function fetchLogs(slotId) {
+        fetch('/api/slot/' + slotId + '/logs')
+          .then(function(r) { return r.json(); })
+          .then(function(data) {
+            const pane = document.getElementById('log-pane');
+            if (data.lines && data.lines.length > 0) {
+              pane.innerHTML = data.lines.map(function(l) {
+                return '<span class="log-line">' + escapeHtml(l) + '</span>';
+              }).join('');
+              pane.scrollTop = pane.scrollHeight;
+            } else {
+              pane.innerHTML = '<span class="muted">No log lines available.</span>';
+            }
+          })
+          .catch(function() {
+            document.getElementById('log-pane').innerHTML =
+              '<span class="muted">Failed to fetch logs.</span>';
+          });
+      }
+
+      function escapeHtml(s) {
+        var d = document.createElement('div');
+        d.appendChild(document.createTextNode(s));
+        return d.innerHTML;
+      }
+
+      // Listen for htmx overview loads to (re)build log tabs
+      document.body.addEventListener('htmx:afterSwap', function(evt) {
+        if (evt.detail.target.id !== 'overview') return;
+        // Extract slot info from the rendered cards
+        var cards = document.querySelectorAll('.slot-card');
+        var slots = [];
+        cards.forEach(function(c) {
+          var titleEl = c.querySelector('.slot-title');
+          var idEl = c.querySelector('.slot-id');
+          if (titleEl && idEl) {
+            var id = idEl.textContent.replace('#', '').trim();
+            var name = titleEl.textContent.trim();
+            var isOnline = !c.classList.contains('offline');
+            if (isOnline) slots.push({id: id, name: name});
+          }
+        });
+        initLogTabs(slots);
+        // Re-select active tab if still valid
+        if (activeSlot) {
+          var still = slots.some(function(s) { return s.id === activeSlot; });
+          if (still) {
+            document.querySelectorAll('.log-tab').forEach(function(t) {
+              t.classList.toggle('active', t.dataset.slotId === activeSlot);
+            });
+          } else {
+            activeSlot = null;
+            if (logInterval) { clearInterval(logInterval); logInterval = null; }
+          }
+        }
+      });
+    })();
+  </script>
+
+</body>
+</html>

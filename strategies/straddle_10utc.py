@@ -55,8 +55,8 @@ QTY = 0.1                           # BTC per leg
 DTE = "next"                        # Nearest expiry (next-day 08:00 UTC)
 
 # Scheduling — when to open and close (UTC)
-OPEN_HOUR = 10                      # Entry at 10:00 UTC
-CLOSE_HOUR = 19                     # Hard exit at 19:00 UTC (9h hold)
+OPEN_HOUR = 8                       # Entry window opens 08:00 UTC
+CLOSE_HOUR = 23                     # Hard exit at 23:00 UTC
 CLOSE_MINUTE = 0
 
 # Take-profit — BTC index excursion
@@ -295,7 +295,7 @@ def straddle_10utc() -> StrategyConfig:
         #   3. Sufficient margin available
         entry_conditions=[
             _weekday_only(),
-            time_window(OPEN_HOUR, OPEN_HOUR + 1),
+            time_window(OPEN_HOUR, CLOSE_HOUR),
             min_available_margin_pct(MIN_MARGIN_PCT),
         ],
 

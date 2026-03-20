@@ -70,6 +70,11 @@ Thumbs.db
 # Deployment secrets (VPS connection details)
 .deploy.env
 .deploy.deribit.env
+.deploy.slots.env
+
+# Slot & hub env files (per-slot API keys/config)
+.env.slot-*
+.env.hub
 
 # Project specific
 archive/

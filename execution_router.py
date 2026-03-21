@@ -164,12 +164,16 @@ class ExecutionRouter:
         # When phased, metadata timeout overrides rfq_params (which is for close).
         if trade.metadata.get("rfq_phased"):
             phased_timeout = trade.metadata.get("rfq_timeout_seconds", rfq_timeout)
+            # Support callable gate: strategy can compute improvement % dynamically
+            min_improve = trade.metadata.get("rfq_min_book_improvement_pct", 2.2)
+            if callable(min_improve):
+                min_improve = min_improve(trade)
             result: RFQResult = self._rfq_executor.execute_phased(
                 legs=rfq_legs,
                 action=trade.rfq_action,
                 timeout_seconds=phased_timeout,
                 initial_wait_seconds=trade.metadata.get("rfq_initial_wait_seconds", 30),
-                min_book_improvement_pct=trade.metadata.get("rfq_min_book_improvement_pct", 2.2),
+                min_book_improvement_pct=min_improve,
                 relax_after_seconds=trade.metadata.get("rfq_relax_after_seconds", 300),
             )
         else:

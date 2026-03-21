@@ -77,10 +77,8 @@ STRATEGIES = [
     # atm_straddle,
     # atm_straddle_index_move,
     # blueprint_strangle,
-    # daily_put_sell,
-    # smoke_test_strangle,
-    # prod_test_put,
-    straddle_10utc,
+    daily_put_sell,
+    # straddle_10utc,
 ]
 
 # =============================================================================

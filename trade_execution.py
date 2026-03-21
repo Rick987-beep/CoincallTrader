@@ -150,10 +150,18 @@ class ExecutionPhase:
             "mid"        — (bid + ask) / 2
             "top_of_book" — best ask for buys, best bid for sells (no buffer)
             "mark"       — orderbook mark price (falls back to mid if unavailable)
+            "fair"       — computed fair price (mark if between bid/ask, else mid).
+                           Use fair_aggression to interpolate toward the aggressive
+                           side: 0.0 = fair, 1.0 = top_of_book.  For sells:
+                           price = fair - aggression * (fair - bid).  For buys:
+                           price = fair + aggression * (ask - fair).  When ask is
+                           missing (buy side, SL close), escalates using mark.
         duration_seconds: How long to stay in this phase before advancing.
             Must be ≥ 10 (one polling tick).
         buffer_pct: % buffer applied when pricing="aggressive" (default 2.0).
             Ignored by other pricing modes.
+        fair_aggression: Interpolation factor for pricing="fair" (default 0.0).
+            0.0 = at fair price, 1.0 = at top_of_book.  Ignored by other modes.
         reprice_interval: Seconds between cancel-and-requote within this phase
             (default 30.0).  Set to a value > duration_seconds to never reprice
             within the phase (place once, wait for fill or phase timeout).
@@ -161,10 +169,11 @@ class ExecutionPhase:
     pricing: str = "aggressive"
     duration_seconds: float = 30.0
     buffer_pct: float = 2.0
+    fair_aggression: float = 0.0
     reprice_interval: float = 30.0
 
     def __post_init__(self):
-        allowed = {"aggressive", "mid", "top_of_book", "mark", "passive"}
+        allowed = {"aggressive", "mid", "top_of_book", "mark", "passive", "fair"}
         if self.pricing not in allowed:
             raise ValueError(f"Unknown pricing '{self.pricing}', must be one of {allowed}")
         if self.duration_seconds < 10:
@@ -705,6 +714,37 @@ class LimitFillManager:
                 # Fall back to mid if mark unavailable
                 if best_bid is not None and best_ask is not None:
                     return (best_bid + best_ask) / 2
+
+            elif phase.pricing == "fair":
+                # Fair price: mark if between bid/ask, else mid.
+                # fair_aggression interpolates toward the aggressive side:
+                #   SELL: fair → bid  |  BUY: fair → ask
+                mark = float(ob.get('mark', 0)) or float(ob.get('_mark_btc', 0))
+
+                if best_bid is not None and best_ask is not None:
+                    if best_bid <= mark <= best_ask:
+                        fair = mark
+                    else:
+                        fair = (best_bid + best_ask) / 2
+                elif best_bid is not None:
+                    fair = max(mark, best_bid) if mark > 0 else best_bid
+                elif mark > 0:
+                    fair = mark
+                else:
+                    return None
+
+                a = phase.fair_aggression
+                if side == "sell":
+                    spread = fair - best_bid if best_bid is not None else 0
+                    return fair - a * spread
+                else:  # buy
+                    if best_ask is not None:
+                        spread = best_ask - fair
+                        return fair + a * spread
+                    elif mark > 0:
+                        # No ask: escalate using mark (SL damage-control)
+                        return mark * (1.0 + a * 0.2)
+                    return fair
 
             return None
         except Exception as e:

@@ -18,8 +18,6 @@ __pycache__/
 .gitignore
 
 # ── Local deploy configs (not needed on VPS) ───────────────────────────
-.deploy.env
-.deploy.deribit.env
 .deploy.slots.env
 .env.slot-*
 .env.hub

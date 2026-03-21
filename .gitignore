@@ -78,3 +78,6 @@ Thumbs.db
 archive/
 *.db
 *.sqlite3
+
+# Large data files (tardis.dev downloads, parquet extracts)
+analysis/tardis_options/data/

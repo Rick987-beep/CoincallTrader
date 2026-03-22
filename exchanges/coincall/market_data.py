@@ -20,5 +20,4 @@ class CoincallMarketDataAdapter(ExchangeMarketData):
         return self._inner.get_option_details(symbol)
 
     def get_option_orderbook(self, symbol):
-        from market_data import get_option_orderbook
-        return get_option_orderbook(symbol)
+        return self._inner.get_option_orderbook(symbol)

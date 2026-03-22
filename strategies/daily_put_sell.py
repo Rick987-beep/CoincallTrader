@@ -245,9 +245,16 @@ def _fair_price_sl():
         if triggered:
             loss_pct = (fp['fair'] - float(leg.fill_price)) / float(leg.fill_price) * 100
             logger.info(
-                f"[{trade.id}] {label} triggered: fair=${fp['fair']:.2f} "
+                f"[{trade.id}] {label} TRIGGERED: fair=${fp['fair']:.2f} "
                 f">= threshold=${sl_threshold:.2f} "
                 f"(fill=${leg.fill_price:.2f}, loss={loss_pct:.1f}%)"
+            )
+            logger.info(
+                f"[{trade.id}] SL prices: "
+                f"bid=${fp['bid'] or 0:.2f}  ask=${fp['ask'] or 0:.2f}  "
+                f"mid=${((fp['bid'] or 0) + (fp['ask'] or 0)) / 2:.2f}  "
+                f"fair=${fp['fair']:.2f}  mark=${fp['mark']:.2f}  "
+                f"fairspread=${fp['fairspread']:.2f}"
             )
 
             # Configure phased limit close (buy-to-close, no RFQ)
@@ -319,10 +326,20 @@ def _tp_filled_exit():
             return False
 
         # TP order filled — finalize the trade directly
+        leg = trade.open_legs[0] if trade.open_legs else None
+        fp = compute_fair_price(leg.symbol) if leg else None
         logger.info(
             f"[DailyPutSell] TP order {tp_order_id} FILLED — "
             f"finalizing trade {trade.id}"
         )
+        if fp and leg:
+            logger.info(
+                f"[DailyPutSell] TP fill prices: "
+                f"bid=${fp['bid'] or 0:.2f}  ask=${fp['ask'] or 0:.2f}  "
+                f"fair=${fp['fair']:.2f}  mark=${fp['mark']:.2f}  "
+                f"fill=${record.avg_fill_price or 0:.2f}  "
+                f"entry=${leg.fill_price:.2f}"
+            )
         trade.metadata["tp_finalized"] = True
 
         # Populate close leg with fill data
@@ -492,42 +509,62 @@ def _on_trade_opened(trade, account) -> None:
         f"@ ${premium:.4f}"
     )
 
+    # Log detailed pricing snapshot at entry
+    if leg:
+        fp = compute_fair_price(leg.symbol)
+        if fp:
+            logger.info(
+                f"[DailyPutSell] Entry prices: "
+                f"bid=${fp['bid'] or 0:.2f}  ask=${fp['ask'] or 0:.2f}  "
+                f"mid=${((fp['bid'] or 0) + (fp['ask'] or 0)) / 2:.2f}  "
+                f"fair=${fp['fair']:.2f}  mark=${fp['mark']:.2f}  "
+                f"fairspread=${fp['fairspread']:.2f}"
+            )
+
     # Place TP limit order
     _place_tp_limit_order(trade)
 
     # Telegram notification
     ts = datetime.now(timezone.utc).strftime("%H:%M UTC")
-    entry_cost = trade.total_entry_cost()
-    leg_text = (
-        f"  SELL {leg.filled_qty}× {leg.symbol} @ ${premium:.4f}"
-        if leg else "  (no leg info)"
-    )
-    idx_text = f"BTC: ${index_price:,.0f}" if index_price else "BTC: N/A"
-    fair_text = ""
+
+    # Execution mode: RFQ result message or "Limit"
+    exec_mode = "unknown"
+    if trade.rfq_result and trade.rfq_result.success:
+        exec_mode = trade.rfq_result.message or "RFQ"
+    elif trade.rfq_result and not trade.rfq_result.success:
+        exec_mode = f"Limit (RFQ failed: {trade.rfq_result.message})"
+    else:
+        exec_mode = "Limit"
+
+    # Opening duration
+    duration_s = int(trade.opened_at - trade.created_at) if trade.opened_at and trade.created_at else 0
+
+    # Price block
+    bid = fp['bid'] or 0 if fp else 0
+    ask = fp['ask'] or 0 if fp else 0
+    mid = (bid + ask) / 2 if (bid and ask) else 0
+
+    # Fill vs fair
+    fill_vs_fair = ""
     if fair_at_open and premium:
-        fair_text = (
-            f"Fair: ${fair_at_open:.4f}  |  "
-            f"SL threshold: ${sl_threshold:.4f}\n"
-            if sl_threshold else
-            f"Fair: ${fair_at_open:.4f}\n"
-        )
-    mark_text = ""
-    if mark_at_open and premium:
-        slip = (premium - mark_at_open) / mark_at_open * 100
-        mark_text = f"Mark: ${mark_at_open:.4f}  |  Fill vs mark: {slip:+.1f}%\n"
+        diff = premium - fair_at_open
+        diff_pct = diff / fair_at_open * 100
+        fill_vs_fair = f"Fill vs fair: ${premium:.2f} vs ${fair_at_open:.2f} ({diff_pct:+.1f}%)"
+
     try:
         get_notifier().send(
-            f"📉 <b>Daily Put Sell — Trade Opened</b>\n"
+            f"📉 <b>Daily Put Sell — Trade Opened</b>\n\n"
             f"Time: {ts}\n"
             f"ID: {trade.id}\n"
-            f"{leg_text}\n"
-            f"Premium received: ${abs(entry_cost):.4f}\n"
-            f"{fair_text}"
-            f"{mark_text}"
-            f"{idx_text}  |  SL: {STOP_LOSS_PCT}%  |  TP: {TP_CAPTURE_PCT*100:.0f}%\n"
-            f"Equity: ${account.equity:,.2f}\n"
-            f"Avail margin: ${account.available_margin:,.2f} "
-            f"({100 - account.margin_utilization:.1f}% free)"
+            f"SELL {leg.filled_qty}× {leg.symbol}\n\n"
+            f"Premium: <b>${premium:.2f}</b>\n"
+            f"Execution: {exec_mode}\n"
+            f"Duration: {duration_s}s\n\n"
+            f"Prices at open:\n"
+            f"  mark=${mark_at_open or 0:.2f}  mid=${mid:.2f}  fair=${fair_at_open or 0:.2f}\n"
+            f"  bid=${bid:.2f}  ask=${ask:.2f}\n"
+            f"{fill_vs_fair}\n\n"
+            f"BTC index: ${index_price:,.0f}" if index_price else "BTC index: N/A"
         )
     except Exception:
         pass
@@ -580,40 +617,74 @@ def _on_trade_closed(trade, account) -> None:
     # Telegram notification
     ts = datetime.now(timezone.utc).strftime("%H:%M UTC")
     emoji = "✅" if pnl >= 0 else "❌"
-    close_detail = ""
-    if trade.close_legs:
-        close_detail = "\n".join(
-            f"  BUY {leg.filled_qty}× {leg.symbol} @ ${leg.fill_price}"
-            for leg in trade.close_legs
-            if leg.fill_price is not None
+
+    # Trigger details
+    leg = trade.open_legs[0] if trade.open_legs else None
+    entry_price = float(leg.fill_price) if leg and leg.fill_price else 0
+    sl_threshold = trade.metadata.get("sl_threshold")
+    tp_price = trade.metadata.get("tp_price")
+
+    trigger_text = ""
+    if trade.metadata.get("tp_finalized"):
+        trigger_text = (
+            f"Trigger: <b>Take Profit</b>\n"
+            f"TP target: ${tp_price:.2f} ({TP_CAPTURE_PCT*100:.0f}% of ${entry_price:.2f} entry)"
+            if tp_price else "Trigger: <b>Take Profit</b>"
+        )
+    elif trade.metadata.get("sl_triggered"):
+        trigger_text = (
+            f"Trigger: <b>Stop Loss</b>\n"
+            f"SL threshold: ${sl_threshold:.2f} ({STOP_LOSS_PCT}% loss on ${entry_price:.2f} entry)"
+            if sl_threshold else "Trigger: <b>Stop Loss</b>"
+        )
+    elif hold_seconds > 82800:
+        trigger_text = "Trigger: <b>Expiry</b> (option expired worthless)"
+    else:
+        trigger_text = f"Trigger: <b>{exit_reason}</b>"
+
+    # Price snapshot at close
+    close_fill = None
+    close_symbol = None
+    if trade.close_legs and trade.close_legs[0].fill_price:
+        close_fill = float(trade.close_legs[0].fill_price)
+        close_symbol = trade.close_legs[0].symbol
+    elif leg:
+        close_symbol = leg.symbol
+
+    fp = compute_fair_price(close_symbol) if close_symbol else None
+    price_text = ""
+    if fp:
+        c_bid = fp['bid'] or 0
+        c_ask = fp['ask'] or 0
+        c_mid = (c_bid + c_ask) / 2 if (c_bid and c_ask) else 0
+        price_text = (
+            f"\nPrices at close:\n"
+            f"  mark=${fp['mark']:.2f}  mid=${c_mid:.2f}  fair=${fp['fair']:.2f}\n"
+            f"  bid=${c_bid:.2f}  ask=${c_ask:.2f}"
         )
 
-    # Mark price context for close notification
-    mark_close_text = ""
-    if trade.close_legs:
-        cl = trade.close_legs[0]
-        mark_open = trade.metadata.get(f"mark_at_open_{cl.symbol}")
-        mark_close = trade.metadata.get(f"mark_at_close_{cl.symbol}")
-        if mark_close and cl.fill_price:
-            slip = (cl.fill_price - mark_close) / mark_close * 100
-            mark_close_text = f"Close mark: ${mark_close:.4f}  |  Fill vs mark: {slip:+.1f}%\n"
-        if mark_open:
-            mark_close_text += f"Open mark: ${mark_open:.4f}\n"
+    # Fill vs fair at close
+    fill_vs_fair = ""
+    if close_fill and fp and fp['fair'] > 0:
+        diff = close_fill - fp['fair']
+        diff_pct = diff / fp['fair'] * 100
+        fill_vs_fair = f"\nFill vs fair: ${close_fill:.2f} vs ${fp['fair']:.2f} ({diff_pct:+.1f}%)"
+
+    # BTC index
+    close_index = get_btc_index_price(use_cache=False)
+    idx_text = f"BTC index: ${close_index:,.0f}" if close_index else "BTC index: N/A"
 
     try:
         get_notifier().send(
-            f"{emoji} <b>Daily Put Sell — Trade Closed</b>\n"
+            f"{emoji} <b>Daily Put Sell — Trade Closed</b>\n\n"
             f"Time: {ts}\n"
             f"ID: {trade.id}\n"
-            f"Exit: {exit_reason}\n"
-            f"PnL: <b>${pnl:+.4f}</b> ({roi:+.1f}%)\n"
+            f"{trigger_text}\n\n"
+            f"PnL: <b>${pnl:+.2f}</b> ({roi:+.1f}%)\n"
             f"Hold: {hold_seconds/60:.1f} min\n"
-            f"Entry premium: ${abs(entry_cost):.4f}\n"
-            f"{mark_close_text}"
-            f"{close_detail}\n"
-            f"Equity: ${account.equity:,.2f}\n"
-            f"Avail margin: ${account.available_margin:,.2f} "
-            f"({100 - account.margin_utilization:.1f}% free)"
+            f"{price_text}"
+            f"{fill_vs_fair}\n\n"
+            f"{idx_text}"
         )
     except Exception:
         pass

@@ -95,7 +95,7 @@ class HealthChecker:
             f"Uptime: {uptime_str}",
         ]
 
-        log_level = logging.DEBUG  # default: quiet unless problems detected
+        log_level = logging.INFO  # default: visible in production
 
         # Try to get account snapshot
         if self.account_snapshot_fn:

@@ -5,6 +5,49 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.0] - 2026-03-23
+
+### Slot Configuration System — One-File Deploy
+
+Replaces the manual workflow of editing `.env.slot-XX` files, uncommenting
+strategy imports in `main.py`, and remembering API key names. Now: edit a
+`.toml` file, run deploy.
+
+### Added
+- **`accounts.toml`** — Named account registry mapping friendly names
+  (`coincall-main`, `deribit-main`, etc.) to env var names. No secrets stored.
+- **`slots/` directory** — Per-slot TOML config files (`slot-01.toml`,
+  `slot-02.toml`). Each declares strategy, account, and parameter overrides.
+  Edit params here, then deploy.
+- **`slot_config.py`** — Reads a slot `.toml` + `accounts.toml` + `.env`,
+  generates a fully resolved `.env.slot-XX`. Supports `--dry` for preview.
+- **Dynamic strategy import** — `main.py` reads `SLOT_STRATEGY` env var and
+  imports the strategy module dynamically. No more editing `main.py` or
+  `strategies/__init__.py` to change which strategy runs.
+- **Env-overridable strategy params** — Strategy modules now read `PARAM_*`
+  env vars with `_p()` helper, falling back to hardcoded defaults. Allows
+  running the same strategy with different parameters on different slots.
+
+### Changed
+- **`deploy-slot.sh`** — `get_env_file()` now auto-generates `.env.slot-XX`
+  from `slots/slot-XX.toml` if the TOML exists, before rsync.
+- **`rsync-exclude-slot.txt`** — Excludes `slots/`, `accounts.toml`,
+  `slot_config.py` from VPS sync (local-only config tooling).
+- **`strategies/daily_put_sell.py`** — 19 params now overridable via env.
+- **`strategies/long_strangle_index_move.py`** — 8 params now overridable.
+- **`strategies/__init__.py`** — Removed imports of archived strategies
+  (`atm_straddle`, `straddle_10utc`).
+- **`main.py`** — Removed imports of archived strategies from dev fallback.
+- **`.env`** — Cleaned up: removed duplicate `PRODBIG` alias, obsolete
+  comments. Now clearly documented as secrets vault + dev defaults.
+- **`requirements.txt`** — Added `tomli` (TOML parser for Python 3.9).
+
+### Archived
+- `strategies/atm_straddle.py` → `archive/`
+- `strategies/straddle_10utc.py` → `archive/`
+
+---
+
 ## [1.5.0] - 2026-03-20
 
 ### Slot Architecture — Multi-Strategy Deployment

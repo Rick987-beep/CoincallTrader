@@ -9,6 +9,7 @@ Usage:
     python main.py
 """
 
+import importlib
 import json
 import logging
 import os
@@ -19,8 +20,6 @@ import time
 
 from strategy import build_context, StrategyRunner
 from trade_lifecycle import TradeLifecycle, TradeState
-from strategies import blueprint_strangle, atm_straddle, atm_straddle_index_move, daily_put_sell
-from strategies.straddle_10utc import straddle_10utc
 from persistence import TradeStatePersistence
 from health_check import HealthChecker
 from dashboard import start_dashboard
@@ -63,8 +62,8 @@ if not _DEV_MODE:
     for _name in ("__main__", "strategy", "trade_lifecycle", "trade_execution",
                   "rfq", "account_manager", "dashboard", "persistence",
                   "strategies.daily_put_sell", "strategies.atm_straddle",
-                  "strategies.blueprint_strangle", "order_manager",
-                  "ema_filter", "telegram_notifier", "health_check",
+                  "strategies.blueprint_strangle", "strategies.long_strangle_index_move",
+                  "order_manager", "ema_filter", "telegram_notifier", "health_check",
                   "execution_router"):
         logging.getLogger(_name).setLevel(logging.INFO)
 logger = logging.getLogger(__name__)
@@ -74,13 +73,27 @@ logger = logging.getLogger(__name__)
 # Active Strategies
 # =============================================================================
 
-STRATEGIES = [
-    # atm_straddle,
-    # atm_straddle_index_move,
-    # blueprint_strangle,
-    daily_put_sell,
-    # straddle_10utc,
-]
+# If SLOT_STRATEGY is set (via slot .toml config), import just that strategy.
+# Otherwise fall back to the manual list for dev/backward compat.
+_slot_strategy = os.environ.get("SLOT_STRATEGY")
+
+if _slot_strategy:
+    _mod = importlib.import_module(f"strategies.{_slot_strategy}")
+    # The module's factory function has the same name as the module
+    _factory = getattr(_mod, _slot_strategy)
+    STRATEGIES = [_factory]
+    logger.info(f"Strategy loaded from SLOT_STRATEGY: {_slot_strategy}")
+else:
+    # Dev mode: import manually and uncomment the one you want
+    from strategies import (blueprint_strangle, atm_straddle_index_move,
+                            daily_put_sell, long_strangle_index_move)
+
+    STRATEGIES = [
+        # atm_straddle_index_move,
+        # blueprint_strangle,
+        # daily_put_sell,
+        long_strangle_index_move,
+    ]
 
 # =============================================================================
 # Corruption Helpers

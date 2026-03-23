@@ -61,39 +61,46 @@ logger = logging.getLogger(__name__)
 
 
 # ─── Strategy Parameters ────────────────────────────────────────────────────
+# Overridable via PARAM_* env vars (set by slot .toml config at deploy time).
+# Defaults below match the current production values.
+
+import os as _os
+def _p(name, default, cast=float):
+    """Read PARAM_<NAME> from env, falling back to default."""
+    return cast(_os.getenv(f"PARAM_{name}", str(default)))
 
 # Structure
-QTY = 0.8                            # BTC per leg (~$68k notional)
-TARGET_DELTA = -0.10                 # OTM put delta target
-DTE = 1                              # 1 day to expiry
+QTY = _p("QTY", 0.8)                             # BTC per leg (~$68k notional)
+TARGET_DELTA = _p("TARGET_DELTA", -0.10)          # OTM put delta target
+DTE = _p("DTE", 1, int)                           # 1 day to expiry
 
 # Scheduling — UTC hours
-ENTRY_HOUR_START = 3                 # Open window: 03:00 UTC
-ENTRY_HOUR_END = 4                   # Close window: 04:00 UTC
+ENTRY_HOUR_START = _p("ENTRY_HOUR_START", 3, int) # Open window: 03:00 UTC
+ENTRY_HOUR_END = _p("ENTRY_HOUR_END", 4, int)     # Close window: 04:00 UTC
 
 # Risk
-MIN_MARGIN_PCT = 10                  # Require ≥10% available margin
-STOP_LOSS_PCT = 70                   # 70% loss of premium collected
-TP_CAPTURE_PCT = 0.90                # Buy back at 10% of fill price (90% profit)
+MIN_MARGIN_PCT = _p("MIN_MARGIN_PCT", 10, int)    # Require ≥10% available margin
+STOP_LOSS_PCT = _p("STOP_LOSS_PCT", 70, int)      # 70% loss of premium collected
+TP_CAPTURE_PCT = _p("TP_CAPTURE_PCT", 0.90)       # Buy back at 10% of fill price (90% profit)
 
 # RFQ open — phased execution
-RFQ_OPEN_TIMEOUT = 200               # 20s silent + 180s (3 min) gated window
-RFQ_INITIAL_WAIT = 20                # Collect quotes silently for 20s
-RFQ_SPREAD_FRACTION = 0.33           # Accept if quote ≥ bid + 33% of fairspread
+RFQ_OPEN_TIMEOUT = _p("RFQ_OPEN_TIMEOUT", 200, int)         # 20s silent + 180s (3 min) gated window
+RFQ_INITIAL_WAIT = _p("RFQ_INITIAL_WAIT", 20, int)          # Collect quotes silently for 20s
+RFQ_SPREAD_FRACTION = _p("RFQ_SPREAD_FRACTION", 0.33)       # Accept if quote ≥ bid + 33% of fairspread
 
 # Limit open fallback — phased after RFQ timeout
-LIMIT_OPEN_FAIR_SECONDS = 60         # Phase 2.1: quote at fair price
-LIMIT_OPEN_PARTIAL_SECONDS = 60      # Phase 2.2: quote at bid + 33% fairspread
-LIMIT_OPEN_BID_SECONDS = 60          # Phase 2.3: aggressive at bid
+LIMIT_OPEN_FAIR_SECONDS = _p("LIMIT_OPEN_FAIR_SECONDS", 60, int)       # Phase 2.1: quote at fair price
+LIMIT_OPEN_PARTIAL_SECONDS = _p("LIMIT_OPEN_PARTIAL_SECONDS", 60, int) # Phase 2.2: quote at bid + 33% fairspread
+LIMIT_OPEN_BID_SECONDS = _p("LIMIT_OPEN_BID_SECONDS", 60, int)         # Phase 2.3: aggressive at bid
 
 # SL close — phased limit buy-to-close (no RFQ)
-SL_CLOSE_FAIR_SECONDS = 15           # Buy at fair price
-SL_CLOSE_STEP_SECONDS = 15           # Step toward ask
-SL_CLOSE_AGG_SECONDS = 60            # Aggressive at ask
+SL_CLOSE_FAIR_SECONDS = _p("SL_CLOSE_FAIR_SECONDS", 15, int)   # Buy at fair price
+SL_CLOSE_STEP_SECONDS = _p("SL_CLOSE_STEP_SECONDS", 15, int)   # Step toward ask
+SL_CLOSE_AGG_SECONDS = _p("SL_CLOSE_AGG_SECONDS", 60, int)     # Aggressive at ask
 
 # Operational
-CHECK_INTERVAL = 15                  # Seconds between entry/exit evaluations
-MAX_CONCURRENT = 2                   # Allow 2 overlapping trades (expiry overlap)
+CHECK_INTERVAL = _p("CHECK_INTERVAL", 15, int)    # Seconds between entry/exit evaluations
+MAX_CONCURRENT = _p("MAX_CONCURRENT", 2, int)      # Allow 2 overlapping trades (expiry overlap)
 
 
 # ─── Module-level Context Reference ────────────────────────────────────────

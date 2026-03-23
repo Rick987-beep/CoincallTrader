@@ -1,0 +1,38 @@
+# ===========================================================================
+# CoincallTrader — Named Accounts
+#
+# Maps friendly account names to the env-var names that hold the actual
+# API credentials (in .env).  No secrets here — just pointers.
+#
+# Used by slot_config.py when generating .env.slot-XX files.
+# ===========================================================================
+
+[coincall-main]
+exchange = "coincall"
+environment = "production"
+api_key_env = "COINCALL_API_KEY_PROD"
+api_secret_env = "COINCALL_API_SECRET_PROD"
+
+[coincall-sub]
+exchange = "coincall"
+environment = "production"
+api_key_env = "COINCALL_API_KEY_PRODSUB"
+api_secret_env = "COINCALL_API_SECRET_PRODSUB"
+
+[deribit-main]
+exchange = "deribit"
+environment = "production"
+api_key_env = "DERIBIT_CLIENT_ID_PROD"
+api_secret_env = "DERIBIT_CLIENT_SECRET_PROD"
+
+[coincall-test]
+exchange = "coincall"
+environment = "testnet"
+api_key_env = "COINCALL_API_KEY_TEST"
+api_secret_env = "COINCALL_API_SECRET_TEST"
+
+[deribit-test]
+exchange = "deribit"
+environment = "testnet"
+api_key_env = "DERIBIT_CLIENT_ID_TEST"
+api_secret_env = "DERIBIT_CLIENT_SECRET_TEST"

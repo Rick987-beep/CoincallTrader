@@ -2,7 +2,7 @@
 import requests
 import json
 
-def test_auth(label, base_url, client_id, client_secret):
+def check_auth(label, base_url, client_id, client_secret):
     print(f"--- {label} ({base_url}) ---")
     try:
         resp = requests.post(
@@ -56,17 +56,18 @@ def test_auth(label, base_url, client_id, client_secret):
     print()
 
 
-# short string = client_id, long string = client_secret
-test_auth(
-    "TESTNET",
-    "https://test.deribit.com",
-    "CWlZBUXA",
-    "sVrL_Bdz-j8_mtLB-y4EdxPS-YGkqeMtLzh4Wi1sz2E",
-)
+if __name__ == "__main__":
+    # short string = client_id, long string = client_secret
+    check_auth(
+        "TESTNET",
+        "https://test.deribit.com",
+        "CWlZBUXA",
+        "sVrL_Bdz-j8_mtLB-y4EdxPS-YGkqeMtLzh4Wi1sz2E",
+    )
 
-test_auth(
-    "PRODUCTION",
-    "https://www.deribit.com",
-    "TV6tvw6J",
-    "NUDhggDLNwL9xj6N2_e-2dqP4jOrKnrBFRMVopK_IAM",
-)
+    check_auth(
+        "PRODUCTION",
+        "https://www.deribit.com",
+        "TV6tvw6J",
+        "NUDhggDLNwL9xj6N2_e-2dqP4jOrKnrBFRMVopK_IAM",
+    )

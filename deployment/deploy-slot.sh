@@ -93,9 +93,18 @@ validate_slot() {
 
 get_env_file() {
     local slot="$1"
+    local toml_file="$PROJECT_ROOT/slots/slot-$slot.toml"
     local env_file="$PROJECT_ROOT/.env.slot-$slot"
+
+    # If a slot .toml config exists, generate .env from it
+    if [[ -f "$toml_file" ]]; then
+        step "Generating .env.slot-$slot from slots/slot-$slot.toml"
+        python3 "$PROJECT_ROOT/slot_config.py" "$slot"
+        ok ".env.slot-$slot generated"
+    fi
+
     if [[ ! -f "$env_file" ]]; then
-        fail "Slot env file not found: .env.slot-$slot"
+        fail "Slot env file not found: .env.slot-$slot\nCreate slots/slot-$slot.toml or .env.slot-$slot manually"
     fi
     echo "$env_file"
 }

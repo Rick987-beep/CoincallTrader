@@ -1,0 +1,20 @@
+# ===========================================================================
+# Slot 02 — Long Strangle Index Move (Deribit)
+#
+# Edit params below, then deploy:
+#   ./deployment/deploy-slot.sh 02
+# ===========================================================================
+
+name = "Long Strangle Index Move"
+strategy = "long_strangle_index_move"
+account = "deribit-main"
+
+[params]
+qty = 0.1
+strike_offset_usd = 2000
+open_hour = 13
+close_hour = 19
+close_minute = 0
+move_distance_usd = 1500
+min_margin_pct = 20
+check_interval = 30

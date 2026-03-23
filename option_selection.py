@@ -326,6 +326,16 @@ def _select_by_strike_criteria(options_list, strike_criteria, market_data):
             logger.info(f"closestStrike: value=0 → using spot price ${target_strike:.0f} as ATM")
         return min(options_list, key=lambda x: abs(x['strike'] - target_strike))
 
+    elif criteria_type == 'spotOffset':
+        # USD offset from current spot: positive = OTM call side, negative = OTM put side
+        spot_price = market_data.get_index_price()
+        target_strike = spot_price + strike_criteria['value']
+        logger.info(
+            f"spotOffset: spot=${spot_price:.0f}, offset={strike_criteria['value']:+.0f} "
+            f"→ target=${target_strike:.0f}"
+        )
+        return min(options_list, key=lambda x: abs(x['strike'] - target_strike))
+
     elif criteria_type == 'delta':
         target_delta = strike_criteria['value']
         return min(options_list, key=lambda x: abs(x.get('delta', 0) - target_delta))

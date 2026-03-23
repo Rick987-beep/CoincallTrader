@@ -14,14 +14,16 @@ each sync.
 ## Architecture
 
 ```
-┌─────────────────────┐                     ┌──────────────────────────────────┐
-│   Dev Machine (Mac)  │  deploy-slot.sh    │   VPS (Ubuntu 24.04)             │
-│                      │  ─────────────▶    │                                  │
-│  .deploy.slots.env   │                    │   /opt/ct/                       │
-│  .env.slot-01        │                    │   ├── slot-01/  (strategy A)     │
-│  .env.slot-02        │                    │   ├── slot-02/  (strategy B)     │
-│  .env.hub            │                    │   └── hub/      (dashboard)      │
-└─────────────────────┘                    └──────────────────────────────────┘
+┌──────────────────────────┐                     ┌──────────────────────────────────┐
+│   Dev Machine (Mac)       │  deploy-slot.sh    │   VPS (Ubuntu 24.04)             │
+│                           │  ─────────────▶    │                                  │
+│  accounts.toml            │                    │   /opt/ct/                       │
+│  slots/slot-01.toml       │  auto-generates    │   ├── slot-01/  (strategy A)     │
+│  slots/slot-02.toml       │  .env.slot-XX      │   ├── slot-02/  (strategy B)     │
+│  .env  (secrets vault)    │  from .toml + .env │   └── hub/      (dashboard)      │
+│  .deploy.slots.env        │                    │                                  │
+│  .env.hub                 │                    │                                  │
+└──────────────────────────┘                    └──────────────────────────────────┘
 ```
 
 Each slot is fully isolated: own `.env`, own venv, own systemd service, own logs.
@@ -43,46 +45,62 @@ The hub dashboard auto-discovers slots and aggregates their data.
 
 ---
 
-## Configuration Files (Dev Machine, All Gitignored)
+## Configuration Files (Dev Machine)
 
-| File | Purpose |
-|---|---|
-| `.deploy.slots.env` | SSH connection (`VPS_HOST`, `SSH_KEY`) |
-| `.env.slot-XX` | Per-slot config (exchange, credentials, strategy, port) |
-| `.env.hub` | Hub dashboard config (`HUB_PASSWORD`, `HUB_PORT`) |
-| `.env` | Local development config (not deployed) |
+### Slot Config System (TOML-based)
+
+Slot configuration uses TOML files that are checked into git. Secrets stay in `.env`.
+
+| File | In Git? | Purpose |
+|---|---|---|
+| `accounts.toml` | ✓ | Named account registry (maps friendly names → env var prefixes) |
+| `slots/slot-XX.toml` | ✓ | Per-slot config: strategy, account, param overrides |
+| `slot_config.py` | ✓ | TOML → `.env.slot-XX` generator |
+| `.env` | ✗ | Secrets vault (API keys, tokens) — never deployed |
+| `.deploy.slots.env` | ✗ | SSH connection (`VPS_HOST`, `SSH_KEY`) |
+| `.env.slot-XX` | ✗ | Auto-generated from TOML + `.env` — deployed to server |
+| `.env.hub` | ✗ | Hub dashboard config (`HUB_PASSWORD`, `HUB_PORT`) |
+
+### accounts.toml
+
+Maps friendly account names to env var prefixes. No secrets stored here.
+
+```toml
+[coincall-main]
+exchange = "coincall"
+api_key  = "COINCALL_API_KEY_PROD"
+api_secret = "COINCALL_API_SECRET_PROD"
+
+[deribit-main]
+exchange = "deribit"
+client_id     = "DERIBIT_CLIENT_ID_PROD"
+client_secret = "DERIBIT_CLIENT_SECRET_PROD"
+```
+
+### slots/slot-XX.toml
+
+```toml
+slot_name = "Daily Put Sell"
+account   = "coincall-main"     # references accounts.toml
+strategy  = "daily_put_sell"    # module name in strategies/
+
+environment    = "production"
+dashboard_port = 8091
+dashboard_mode = "control"
+
+[params]                         # strategy-specific parameter overrides
+QTY = 0.8
+TARGET_DELTA = -0.10
+```
+
+The deploy script auto-generates `.env.slot-XX` from the TOML files + secrets in `.env`.
+You never need to hand-edit `.env.slot-XX` files.
 
 ### .deploy.slots.env
 
 ```bash
 VPS_HOST=root@46.225.137.92
 SSH_KEY=                          # optional, uses default SSH key
-```
-
-### .env.slot-XX Template
-
-```bash
-SLOT_NAME=My Strategy Name
-EXCHANGE=coincall                 # or deribit
-TRADING_ENVIRONMENT=production    # or testnet
-DEPLOYMENT_TARGET=development     # auto-patched to production on deploy
-
-DASHBOARD_MODE=control            # hub reads this; use 'full' for standalone UI
-DASHBOARD_PORT=8091               # unique per slot, localhost only
-
-# Exchange credentials (Coincall)
-COINCALL_API_KEY_PROD=...
-COINCALL_API_SECRET_PROD=...
-
-# Or Deribit credentials
-# DERIBIT_CLIENT_ID_PROD=...
-# DERIBIT_CLIENT_SECRET_PROD=...
-
-# Telegram
-TELEGRAM_BOT_TOKEN=...
-TELEGRAM_CHAT_ID=...
-
-DASHBOARD_PASSWORD=...
 ```
 
 ### .env.hub
@@ -130,14 +148,15 @@ HUB_SLOTS_BASE=/opt/ct
 
 ## What Happens During a Deploy
 
-1. **Check connectivity** — verify SSH to VPS works
-2. **Stop service** — graceful systemd stop
-3. **Rsync code** — sync Python code, templates, strategies (excludes `.venv`, `.env`, logs)
-4. **Copy `.env`** — `.env.slot-XX` → `/opt/ct/slot-XX/.env`
-5. **Patch `.env`** — `DEPLOYMENT_TARGET=production` via `sed` on server
-6. **Install deps** — `pip install -r requirements.txt` in server venv
-7. **Start service** — start + verify it's running
-8. **Show logs** — last 15 lines for verification
+1. **Generate `.env`** — if `slots/slot-XX.toml` exists, runs `slot_config.py` to generate `.env.slot-XX` from TOML + secrets in `.env`
+2. **Check connectivity** — verify SSH to VPS works
+3. **Stop service** — graceful systemd stop
+4. **Rsync code** — sync Python code, templates, strategies (excludes `.venv`, `.env`, logs, `slots/`, `accounts.toml`, `slot_config.py`)
+5. **Copy `.env`** — `.env.slot-XX` → `/opt/ct/slot-XX/.env`
+6. **Patch `.env`** — `DEPLOYMENT_TARGET=production` via `sed` on server
+7. **Install deps** — `pip install -r requirements.txt` in server venv
+8. **Start service** — start + verify it's running
+9. **Show logs** — last 15 lines for verification
 
 ---
 
@@ -151,15 +170,35 @@ HUB_SLOTS_BASE=/opt/ct
 | `deployment/rsync-exclude-slot.txt` | Files excluded from slot sync |
 | `deployment/server-setup-slots.sh` | One-time server base setup |
 | `deployment/UBUNTU_DEPLOYMENT.md` | This document |
+| `accounts.toml` | Named account registry (git-tracked) |
+| `slots/slot-XX.toml` | Per-slot config (git-tracked) |
+| `slot_config.py` | TOML → .env generator |
 
 ---
 
 ## Adding a New Strategy Slot
 
-1. Create `.env.slot-XX` with a unique `DASHBOARD_PORT`
-2. `./deployment/deploy-slot.sh XX --setup` (creates dir, venv, systemd)
-3. `./deployment/deploy-slot.sh XX` (deploys code + starts)
+1. Create `slots/slot-XX.toml` — set strategy, account, port, and any param overrides
+2. `./deployment/deploy-slot.sh XX --setup` (creates dir, venv, systemd on VPS)
+3. `./deployment/deploy-slot.sh XX` (generates `.env`, deploys code, starts)
 4. Hub auto-discovers the new slot on next page load
+
+### Tweaking Strategy Parameters
+
+Edit the `[params]` section in `slots/slot-XX.toml`, then redeploy:
+
+```bash
+vim slots/slot-03.toml       # change QTY, deltas, etc.
+./deployment/deploy-slot.sh 03
+```
+
+The deploy script regenerates `.env.slot-03` automatically.
+
+### Dry Run (Preview Generated .env)
+
+```bash
+python3 slot_config.py 03 --dry   # shows what .env.slot-03 would contain
+```
 
 ---
 

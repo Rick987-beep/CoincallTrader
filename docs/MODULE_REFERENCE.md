@@ -1,10 +1,63 @@
 # CoincallTrader — Module Reference
 
-**Last Updated:** March 19, 2026
+**Last Updated:** March 23, 2026
 
 Internal documentation for the CoincallTrader application modules.
 For Coincall exchange API endpoints, see [API_REFERENCE.md](API_REFERENCE.md).
 For the Deribit migration plan and API field reference, see [MIGRATION_PLAN_DERIBIT.md](MIGRATION_PLAN_DERIBIT.md).
+
+---
+
+## Slot Configuration System
+
+Configure and deploy strategies to production slots without editing code.
+
+### Files
+
+| File | Purpose |
+|------|---------|
+| `accounts.toml` | Named accounts → env var name mapping (no secrets) |
+| `slots/slot-XX.toml` | Per-slot config: strategy, account, param overrides |
+| `slot_config.py` | Reads `.toml` + `.env` → generates `.env.slot-XX` |
+| `.env` | Secrets vault (API keys, Telegram tokens) |
+
+### Workflow
+
+```bash
+# New slot
+cp slots/slot-01.toml slots/slot-03.toml
+vim slots/slot-03.toml                      # strategy + account + params
+./deployment/deploy-slot.sh 03 --setup      # first time only
+./deployment/deploy-slot.sh 03              # generates .env, deploys
+
+# Param tweak
+vim slots/slot-01.toml                      # change qty, delta, etc.
+./deployment/deploy-slot.sh 01              # redeploy
+
+# Preview generated .env without writing
+python slot_config.py 01 --dry
+```
+
+### Slot TOML Format
+
+```toml
+name = "Daily Put Sell"
+strategy = "daily_put_sell"            # module name in strategies/
+account = "coincall-main"             # name from accounts.toml
+
+[params]
+qty = 0.8                             # → PARAM_QTY env var
+target_delta = -0.10                  # → PARAM_TARGET_DELTA env var
+```
+
+Parameters become `PARAM_<NAME>` env vars. Strategy modules read them with
+`_p("QTY", 0.8)` which falls back to the default if unset.
+
+### Strategy Dynamic Import
+
+When `SLOT_STRATEGY` env var is set (by the slot config system), `main.py`
+imports the strategy module dynamically and does not use `strategies/__init__.py`.
+In dev mode (no `SLOT_STRATEGY`), the manual import list in `main.py` is used.
 
 ---
 

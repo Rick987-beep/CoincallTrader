@@ -157,355 +157,362 @@ def check(condition, label):
         FAILED += 1
         print(f"  ✗ FAIL: {label}")
 
-# ────────────────────────────────────────────────────────────────────────
-#  AUTHENTICATE
-# ────────────────────────────────────────────────────────────────────────
-separator(f"AUTHENTICATION ({ENV_LABEL})")
-if not authenticate():
-    sys.exit(1)
 
-# ────────────────────────────────────────────────────────────────────────
-#  PICK AN ATM OPTION
-# ────────────────────────────────────────────────────────────────────────
-separator("INSTRUMENT SELECTION")
-instrument, index_price, instr_meta = pick_atm_option()
-if not instrument:
-    print("Cannot proceed without an instrument."); sys.exit(1)
+def main():
+    """Run all tests. Only executes when script is run directly."""
+    # ────────────────────────────────────────────────────────────────────────
+    #  AUTHENTICATE
+    # ────────────────────────────────────────────────────────────────────────
+    separator(f"AUTHENTICATION ({ENV_LABEL})")
+    if not authenticate():
+        return
 
-ticker = get_ticker(instrument)
-if not ticker:
-    print("Cannot get ticker."); sys.exit(1)
+    # ────────────────────────────────────────────────────────────────────────
+    #  PICK AN ATM OPTION
+    # ────────────────────────────────────────────────────────────────────────
+    separator("INSTRUMENT SELECTION")
+    instrument, index_price, instr_meta = pick_atm_option()
+    if not instrument:
+        print("Cannot proceed without an instrument."); return
 
-best_bid = ticker.get("best_bid_price", 0)
-best_ask = ticker.get("best_ask_price", 0)
-print(f"  best_bid={best_bid}  best_ask={best_ask}  mark={ticker.get('mark_price')}")
+    ticker = get_ticker(instrument)
+    if not ticker:
+        print("Cannot get ticker."); return
 
-if not best_bid or not best_ask:
-    print("  WARNING: no bid/ask — market may be illiquid. Trying anyway.")
+    best_bid = ticker.get("best_bid_price", 0)
+    best_ask = ticker.get("best_ask_price", 0)
+    print(f"  best_bid={best_bid}  best_ask={best_ask}  mark={ticker.get('mark_price')}")
 
-# ────────────────────────────────────────────────────────────────────────
-#  TEST 4a: PLACE → READ → MODIFY → CANCEL
-# ────────────────────────────────────────────────────────────────────────
-separator(f"TEST 4a: Place → Read → Modify → Cancel ({ENV_LABEL})")
+    if not best_bid or not best_ask:
+        print("  WARNING: no bid/ask — market may be illiquid. Trying anyway.")
 
-# Step 1: place a limit buy far below market
-far_price = round_to_tick(max(best_bid * 0.3, 0.0001))
-print(f"  Placing limit BUY at {far_price} (far below bid={best_bid})")
+    # ────────────────────────────────────────────────────────────────────────
+    #  TEST 4a: PLACE → READ → MODIFY → CANCEL
+    # ────────────────────────────────────────────────────────────────────────
+    separator(f"TEST 4a: Place → Read → Modify → Cancel ({ENV_LABEL})")
 
-buy_result = api_private("buy", {
-    "instrument_name": instrument,
-    "amount": 0.1,
-    "type": "limit",
-    "price": far_price,
-    "label": "test_4a_001",
-})
+    # Step 1: place a limit buy far below market
+    far_price = round_to_tick(max(best_bid * 0.3, 0.0001))
+    print(f"  Placing limit BUY at {far_price} (far below bid={best_bid})")
 
-if isinstance(buy_result, dict) and "error" in buy_result:
-    print(f"  Order placement failed: {buy_result['error']}")
-    sys.exit(1)
-
-order = buy_result.get("order", {})
-trades = buy_result.get("trades", [])
-order_id = order.get("order_id")
-
-print(f"\n  Order response:")
-pp(buy_result)
-
-check(order_id is not None, "order_id present in response")
-check(order.get("order_state") == "open", f"order_state == 'open' (got: {order.get('order_state')})")
-check(order.get("label") == "test_4a_001", f"label round-tripped (got: {order.get('label')})")
-check(order.get("direction") == "buy", f"direction == 'buy' (got: {order.get('direction')})")
-check(order.get("instrument_name") == instrument, f"instrument matches")
-check(order.get("price") == far_price, f"price matches {far_price}")
-check(order.get("amount") == 0.1, f"amount == 0.1 (got: {order.get('amount')})")
-check(len(trades) == 0, f"no immediate fill (trades={len(trades)})")
-
-print(f"\n  ── Order field names ──")
-print(f"  {sorted(order.keys())}")
-
-# Step 2: read order status
-separator("TEST 4a.2: Read Order Status")
-order_state = api_private("get_order_state", {"order_id": order_id})
-if order_state:
-    print("  Order state response:")
-    pp(order_state)
-    check(order_state.get("order_id") == order_id, "order_id matches")
-    check(order_state.get("label") == "test_4a_001", f"label preserved (got: {order_state.get('label')})")
-    check(order_state.get("order_state") == "open", f"still open")
-
-# Step 3: find in open orders list
-separator("TEST 4a.3: Find in Open Orders")
-open_orders = api_private("get_open_orders_by_currency", {"currency": "BTC"})
-if open_orders is not None:
-    our_order = [o for o in open_orders if o.get("order_id") == order_id]
-    check(len(our_order) == 1, f"found our order in open orders list ({len(open_orders)} total)")
-    if our_order:
-        check(our_order[0].get("label") == "test_4a_001", "label visible in list")
-else:
-    print("  Could not fetch open orders")
-
-# Step 4: modify the order (change price)
-separator("TEST 4a.4: Modify Order")
-new_price = round_to_tick(far_price + 0.0005)
-print(f"  Editing order {order_id}: price {far_price} → {new_price}")
-
-edit_result = api_private("edit", {
-    "order_id": order_id,
-    "amount": 0.1,
-    "price": new_price,
-})
-
-if edit_result and "order" in edit_result:
-    edited = edit_result["order"]
-    print("  Edit response:")
-    pp(edit_result)
-    new_order_id = edited.get("order_id")
-    check(edited.get("price") == new_price, f"price updated to {new_price}")
-    check(edited.get("order_state") == "open", "still open after edit")
-    print(f"\n  ── order_id after edit: {new_order_id}")
-    print(f"  ── order_id changed? {'YES' if new_order_id != order_id else 'NO'}")
-    if new_order_id != order_id:
-        print(f"      old={order_id}  new={new_order_id}")
-        order_id = new_order_id  # use new ID going forward
-elif isinstance(edit_result, dict) and "error" in edit_result:
-    print(f"  Edit failed: {edit_result['error']}")
-else:
-    print(f"  Unexpected edit response: {edit_result}")
-
-# Step 5: cancel the order
-separator("TEST 4a.5: Cancel Order")
-cancel_result = api_private("cancel", {"order_id": order_id})
-if cancel_result:
-    print("  Cancel response:")
-    pp(cancel_result)
-    check(cancel_result.get("order_state") == "cancelled",
-          f"order_state == 'cancelled' (got: {cancel_result.get('order_state')})")
-
-# Step 6: verify gone from open orders
-separator("TEST 4a.6: Verify Cancelled")
-open_orders = api_private("get_open_orders_by_currency", {"currency": "BTC"})
-if open_orders is not None:
-    remaining = [o for o in open_orders if o.get("order_id") == order_id]
-    check(len(remaining) == 0, "order no longer in open orders list")
-
-print(f"\n  ── Test 4a subtotal: {PASSED} passed, {FAILED} failed ──")
-
-# ────────────────────────────────────────────────────────────────────────
-#  TEST 4b: PLACE → FILL → VERIFY POSITION → CLOSE → VERIFY GONE
-# ────────────────────────────────────────────────────────────────────────
-separator(f"TEST 4b: Full Position Lifecycle ({ENV_LABEL})")
-
-# Refresh ticker
-ticker = get_ticker(instrument)
-best_bid = ticker.get("best_bid_price", 0)
-best_ask = ticker.get("best_ask_price", 0)
-print(f"  Refreshed ticker: bid={best_bid}  ask={best_ask}")
-
-if not best_ask or best_ask == 0:
-    print("  SKIP: no ask price — cannot attempt fill test")
-else:
-    # Step 1: buy at best_ask (should fill immediately)
-    print(f"\n  Placing limit BUY at best_ask={best_ask} for 0.1 contracts")
-    fill_result = api_private("buy", {
+    buy_result = api_private("buy", {
         "instrument_name": instrument,
         "amount": 0.1,
         "type": "limit",
-        "price": best_ask,
-        "label": "test_4b_buy",
+        "price": far_price,
+        "label": "test_4a_001",
     })
 
-    if isinstance(fill_result, dict) and "error" in fill_result:
-        print(f"  Buy failed: {fill_result['error']}")
+    if isinstance(buy_result, dict) and "error" in buy_result:
+        print(f"  Order placement failed: {buy_result['error']}")
+        return
+
+    order = buy_result.get("order", {})
+    trades = buy_result.get("trades", [])
+    order_id = order.get("order_id")
+
+    print(f"\n  Order response:")
+    pp(buy_result)
+
+    check(order_id is not None, "order_id present in response")
+    check(order.get("order_state") == "open", f"order_state == 'open' (got: {order.get('order_state')})")
+    check(order.get("label") == "test_4a_001", f"label round-tripped (got: {order.get('label')})")
+    check(order.get("direction") == "buy", f"direction == 'buy' (got: {order.get('direction')})")
+    check(order.get("instrument_name") == instrument, f"instrument matches")
+    check(order.get("price") == far_price, f"price matches {far_price}")
+    check(order.get("amount") == 0.1, f"amount == 0.1 (got: {order.get('amount')})")
+    check(len(trades) == 0, f"no immediate fill (trades={len(trades)})")
+
+    print(f"\n  ── Order field names ──")
+    print(f"  {sorted(order.keys())}")
+
+    # Step 2: read order status
+    separator("TEST 4a.2: Read Order Status")
+    order_state = api_private("get_order_state", {"order_id": order_id})
+    if order_state:
+        print("  Order state response:")
+        pp(order_state)
+        check(order_state.get("order_id") == order_id, "order_id matches")
+        check(order_state.get("label") == "test_4a_001", f"label preserved (got: {order_state.get('label')})")
+        check(order_state.get("order_state") == "open", f"still open")
+
+    # Step 3: find in open orders list
+    separator("TEST 4a.3: Find in Open Orders")
+    open_orders = api_private("get_open_orders_by_currency", {"currency": "BTC"})
+    if open_orders is not None:
+        our_order = [o for o in open_orders if o.get("order_id") == order_id]
+        check(len(our_order) == 1, f"found our order in open orders list ({len(open_orders)} total)")
+        if our_order:
+            check(our_order[0].get("label") == "test_4a_001", "label visible in list")
     else:
-        fill_order = fill_result.get("order", {})
-        fill_trades = fill_result.get("trades", [])
-        fill_oid = fill_order.get("order_id")
-        fill_state = fill_order.get("order_state")
+        print("  Could not fetch open orders")
 
-        print(f"  Order state: {fill_state}  |  Trades: {len(fill_trades)}")
-        pp(fill_order)
+    # Step 4: modify the order (change price)
+    separator("TEST 4a.4: Modify Order")
+    new_price = round_to_tick(far_price + 0.0005)
+    print(f"  Editing order {order_id}: price {far_price} → {new_price}")
 
-        # If not filled immediately, poll
-        if fill_state not in ("filled",):
-            print(f"  Not immediately filled — polling (max 30s)...")
-            for i in range(15):
-                time.sleep(2)
-                status = api_private("get_order_state", {"order_id": fill_oid})
-                if status:
-                    fill_state = status.get("order_state")
-                    filled_amt = status.get("filled_amount", 0)
-                    print(f"    poll {i+1}: state={fill_state}  filled={filled_amt}")
-                    if fill_state == "filled":
-                        fill_order = status
-                        break
+    edit_result = api_private("edit", {
+        "order_id": order_id,
+        "amount": 0.1,
+        "price": new_price,
+    })
 
-        check(fill_state == "filled", f"order filled (state={fill_state})")
+    if edit_result and "order" in edit_result:
+        edited = edit_result["order"]
+        print("  Edit response:")
+        pp(edit_result)
+        new_order_id = edited.get("order_id")
+        check(edited.get("price") == new_price, f"price updated to {new_price}")
+        check(edited.get("order_state") == "open", "still open after edit")
+        print(f"\n  ── order_id after edit: {new_order_id}")
+        print(f"  ── order_id changed? {'YES' if new_order_id != order_id else 'NO'}")
+        if new_order_id != order_id:
+            print(f"      old={order_id}  new={new_order_id}")
+            order_id = new_order_id  # use new ID going forward
+    elif isinstance(edit_result, dict) and "error" in edit_result:
+        print(f"  Edit failed: {edit_result['error']}")
+    else:
+        print(f"  Unexpected edit response: {edit_result}")
 
-        if fill_trades:
-            print(f"\n  ── Fill trade details ──")
-            for t in fill_trades:
-                print(f"    trade_id={t.get('trade_id')}  price={t.get('price')}  "
-                      f"amount={t.get('amount')}  fee={t.get('fee')} {t.get('fee_currency')}")
-        else:
-            print(f"  No trades returned in buy response — checking history...")
+    # Step 5: cancel the order
+    separator("TEST 4a.5: Cancel Order")
+    cancel_result = api_private("cancel", {"order_id": order_id})
+    if cancel_result:
+        print("  Cancel response:")
+        pp(cancel_result)
+        check(cancel_result.get("order_state") == "cancelled",
+              f"order_state == 'cancelled' (got: {cancel_result.get('order_state')})")
 
-        # Step 2: verify position exists
-        separator("TEST 4b.2: Verify Position")
-        positions = api_private("get_positions", {"currency": "BTC", "kind": "option"})
-        if positions is not None:
-            our_pos = [p for p in positions if p.get("instrument_name") == instrument and p.get("size", 0) > 0]
-            check(len(our_pos) >= 1, f"position exists for {instrument}")
-            if our_pos:
-                pos = our_pos[0]
-                print(f"  Position:")
-                pp(pos)
-                check(pos.get("size") == 0.1, f"size == 0.1 (got: {pos.get('size')})")
-                check(pos.get("direction") == "buy", f"direction == 'buy' (got: {pos.get('direction')})")
-                print(f"  delta={pos.get('delta')}  pnl={pos.get('floating_profit_loss')}  "
-                      f"mark={pos.get('mark_price')}")
+    # Step 6: verify gone from open orders
+    separator("TEST 4a.6: Verify Cancelled")
+    open_orders = api_private("get_open_orders_by_currency", {"currency": "BTC"})
+    if open_orders is not None:
+        remaining = [o for o in open_orders if o.get("order_id") == order_id]
+        check(len(remaining) == 0, "order no longer in open orders list")
 
-        # Step 3: close the position — sell at best_bid
-        separator("TEST 4b.3: Close Position")
-        ticker = get_ticker(instrument)
-        best_bid = ticker.get("best_bid_price", 0)
-        print(f"  Placing limit SELL at best_bid={best_bid} for 0.1 contracts (reduce_only=true)")
+    print(f"\n  ── Test 4a subtotal: {PASSED} passed, {FAILED} failed ──")
 
-        close_result = api_private("sell", {
+    # ────────────────────────────────────────────────────────────────────────
+    #  TEST 4b: PLACE → FILL → VERIFY POSITION → CLOSE → VERIFY GONE
+    # ────────────────────────────────────────────────────────────────────────
+    separator(f"TEST 4b: Full Position Lifecycle ({ENV_LABEL})")
+
+    # Refresh ticker
+    ticker = get_ticker(instrument)
+    best_bid = ticker.get("best_bid_price", 0)
+    best_ask = ticker.get("best_ask_price", 0)
+    print(f"  Refreshed ticker: bid={best_bid}  ask={best_ask}")
+
+    if not best_ask or best_ask == 0:
+        print("  SKIP: no ask price — cannot attempt fill test")
+    else:
+        # Step 1: buy at best_ask (should fill immediately)
+        print(f"\n  Placing limit BUY at best_ask={best_ask} for 0.1 contracts")
+        fill_result = api_private("buy", {
             "instrument_name": instrument,
             "amount": 0.1,
             "type": "limit",
-            "price": best_bid,
-            "label": "test_4b_close",
-            "reduce_only": True,
+            "price": best_ask,
+            "label": "test_4b_buy",
         })
 
-        if isinstance(close_result, dict) and "error" in close_result:
-            print(f"  Sell failed: {close_result['error']}")
+        if isinstance(fill_result, dict) and "error" in fill_result:
+            print(f"  Buy failed: {fill_result['error']}")
         else:
-            close_order = close_result.get("order", {})
-            close_trades = close_result.get("trades", [])
-            close_state = close_order.get("order_state")
-            close_oid = close_order.get("order_id")
+            fill_order = fill_result.get("order", {})
+            fill_trades = fill_result.get("trades", [])
+            fill_oid = fill_order.get("order_id")
+            fill_state = fill_order.get("order_state")
 
-            print(f"  Close state: {close_state}  |  Trades: {len(close_trades)}")
+            print(f"  Order state: {fill_state}  |  Trades: {len(fill_trades)}")
+            pp(fill_order)
 
-            # Poll if not filled
-            if close_state not in ("filled",):
+            # If not filled immediately, poll
+            if fill_state not in ("filled",):
                 print(f"  Not immediately filled — polling (max 30s)...")
                 for i in range(15):
                     time.sleep(2)
-                    status = api_private("get_order_state", {"order_id": close_oid})
+                    status = api_private("get_order_state", {"order_id": fill_oid})
                     if status:
-                        close_state = status.get("order_state")
+                        fill_state = status.get("order_state")
                         filled_amt = status.get("filled_amount", 0)
-                        print(f"    poll {i+1}: state={close_state}  filled={filled_amt}")
-                        if close_state == "filled":
+                        print(f"    poll {i+1}: state={fill_state}  filled={filled_amt}")
+                        if fill_state == "filled":
+                            fill_order = status
                             break
-                # If still not filled after 30s, cancel the order to clean up
-                if close_state not in ("filled",):
-                    print("  Timeout — cancelling close order to avoid orphan position")
-                    api_private("cancel", {"order_id": close_oid})
 
-            check(close_state == "filled", f"close order filled (state={close_state})")
+            check(fill_state == "filled", f"order filled (state={fill_state})")
 
-            if close_trades:
-                for t in close_trades:
+            if fill_trades:
+                print(f"\n  ── Fill trade details ──")
+                for t in fill_trades:
                     print(f"    trade_id={t.get('trade_id')}  price={t.get('price')}  "
-                          f"fee={t.get('fee')} {t.get('fee_currency')}")
+                          f"amount={t.get('amount')}  fee={t.get('fee')} {t.get('fee_currency')}")
+            else:
+                print(f"  No trades returned in buy response — checking history...")
 
-        # Step 4: verify position gone
-        separator("TEST 4b.4: Verify Position Closed")
-        positions = api_private("get_positions", {"currency": "BTC", "kind": "option"})
-        if positions is not None:
-            active = [p for p in positions if p.get("instrument_name") == instrument and p.get("size", 0) > 0]
-            check(len(active) == 0, f"position gone (or size=0) for {instrument}")
+            # Step 2: verify position exists
+            separator("TEST 4b.2: Verify Position")
+            positions = api_private("get_positions", {"currency": "BTC", "kind": "option"})
+            if positions is not None:
+                our_pos = [p for p in positions if p.get("instrument_name") == instrument and p.get("size", 0) > 0]
+                check(len(our_pos) >= 1, f"position exists for {instrument}")
+                if our_pos:
+                    pos = our_pos[0]
+                    print(f"  Position:")
+                    pp(pos)
+                    check(pos.get("size") == 0.1, f"size == 0.1 (got: {pos.get('size')})")
+                    check(pos.get("direction") == "buy", f"direction == 'buy' (got: {pos.get('direction')})")
+                    print(f"  delta={pos.get('delta')}  pnl={pos.get('floating_profit_loss')}  "
+                          f"mark={pos.get('mark_price')}")
 
-        # Step 5: check trade history
-        separator("TEST 4b.5: Trade History")
-        history = api_private("get_user_trades_by_currency", {"currency": "BTC", "count": 10})
-        if history and "trades" in history:
-            our_trades = [t for t in history["trades"]
-                          if t.get("instrument_name") == instrument
-                          and t.get("label", "").startswith("test_4b")]
-            print(f"  Found {len(our_trades)} trades with test_4b label:")
-            for t in our_trades:
-                print(f"    {t.get('direction'):4s} {t.get('amount')} @ {t.get('price')}  "
-                      f"fee={t.get('fee')} {t.get('fee_currency')}  "
-                      f"label={t.get('label')}  id={t.get('trade_id')}")
-            check(len(our_trades) >= 2, f"both buy and sell trades recorded ({len(our_trades)} found)")
-        elif history:
-            print(f"  Trade history response keys: {list(history.keys()) if isinstance(history, dict) else type(history)}")
+            # Step 3: close the position — sell at best_bid
+            separator("TEST 4b.3: Close Position")
+            ticker = get_ticker(instrument)
+            best_bid = ticker.get("best_bid_price", 0)
+            print(f"  Placing limit SELL at best_bid={best_bid} for 0.1 contracts (reduce_only=true)")
 
-# ────────────────────────────────────────────────────────────────────────
-#  TEST 4c: EDGE CASES
-# ────────────────────────────────────────────────────────────────────────
-separator(f"TEST 4c: Edge Cases ({ENV_LABEL})")
+            close_result = api_private("sell", {
+                "instrument_name": instrument,
+                "amount": 0.1,
+                "type": "limit",
+                "price": best_bid,
+                "label": "test_4b_close",
+                "reduce_only": True,
+            })
 
-# 4c.1: reduce_only with no position
-print("  4c.1: reduce_only SELL with no position...")
-edge1 = api_private("sell", {
-    "instrument_name": instrument,
-    "amount": 0.1,
-    "type": "limit",
-    "price": round_to_tick(best_bid * 0.5) if best_bid else 0.001,
-    "reduce_only": True,
-    "label": "test_4c_edge1",
-})
-if isinstance(edge1, dict) and "error" in edge1:
-    err = edge1["error"]
-    print(f"    → Rejected: code={err.get('code')}  message={err.get('message')}")
-    check(True, f"reduce_only with no position rejected (code={err.get('code')})")
-else:
-    # Might succeed with an immediate cancel or open order — check
-    print(f"    → Unexpected success: {edge1}")
-    # Clean up if an order was placed
-    if isinstance(edge1, dict) and "order" in edge1:
-        oid = edge1["order"]["order_id"]
-        api_private("cancel", {"order_id": oid})
-        check(False, "reduce_only with no position should have been rejected")
+            if isinstance(close_result, dict) and "error" in close_result:
+                print(f"  Sell failed: {close_result['error']}")
+            else:
+                close_order = close_result.get("order", {})
+                close_trades = close_result.get("trades", [])
+                close_state = close_order.get("order_state")
+                close_oid = close_order.get("order_id")
 
-# 4c.2: below minimum size
-print("\n  4c.2: Below minimum trade amount (0.01)...")
-edge2 = api_private("buy", {
-    "instrument_name": instrument,
-    "amount": 0.01,
-    "type": "limit",
-    "price": round_to_tick(best_bid * 0.3) if best_bid else 0.001,
-    "label": "test_4c_edge2",
-})
-if isinstance(edge2, dict) and "error" in edge2:
-    err = edge2["error"]
-    print(f"    → Rejected: code={err.get('code')}  message={err.get('message')}")
-    check(True, f"below min size rejected (code={err.get('code')})")
-else:
-    print(f"    → Unexpected response: {edge2}")
-    if isinstance(edge2, dict) and "order" in edge2:
-        api_private("cancel", {"order_id": edge2["order"]["order_id"]})
+                print(f"  Close state: {close_state}  |  Trades: {len(close_trades)}")
 
-# 4c.3: expired/invalid instrument
-print("\n  4c.3: Expired/invalid instrument...")
-edge3 = api_private("buy", {
-    "instrument_name": "BTC-1JAN20-10000-C",
-    "amount": 0.1,
-    "type": "limit",
-    "price": 0.001,
-    "label": "test_4c_edge3",
-})
-if isinstance(edge3, dict) and "error" in edge3:
-    err = edge3["error"]
-    print(f"    → Rejected: code={err.get('code')}  message={err.get('message')}")
-    check(True, f"invalid instrument rejected (code={err.get('code')})")
-else:
-    print(f"    → Unexpected response: {edge3}")
-    if isinstance(edge3, dict) and "order" in edge3:
-        api_private("cancel", {"order_id": edge3["order"]["order_id"]})
+                # Poll if not filled
+                if close_state not in ("filled",):
+                    print(f"  Not immediately filled — polling (max 30s)...")
+                    for i in range(15):
+                        time.sleep(2)
+                        status = api_private("get_order_state", {"order_id": close_oid})
+                        if status:
+                            close_state = status.get("order_state")
+                            filled_amt = status.get("filled_amount", 0)
+                            print(f"    poll {i+1}: state={close_state}  filled={filled_amt}")
+                            if close_state == "filled":
+                                break
+                    # If still not filled after 30s, cancel the order to clean up
+                    if close_state not in ("filled",):
+                        print("  Timeout — cancelling close order to avoid orphan position")
+                        api_private("cancel", {"order_id": close_oid})
 
-# ────────────────────────────────────────────────────────────────────────
-#  FINAL SUMMARY
-# ────────────────────────────────────────────────────────────────────────
-separator("TEST 4 SUMMARY")
-print(f"Environment: {ENV_LABEL} ({BASE_URL})")
-print(f"Instrument:  {instrument}")
-print(f"Checks passed: {PASSED}")
-print(f"Checks failed: {FAILED}")
-print(f"\nTest 4: {'PASSED ✓' if FAILED == 0 else 'FAILED ✗'}")
+                check(close_state == "filled", f"close order filled (state={close_state})")
+
+                if close_trades:
+                    for t in close_trades:
+                        print(f"    trade_id={t.get('trade_id')}  price={t.get('price')}  "
+                              f"fee={t.get('fee')} {t.get('fee_currency')}")
+
+            # Step 4: verify position gone
+            separator("TEST 4b.4: Verify Position Closed")
+            positions = api_private("get_positions", {"currency": "BTC", "kind": "option"})
+            if positions is not None:
+                active = [p for p in positions if p.get("instrument_name") == instrument and p.get("size", 0) > 0]
+                check(len(active) == 0, f"position gone (or size=0) for {instrument}")
+
+            # Step 5: check trade history
+            separator("TEST 4b.5: Trade History")
+            history = api_private("get_user_trades_by_currency", {"currency": "BTC", "count": 10})
+            if history and "trades" in history:
+                our_trades = [t for t in history["trades"]
+                              if t.get("instrument_name") == instrument
+                              and t.get("label", "").startswith("test_4b")]
+                print(f"  Found {len(our_trades)} trades with test_4b label:")
+                for t in our_trades:
+                    print(f"    {t.get('direction'):4s} {t.get('amount')} @ {t.get('price')}  "
+                          f"fee={t.get('fee')} {t.get('fee_currency')}  "
+                          f"label={t.get('label')}  id={t.get('trade_id')}")
+                check(len(our_trades) >= 2, f"both buy and sell trades recorded ({len(our_trades)} found)")
+            elif history:
+                print(f"  Trade history response keys: {list(history.keys()) if isinstance(history, dict) else type(history)}")
+
+    # ────────────────────────────────────────────────────────────────────────
+    #  TEST 4c: EDGE CASES
+    # ────────────────────────────────────────────────────────────────────────
+    separator(f"TEST 4c: Edge Cases ({ENV_LABEL})")
+
+    # 4c.1: reduce_only with no position
+    print("  4c.1: reduce_only SELL with no position...")
+    edge1 = api_private("sell", {
+        "instrument_name": instrument,
+        "amount": 0.1,
+        "type": "limit",
+        "price": round_to_tick(best_bid * 0.5) if best_bid else 0.001,
+        "reduce_only": True,
+        "label": "test_4c_edge1",
+    })
+    if isinstance(edge1, dict) and "error" in edge1:
+        err = edge1["error"]
+        print(f"    → Rejected: code={err.get('code')}  message={err.get('message')}")
+        check(True, f"reduce_only with no position rejected (code={err.get('code')})")
+    else:
+        # Might succeed with an immediate cancel or open order — check
+        print(f"    → Unexpected success: {edge1}")
+        # Clean up if an order was placed
+        if isinstance(edge1, dict) and "order" in edge1:
+            oid = edge1["order"]["order_id"]
+            api_private("cancel", {"order_id": oid})
+            check(False, "reduce_only with no position should have been rejected")
+
+    # 4c.2: below minimum size
+    print("\n  4c.2: Below minimum trade amount (0.01)...")
+    edge2 = api_private("buy", {
+        "instrument_name": instrument,
+        "amount": 0.01,
+        "type": "limit",
+        "price": round_to_tick(best_bid * 0.3) if best_bid else 0.001,
+        "label": "test_4c_edge2",
+    })
+    if isinstance(edge2, dict) and "error" in edge2:
+        err = edge2["error"]
+        print(f"    → Rejected: code={err.get('code')}  message={err.get('message')}")
+        check(True, f"below min size rejected (code={err.get('code')})")
+    else:
+        print(f"    → Unexpected response: {edge2}")
+        if isinstance(edge2, dict) and "order" in edge2:
+            api_private("cancel", {"order_id": edge2["order"]["order_id"]})
+
+    # 4c.3: expired/invalid instrument
+    print("\n  4c.3: Expired/invalid instrument...")
+    edge3 = api_private("buy", {
+        "instrument_name": "BTC-1JAN20-10000-C",
+        "amount": 0.1,
+        "type": "limit",
+        "price": 0.001,
+        "label": "test_4c_edge3",
+    })
+    if isinstance(edge3, dict) and "error" in edge3:
+        err = edge3["error"]
+        print(f"    → Rejected: code={err.get('code')}  message={err.get('message')}")
+        check(True, f"invalid instrument rejected (code={err.get('code')})")
+    else:
+        print(f"    → Unexpected response: {edge3}")
+        if isinstance(edge3, dict) and "order" in edge3:
+            api_private("cancel", {"order_id": edge3["order"]["order_id"]})
+
+    # ────────────────────────────────────────────────────────────────────────
+    #  FINAL SUMMARY
+    # ────────────────────────────────────────────────────────────────────────
+    separator("TEST 4 SUMMARY")
+    print(f"Environment: {ENV_LABEL} ({BASE_URL})")
+    print(f"Instrument:  {instrument}")
+    print(f"Checks passed: {PASSED}")
+    print(f"Checks failed: {FAILED}")
+    print(f"\nTest 4: {'PASSED ✓' if FAILED == 0 else 'FAILED ✗'}")
+
+
+if __name__ == "__main__":
+    main()

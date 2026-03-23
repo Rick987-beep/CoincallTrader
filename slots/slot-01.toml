@@ -1,0 +1,22 @@
+# ===========================================================================
+# Slot 01 — Daily Put Sell (Coincall)
+#
+# Edit params below, then deploy:
+#   ./deployment/deploy-slot.sh 01
+# ===========================================================================
+
+name = "Daily Put Sell"
+strategy = "daily_put_sell"
+account = "coincall-main"
+
+[params]
+qty = 0.8
+target_delta = -0.10
+dte = 1
+entry_hour_start = 3
+entry_hour_end = 4
+min_margin_pct = 10
+stop_loss_pct = 70
+tp_capture_pct = 0.90
+check_interval = 15
+max_concurrent = 2

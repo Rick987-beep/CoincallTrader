@@ -30,12 +30,8 @@ Stop Loss (fair-price based, 70% of premium):
   buy-to-close: 15s at fair → 15s stepping toward ask → aggressive at ask.
   Skips RFQ entirely for fast execution on SL.
 
-Take Profit (fill-price based, 90% capture):
-  Limit buy at fill_price × 0.10 placed immediately after open.
-  Sits in the book until filled or cancelled by SL/expiry.
-
 Expiry:
-  If neither TP nor SL fires, the option expires worthless (full win).
+  If SL does not fire, the option expires worthless (full win).
 """
 
 import logging
@@ -46,7 +42,6 @@ from typing import Optional
 from ema_filter import ema20_filter
 from market_data import get_btc_index_price, get_option_market_data
 from option_selection import LegSpec
-from order_manager import OrderPurpose, OrderStatus
 from strategy import (
     StrategyConfig,
     # Entry conditions
@@ -54,7 +49,7 @@ from strategy import (
     min_available_margin_pct,
 )
 from trade_execution import ExecutionParams, ExecutionPhase
-from trade_lifecycle import RFQParams, TradeState
+from trade_lifecycle import RFQParams
 from telegram_notifier import get_notifier
 
 logger = logging.getLogger(__name__)
@@ -81,7 +76,6 @@ ENTRY_HOUR_END = _p("ENTRY_HOUR_END", 4, int)     # Close window: 04:00 UTC
 # Risk
 MIN_MARGIN_PCT = _p("MIN_MARGIN_PCT", 10, int)    # Require ≥10% available margin
 STOP_LOSS_PCT = _p("STOP_LOSS_PCT", 70, int)      # 70% loss of premium collected
-TP_CAPTURE_PCT = _p("TP_CAPTURE_PCT", 0.90)       # Buy back at 10% of fill price (90% profit)
 
 # RFQ open — phased execution
 RFQ_OPEN_TIMEOUT = _p("RFQ_OPEN_TIMEOUT", 200, int)         # 20s silent + 180s (3 min) gated window
@@ -101,21 +95,6 @@ SL_CLOSE_AGG_SECONDS = _p("SL_CLOSE_AGG_SECONDS", 60, int)     # Aggressive at a
 # Operational
 CHECK_INTERVAL = _p("CHECK_INTERVAL", 15, int)    # Seconds between entry/exit evaluations
 MAX_CONCURRENT = _p("MAX_CONCURRENT", 2, int)      # Allow 2 overlapping trades (expiry overlap)
-
-
-# ─── Module-level Context Reference ────────────────────────────────────────
-# Captured by the on_runner_created hook so callbacks can access services
-# like the order manager and executor for TP order placement.
-# This is daily_put_sell-specific — not a framework pattern.
-
-_ctx = None  # type: ignore
-
-
-def _capture_context(runner) -> None:
-    """on_runner_created hook: captures TradingContext for callback use."""
-    global _ctx
-    _ctx = runner.ctx
-    logger.info("[DailyPutSell] Context captured from runner")
 
 
 # ─── Fair Price Calculation ─────────────────────────────────────────────────
@@ -295,172 +274,6 @@ def _fair_price_sl():
     return _check
 
 
-# ─── Exit Condition: TP Order Fill Detection ────────────────────────────────
-# This exit condition checks if the proactive TP limit order has been
-# filled.  When it has, the position is already closed on the exchange so
-# we finalize the trade directly instead of triggering the normal close flow.
-# This is daily_put_sell-specific logic.
-
-def _tp_filled_exit():
-    """
-    Exit condition factory: detects TP limit order fill.
-
-    When the TP order fills, the position is already closed on the exchange.
-    This condition finalizes the trade (CLOSED state, realized PnL) and
-    returns False — the trade is already done, no further close needed.
-
-    If the TP order is not yet filled, returns False (not an exit trigger).
-    The only real exit trigger from this strategy is max_loss (SL).
-    """
-    def _check(account, trade) -> bool:
-        if _ctx is None:
-            return False
-
-        tp_order_id = trade.metadata.get("tp_order_id")
-        if not tp_order_id:
-            return False
-
-        # Already finalized by a previous tick
-        if trade.metadata.get("tp_finalized"):
-            return False
-
-        # Check order status via OrderManager
-        order_mgr = _ctx.lifecycle_manager.order_manager
-        record = order_mgr._orders.get(tp_order_id)
-        if record is None:
-            return False
-
-        if record.status != OrderStatus.FILLED:
-            return False
-
-        # TP order filled — finalize the trade directly
-        leg = trade.open_legs[0] if trade.open_legs else None
-        fp = compute_fair_price(leg.symbol) if leg else None
-        logger.info(
-            f"[DailyPutSell] TP order {tp_order_id} FILLED — "
-            f"finalizing trade {trade.id}"
-        )
-        if fp and leg:
-            logger.info(
-                f"[DailyPutSell] TP fill prices: "
-                f"bid=${fp['bid'] or 0:.2f}  ask=${fp['ask'] or 0:.2f}  "
-                f"fair=${fp['fair']:.2f}  mark=${fp['mark']:.2f}  "
-                f"fill=${record.avg_fill_price or 0:.2f}  "
-                f"entry=${leg.fill_price:.2f}"
-            )
-        trade.metadata["tp_finalized"] = True
-
-        # Populate close leg with fill data
-        from trade_lifecycle import TradeLeg
-        leg = trade.open_legs[0]
-        trade.close_legs = [
-            TradeLeg(
-                symbol=leg.symbol,
-                qty=record.filled_qty or leg.filled_qty,
-                side="buy",  # buy to close
-                order_id=tp_order_id,
-                fill_price=record.avg_fill_price,
-                filled_qty=record.filled_qty or leg.filled_qty,
-            )
-        ]
-
-        trade.state = TradeState.CLOSED
-        trade.closed_at = time.time()
-        trade._finalize_close()
-
-        logger.info(
-            f"[DailyPutSell] Trade {trade.id} → CLOSED via TP "
-            f"(PnL={trade.realized_pnl:+.4f})"
-        )
-
-        # Return False: trade is already finalized, no need for PENDING_CLOSE
-        return False
-
-    _check.__name__ = "tp_filled_exit"
-    return _check
-
-
-# ─── Take Profit: Limit Order Logic ────────────────────────────────────────
-# These functions are specific to the daily_put_sell strategy and handle
-# placing a limit buy-to-close order at the TP price immediately after
-# the put is sold via RFQ.
-
-def _place_tp_limit_order(trade) -> None:
-    """
-    Place a limit buy order to close the short put at the TP price.
-
-    Called from on_trade_opened.  The TP price is 10% of the entry
-    premium — i.e. we buy back the put for 10% of what we sold it for,
-    capturing 90% of the premium.
-
-    This is daily_put_sell-specific logic.
-    """
-    if _ctx is None:
-        logger.error("[DailyPutSell] Context not available, cannot place TP order")
-        return
-
-    if not trade.open_legs:
-        logger.error(f"[DailyPutSell] No open legs on trade {trade.id}, cannot place TP")
-        return
-
-    leg = trade.open_legs[0]
-    if leg.fill_price is None or leg.fill_price <= 0:
-        logger.error(f"[DailyPutSell] No fill price for {leg.symbol}, cannot place TP")
-        return
-
-    entry_premium = float(leg.fill_price)
-    tp_price = round(entry_premium * (1.0 - TP_CAPTURE_PCT), 4)
-
-    # Minimum price floor — exchanges won't accept 0
-    if tp_price < 0.0001:
-        tp_price = 0.0001
-
-    logger.info(
-        f"[DailyPutSell] Placing TP limit buy: {leg.symbol} "
-        f"qty={leg.filled_qty} @ ${tp_price:.4f} "
-        f"(entry=${entry_premium:.4f}, capture={TP_CAPTURE_PCT*100:.0f}%)"
-    )
-
-    try:
-        # Place limit buy order via OrderManager (handles executor + tracking)
-        # side="buy"=buy to close, reduce_only handled by OrderManager for CLOSE_LEG
-        record = _ctx.lifecycle_manager.order_manager.place_order(
-            lifecycle_id=trade.id,
-            leg_index=0,
-            purpose=OrderPurpose.CLOSE_LEG,
-            symbol=leg.symbol,
-            side="buy",   # buy to close
-            qty=leg.filled_qty,
-            price=tp_price,
-        )
-
-        if record:
-            trade.metadata["tp_order_id"] = record.order_id
-            trade.metadata["tp_price"] = tp_price
-
-            # Populate close_legs so the lifecycle engine knows about the close
-            from trade_lifecycle import TradeLeg
-            if not trade.close_legs:
-                trade.close_legs = [
-                    TradeLeg(
-                        symbol=leg.symbol,
-                        qty=leg.filled_qty,
-                        side="buy",  # buy to close
-                        order_id=record.order_id,
-                    )
-                ]
-
-            logger.info(
-                f"[DailyPutSell] TP order placed: {record.order_id} "
-                f"BUY {leg.filled_qty}x {leg.symbol} @ ${tp_price:.4f}"
-            )
-        else:
-            logger.error(f"[DailyPutSell] Failed to place TP order for {leg.symbol}")
-
-    except Exception as e:
-        logger.error(f"[DailyPutSell] Error placing TP order: {e}")
-
-
 # ─── Trade Callbacks ────────────────────────────────────────────────────────
 
 def _on_trade_opened(trade, account) -> None:
@@ -468,8 +281,7 @@ def _on_trade_opened(trade, account) -> None:
     Called when the short put trade is opened (RFQ or limit filled).
 
     1. Computes fair price and SL threshold from fill price.
-    2. Places a limit buy TP order at 10% of fill price.
-    3. Logs entry details and sends Telegram notification.
+    2. Logs entry details and sends Telegram notification.
     """
     # Capture entry index price
     index_price = get_btc_index_price(use_cache=False)
@@ -529,9 +341,6 @@ def _on_trade_opened(trade, account) -> None:
                 f"fairspread=${fp['fairspread']:.2f}"
             )
 
-    # Place TP limit order
-    _place_tp_limit_order(trade)
-
     # Telegram notification
     ts = datetime.now(timezone.utc).strftime("%H:%M UTC")
 
@@ -590,23 +399,11 @@ def _on_trade_opened(trade, account) -> None:
 
 def _on_trade_closed(trade, account) -> None:
     """
-    Called when the short put trade is closed (TP, SL, or expiry).
+    Called when the short put trade is closed (SL or expiry).
 
-    1. Cancels any outstanding TP order (may already be filled/cancelled).
-    2. Logs PnL and close details.
-    3. Sends Telegram notification.
+    1. Logs PnL and close details.
+    2. Sends Telegram notification.
     """
-    # Cancel outstanding TP order if it wasn't the exit reason
-    tp_order_id = trade.metadata.get("tp_order_id")
-    if tp_order_id and _ctx and not trade.metadata.get("tp_finalized"):
-        try:
-            record = _ctx.lifecycle_manager.order_manager._orders.get(tp_order_id)
-            if record and record.is_live:
-                _ctx.executor.cancel_order(tp_order_id)
-                logger.info(f"[DailyPutSell] Cancelled TP order {tp_order_id}")
-        except Exception as e:
-            logger.warning(f"[DailyPutSell] Could not cancel TP order: {e}")
-
     pnl = trade.realized_pnl if trade.realized_pnl is not None else 0.0
     entry_cost = trade.total_entry_cost()
     roi = (pnl / abs(entry_cost) * 100) if entry_cost else 0.0
@@ -614,9 +411,7 @@ def _on_trade_closed(trade, account) -> None:
 
     # Determine exit reason — priority: metadata flags > PnL > hold time
     exit_reason = "unknown"
-    if trade.metadata.get("tp_finalized"):
-        exit_reason = "TP (limit fill)"
-    elif trade.metadata.get("sl_triggered"):
+    if trade.metadata.get("sl_triggered"):
         exit_reason = f"SL ({STOP_LOSS_PCT}% loss, fair-price)"
     elif pnl <= -(abs(entry_cost) * STOP_LOSS_PCT / 100):
         exit_reason = f"SL ({STOP_LOSS_PCT}% loss)"
@@ -639,16 +434,9 @@ def _on_trade_closed(trade, account) -> None:
     leg = trade.open_legs[0] if trade.open_legs else None
     entry_price = float(leg.fill_price) if leg and leg.fill_price else 0
     sl_threshold = trade.metadata.get("sl_threshold")
-    tp_price = trade.metadata.get("tp_price")
 
     trigger_text = ""
-    if trade.metadata.get("tp_finalized"):
-        trigger_text = (
-            f"Trigger: <b>Take Profit</b>\n"
-            f"TP target: ${tp_price:.2f} ({TP_CAPTURE_PCT*100:.0f}% of ${entry_price:.2f} entry)"
-            if tp_price else "Trigger: <b>Take Profit</b>"
-        )
-    elif trade.metadata.get("sl_triggered"):
+    if trade.metadata.get("sl_triggered"):
         trigger_text = (
             f"Trigger: <b>Stop Loss</b>\n"
             f"SL threshold: ${sl_threshold:.2f} ({STOP_LOSS_PCT}% loss on ${entry_price:.2f} entry)"
@@ -690,9 +478,7 @@ def _on_trade_closed(trade, account) -> None:
     # Close execution phase (inferred from metadata and timing)
     close_qty = (trade.close_legs[0].filled_qty if (trade.close_legs and trade.close_legs[0].filled_qty) else None) or (leg.filled_qty if leg else '?')
     close_exec = ""
-    if trade.metadata.get("tp_finalized"):
-        close_exec = "Execution: TP limit order"
-    elif trade.metadata.get("sl_triggered"):
+    if trade.metadata.get("sl_triggered"):
         sl_triggered_at = trade.metadata.get("sl_triggered_at")
         if sl_triggered_at and trade.closed_at:
             close_duration = trade.closed_at - float(sl_triggered_at)
@@ -761,14 +547,11 @@ def daily_put_sell() -> StrategyConfig:
         ],
 
         # ── When to exit ─────────────────────────────────────────────
-        # 1. TP: _tp_filled_exit detects the standing limit buy fill
-        #    and finalizes the trade directly (no close flow needed).
-        # 2. SL: _fair_price_sl at 70% loss based on fair price vs fill.
-        #    On trigger, it switches to limit mode and configures phased
-        #    buy-to-close (15s fair → 15s step → aggressive at ask).
-        # 3. Expiry: option expires worthless → full premium captured.
+        # SL: _fair_price_sl at 70% loss based on fair price vs fill.
+        #     On trigger, switches to limit mode and configures phased
+        #     buy-to-close (15s fair → 15s step → aggressive at ask).
+        # Expiry: option expires worthless → full premium captured.
         exit_conditions=[
-            _tp_filled_exit(),
             _fair_price_sl(),
         ],
 
@@ -833,6 +616,5 @@ def daily_put_sell() -> StrategyConfig:
             "rfq_min_book_improvement_pct": _compute_rfq_gate,
             "rfq_timeout_seconds": RFQ_OPEN_TIMEOUT,
             "rfq_relax_after_seconds": 999,
-            "on_runner_created": _capture_context,
         },
     )

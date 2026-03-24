@@ -98,9 +98,9 @@ get_env_file() {
 
     # If a slot .toml config exists, generate .env from it
     if [[ -f "$toml_file" ]]; then
-        step "Generating .env.slot-$slot from slots/slot-$slot.toml"
-        python3 "$PROJECT_ROOT/slot_config.py" "$slot"
-        ok ".env.slot-$slot generated"
+        step "Generating .env.slot-$slot from slots/slot-$slot.toml" >&2
+        python3 "$PROJECT_ROOT/slot_config.py" "$slot" >&2
+        ok ".env.slot-$slot generated" >&2
     fi
 
     if [[ ! -f "$env_file" ]]; then

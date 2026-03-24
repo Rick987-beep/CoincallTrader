@@ -141,19 +141,21 @@ def _on_trade_opened(trade, account) -> None:
         logger.warning("[Long Strangle] Could not capture entry index price!")
 
     ts = datetime.now(timezone.utc).strftime("%H:%M UTC")
-    entry_cost = trade.total_entry_cost()
+    entry_cost_btc = trade.total_entry_cost()  # BTC on Deribit
+    entry_cost_usd = entry_cost_btc * index_price if index_price else None
     legs_text = "\n".join(
         f"  {leg.side.upper()} {leg.qty}× {leg.symbol}"
         for leg in trade.open_legs
     )
     idx_text = f"BTC index: ${index_price:,.0f}" if index_price else "BTC index: N/A"
+    cost_text = f"${entry_cost_usd:,.2f}" if entry_cost_usd is not None else f"{entry_cost_btc:.6f} BTC"
     try:
         get_notifier().send(
             f"📊 <b>Long Strangle (Index Move) — Trade Opened</b>\n"
             f"Time: {ts}\n"
             f"ID: {trade.id}\n"
             f"{legs_text}\n"
-            f"Entry cost: ${entry_cost:.2f}\n"
+            f"Entry cost: {cost_text}\n"
             f"{idx_text}  |  Trigger: ±${MOVE_DISTANCE_USD}  |  Hard close: {CLOSE_HOUR:02d}:00 UTC\n"
             f"Equity: ${account.equity:,.2f}\n"
             f"Avail margin: ${account.available_margin:,.2f} "
@@ -165,33 +167,42 @@ def _on_trade_opened(trade, account) -> None:
 
 def _on_trade_closed(trade, account) -> None:
     """Log PnL and index move at close, send Telegram notification."""
-    pnl = trade.realized_pnl if trade.realized_pnl is not None else 0.0
-    entry_cost = trade.total_entry_cost()
-    roi = (pnl / abs(entry_cost) * 100) if entry_cost else 0.0
-    hold_seconds = trade.hold_seconds or 0
-
     entry_index = trade.metadata.get("entry_index_price")
     close_index = _get_index_price(use_cache=False)
     index_move = abs(close_index - entry_index) if (entry_index and close_index) else None
 
+    # fill_price is in BTC on Deribit — convert to USD for display
+    pnl_btc = trade.realized_pnl if trade.realized_pnl is not None else 0.0
+    entry_cost_btc = trade.total_entry_cost()
+    ref_price = close_index or entry_index  # best available index for conversion
+    pnl_usd = pnl_btc * ref_price if ref_price else None
+    entry_cost_usd = entry_cost_btc * ref_price if ref_price else None
+    roi = (pnl_usd / abs(entry_cost_usd) * 100) if entry_cost_usd else 0.0
+    hold_seconds = trade.hold_seconds or 0
+
+    pnl_display = f"${pnl_usd:+,.2f}" if pnl_usd is not None else f"{pnl_btc:+.6f} BTC"
+    cost_display = f"${entry_cost_usd:,.2f}" if entry_cost_usd is not None else f"{entry_cost_btc:.6f} BTC"
+
     msg = (
         f"[Long Strangle] Trade closed: {trade.id}  |  "
-        f"PnL: ${pnl:+.2f}  |  ROI: {roi:+.1f}%  |  "
+        f"PnL: {pnl_display} ({roi:+.1f}%)  |  "
         f"Hold: {hold_seconds / 60:.1f} min  |  "
-        f"Entry cost: ${entry_cost:.2f}"
+        f"Entry cost: {cost_display}"
     )
     if index_move is not None:
         msg += f"  |  Index move: ${index_move:.0f}"
     logger.info(msg)
 
     ts = datetime.now(timezone.utc).strftime("%H:%M UTC")
-    emoji = "✅" if pnl >= 0 else "❌"
+    emoji = "✅" if (pnl_usd or pnl_btc) >= 0 else "❌"
     legs_text = ""
     if trade.close_legs:
-        legs_text = "\n".join(
-            f"  {leg.side.upper()} {leg.filled_qty}× {leg.symbol} @ ${leg.fill_price}"
-            for leg in trade.close_legs
-        ) + "\n"
+        def _leg_line(leg):
+            if leg.fill_price and ref_price:
+                return (f"  {leg.side.upper()} {leg.filled_qty}× {leg.symbol}"
+                        f" @ ${leg.fill_price * ref_price:,.2f}")
+            return f"  {leg.side.upper()} {leg.filled_qty}× {leg.symbol}"
+        legs_text = "\n".join(_leg_line(leg) for leg in trade.close_legs) + "\n"
     entry_idx_text = f"Entry index: ${entry_index:,.0f}" if entry_index else ""
     close_idx_text = f"Close index: ${close_index:,.0f}" if close_index else ""
     idx_text = f"Index move: ${index_move:,.0f}" if index_move is not None else ""
@@ -200,9 +211,9 @@ def _on_trade_closed(trade, account) -> None:
             f"{emoji} <b>Long Strangle (Index Move) — Trade Closed</b>\n"
             f"Time: {ts}\n"
             f"ID: {trade.id}\n"
-            f"PnL: <b>${pnl:+.2f}</b> ({roi:+.1f}%)\n"
+            f"PnL: <b>{pnl_display}</b> ({roi:+.1f}%)\n"
             f"Hold: {hold_seconds / 60:.1f} min\n"
-            f"Entry cost: ${entry_cost:.2f}\n"
+            f"Entry cost: {cost_display}\n"
             f"{legs_text}"
             f"{entry_idx_text}  →  {close_idx_text}  |  {idx_text}\n"
             f"Equity: ${account.equity:,.2f}\n"

@@ -1,87 +1,88 @@
 #!/usr/bin/env python3
 """
-Extract BTC short-dated options from raw tardis.dev gzip into parquet.
+Extract BTC short-dated options (≤ max_dte days to expiry) from a raw
+tardis.dev OPTIONS.csv.gz into a compact parquet file for backtesting.
 
-Reads the full options_chain .csv.gz (ALL instruments, ~93M rows, ~4.5GB),
-filters to BTC options matching specified expiries, and writes a compact
-parquet file with float32 columns and zstd compression.
+Reads the full options_chain .csv.gz (~4.5 GB, all Deribit instruments),
+filters down to BTC options whose expiry is within max_dte calendar days
+of the trade date, and writes a zstd-compressed parquet with float32 columns.
 
-The resulting parquet is what HistoricOptionChain loads for backtesting.
+The parquet schema is what HistoricOptionChain (chain.py) expects.
 
 Usage:
-    python -m analysis.tardis_options.extract                          # defaults
-    python -m analysis.tardis_options.extract --date 2025-03-01 --expiries 2MAR25 3MAR25
-    python -m analysis.tardis_options.extract --all-btc                # all BTC expiries
+    python -m analysis.tardis_options.extract 2026-03-09
+    python -m analysis.tardis_options.extract 2026-03-09 --max-dte 7
+    python -m analysis.tardis_options.extract 2026-03-09 --gz-path /tmp/OPTIONS.csv.gz
 """
 import argparse
 import gzip
 import os
+import re
 import sys
 import time
-
-import numpy as np
+from datetime import date, datetime
+from typing import Dict, Optional
 
 try:
     import pyarrow as pa
     import pyarrow.parquet as pq
 except ImportError:
-    print("pip install pyarrow")
+    print("pip install pyarrow", file=sys.stderr)
     sys.exit(1)
 
 DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
 
+_MONTH = {
+    "JAN": 1, "FEB": 2, "MAR": 3, "APR": 4, "MAY": 5, "JUN": 6,
+    "JUL": 7, "AUG": 8, "SEP": 9, "OCT": 10, "NOV": 11, "DEC": 12,
+}
+_EXPIRY_RE = re.compile(r"^(\d{1,2})([A-Z]{3})(\d{2})$")
 
-def parse_symbol(sym):
-    """BTC-2MAR25-86000-C -> (expiry_str, strike, is_call) or None."""
-    parts = sym.split("-")
-    if len(parts) != 4 or parts[0] != "BTC":
+
+def _parse_expiry_date(expiry_str: str) -> Optional[date]:
+    """Parse Deribit expiry string to a date. '9MAR26' -> date(2026, 3, 9)."""
+    m = _EXPIRY_RE.match(expiry_str)
+    if not m:
         return None
-    return parts[1], float(parts[2]), parts[3] == "C"
+    month = _MONTH.get(m.group(2))
+    if month is None:
+        return None
+    return date(2000 + int(m.group(3)), month, int(m.group(1)))
 
 
-def safe_float(val):
-    """Convert string to float, empty/missing -> NaN."""
-    if not val or val == "":
-        return float("nan")
-    return float(val)
+def _safe_float(val: str) -> float:
+    return float(val) if val else float("nan")
 
 
-def extract(date_str="2025-03-01", expiries=None, all_btc=False):
-    """Extract BTC options from raw gzip to parquet.
+def extract(
+    date_str: str,
+    gz_path: Optional[str] = None,
+    max_dte: int = 28,
+    data_dir: str = DATA_DIR,
+) -> str:
+    """Extract BTC options with DTE ≤ max_dte from raw OPTIONS.csv.gz to parquet.
 
     Args:
-        date_str:  Date string YYYY-MM-DD.
-        expiries:  Set of expiry strings to include, e.g. {"2MAR25", "3MAR25"}.
-                   If None, defaults to 0DTE+1DTE for 2025-03-01.
-        all_btc:   If True, include all BTC expiries (ignores expiries arg).
+        date_str:  Trade date YYYY-MM-DD used for DTE calculation and output naming.
+        gz_path:   Path to OPTIONS.csv.gz. Defaults to data_dir/options_chain_{date_str}.csv.gz.
+        max_dte:   Maximum calendar days-to-expiry to include (inclusive). Default 28.
+        data_dir:  Output directory. Default: data/ next to this module.
 
     Returns:
-        Path to the output parquet file.
+        Path to the written parquet file.
     """
-    gz_path = os.path.join(DATA_DIR, f"options_chain_{date_str}.csv.gz")
+    if gz_path is None:
+        gz_path = os.path.join(data_dir, f"options_chain_{date_str}.csv.gz")
     if not os.path.exists(gz_path):
-        print(f"Source file not found: {gz_path}")
-        print("Run download.py first.")
-        sys.exit(1)
+        raise FileNotFoundError(f"Source file not found: {gz_path}")
 
-    if expiries is None:
-        expiries = {"2MAR25", "3MAR25"}
+    trade_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+    out_path = os.path.join(data_dir, f"btc_{date_str}.parquet")
 
-    # Build output filename
-    if all_btc:
-        out_name = f"btc_all_{date_str}.parquet"
-    else:
-        exp_tag = "_".join(sorted(expiries)).lower()
-        out_name = f"btc_{exp_tag}_{date_str}.parquet"
-    out_path = os.path.join(DATA_DIR, out_name)
+    print(f"[extract] {date_str}  source: {os.path.getsize(gz_path):,} bytes  max_dte={max_dte}")
 
-    print(f"Source: {gz_path} ({os.path.getsize(gz_path):,} bytes)")
-    label = "all BTC expiries" if all_btc else f"expiries {expiries}"
-    print(f"Filter: {label}")
-
-    # Accumulate rows in column lists
-    rows = {
-        "timestamp": [], "expiry_str": [], "strike": [], "is_call": [],
+    cols: Dict[str, list] = {
+        "timestamp": [], "expiry": [], "strike": [], "is_call": [],
         "underlying_price": [], "mark_price": [], "mark_iv": [],
         "bid_price": [], "bid_amount": [], "bid_iv": [],
         "ask_price": [], "ask_amount": [], "ask_iv": [],
@@ -89,8 +90,11 @@ def extract(date_str="2025-03-01", expiries=None, all_btc=False):
         "delta": [], "gamma": [], "vega": [], "theta": [],
     }
 
-    matched = 0
-    total = 0
+    # Cache DTE per expiry string to avoid recomputing on every row.
+    # Value is the DTE int, or None if unparseable, or -1 if out-of-range.
+    dte_cache: Dict[str, Optional[int]] = {}
+
+    matched = total = 0
     t0 = time.time()
 
     with gzip.open(gz_path, "rt", errors="replace") as f:
@@ -102,98 +106,102 @@ def extract(date_str="2025-03-01", expiries=None, all_btc=False):
             fields = line.split(",")
             sym = fields[idx["symbol"]]
 
-            if not sym.startswith("BTC"):
+            if not sym.startswith("BTC-"):
                 continue
 
-            parsed = parse_symbol(sym)
-            if parsed is None:
+            parts = sym.split("-")
+            if len(parts) != 4:
                 continue
 
-            expiry_str, strike, is_call = parsed
-            if not all_btc and expiry_str not in expiries:
+            expiry_str = parts[1]
+
+            if expiry_str not in dte_cache:
+                exp_date = _parse_expiry_date(expiry_str)
+                if exp_date is None:
+                    dte_cache[expiry_str] = None
+                else:
+                    dte_cache[expiry_str] = (exp_date - trade_date).days
+
+            dte = dte_cache[expiry_str]
+            if dte is None or dte < 0 or dte > max_dte:
                 continue
 
             matched += 1
-            rows["timestamp"].append(int(fields[idx["timestamp"]]))
-            rows["expiry_str"].append(expiry_str)
-            rows["strike"].append(strike)
-            rows["is_call"].append(is_call)
-            rows["underlying_price"].append(safe_float(fields[idx["underlying_price"]]))
-            rows["mark_price"].append(safe_float(fields[idx["mark_price"]]))
-            rows["mark_iv"].append(safe_float(fields[idx["mark_iv"]]))
-            rows["bid_price"].append(safe_float(fields[idx["bid_price"]]))
-            rows["bid_amount"].append(safe_float(fields[idx["bid_amount"]]))
-            rows["bid_iv"].append(safe_float(fields[idx["bid_iv"]]))
-            rows["ask_price"].append(safe_float(fields[idx["ask_price"]]))
-            rows["ask_amount"].append(safe_float(fields[idx["ask_amount"]]))
-            rows["ask_iv"].append(safe_float(fields[idx["ask_iv"]]))
-            rows["last_price"].append(safe_float(fields[idx["last_price"]]))
-            rows["open_interest"].append(safe_float(fields[idx["open_interest"]]))
-            rows["delta"].append(safe_float(fields[idx["delta"]]))
-            rows["gamma"].append(safe_float(fields[idx["gamma"]]))
-            rows["vega"].append(safe_float(fields[idx["vega"]]))
-            rows["theta"].append(safe_float(fields[idx["theta"]]))
+            cols["timestamp"].append(int(fields[idx["timestamp"]]))
+            cols["expiry"].append(expiry_str)
+            cols["strike"].append(float(parts[2]))
+            cols["is_call"].append(parts[3].rstrip() == "C")
+            cols["underlying_price"].append(_safe_float(fields[idx["underlying_price"]]))
+            cols["mark_price"].append(_safe_float(fields[idx["mark_price"]]))
+            cols["mark_iv"].append(_safe_float(fields[idx["mark_iv"]]))
+            cols["bid_price"].append(_safe_float(fields[idx["bid_price"]]))
+            cols["bid_amount"].append(_safe_float(fields[idx["bid_amount"]]))
+            cols["bid_iv"].append(_safe_float(fields[idx["bid_iv"]]))
+            cols["ask_price"].append(_safe_float(fields[idx["ask_price"]]))
+            cols["ask_amount"].append(_safe_float(fields[idx["ask_amount"]]))
+            cols["ask_iv"].append(_safe_float(fields[idx["ask_iv"]]))
+            cols["last_price"].append(_safe_float(fields[idx["last_price"]]))
+            cols["open_interest"].append(_safe_float(fields[idx["open_interest"]]))
+            cols["delta"].append(_safe_float(fields[idx["delta"]]))
+            cols["gamma"].append(_safe_float(fields[idx["gamma"]]))
+            cols["vega"].append(_safe_float(fields[idx["vega"]]))
+            cols["theta"].append(_safe_float(fields[idx["theta"]]))
 
-            if matched % 200000 == 0:
-                elapsed = time.time() - t0
-                print(f"  {matched:>10,} matched / {total:>12,} scanned  ({elapsed:.0f}s)")
+            if matched % 500_000 == 0:
+                print(
+                    f"  {matched:>10,} matched / {total:>12,} scanned"
+                    f"  ({time.time() - t0:.0f}s)"
+                )
 
     elapsed = time.time() - t0
-    print(f"\nScan complete in {elapsed:.0f}s")
-    print(f"  Total scanned:  {total:,}")
-    print(f"  Matched rows:   {matched:,}")
+    print(f"  Scan done: {matched:,} rows from {total:,} total  ({elapsed:.0f}s)")
 
     if matched == 0:
-        print("No matching rows found!")
-        return None
+        raise ValueError(f"No BTC rows with DTE ≤ {max_dte} found in {gz_path}")
 
-    # Build parquet with compact types
+    os.makedirs(data_dir, exist_ok=True)
     table = pa.table({
-        "timestamp": pa.array(rows["timestamp"], type=pa.int64()),
-        "expiry": pa.array(rows["expiry_str"], type=pa.dictionary(pa.int8(), pa.string())),
-        "strike": pa.array(rows["strike"], type=pa.float32()),
-        "is_call": pa.array(rows["is_call"], type=pa.bool_()),
-        "underlying_price": pa.array(rows["underlying_price"], type=pa.float32()),
-        "mark_price": pa.array(rows["mark_price"], type=pa.float32()),
-        "mark_iv": pa.array(rows["mark_iv"], type=pa.float32()),
-        "bid_price": pa.array(rows["bid_price"], type=pa.float32()),
-        "bid_amount": pa.array(rows["bid_amount"], type=pa.float32()),
-        "bid_iv": pa.array(rows["bid_iv"], type=pa.float32()),
-        "ask_price": pa.array(rows["ask_price"], type=pa.float32()),
-        "ask_amount": pa.array(rows["ask_amount"], type=pa.float32()),
-        "ask_iv": pa.array(rows["ask_iv"], type=pa.float32()),
-        "last_price": pa.array(rows["last_price"], type=pa.float32()),
-        "open_interest": pa.array(rows["open_interest"], type=pa.float32()),
-        "delta": pa.array(rows["delta"], type=pa.float32()),
-        "gamma": pa.array(rows["gamma"], type=pa.float32()),
-        "vega": pa.array(rows["vega"], type=pa.float32()),
-        "theta": pa.array(rows["theta"], type=pa.float32()),
+        "timestamp":        pa.array(cols["timestamp"],        type=pa.int64()),
+        "expiry":           pa.array(cols["expiry"],           type=pa.dictionary(pa.int8(), pa.string())),
+        "strike":           pa.array(cols["strike"],           type=pa.float32()),
+        "is_call":          pa.array(cols["is_call"],          type=pa.bool_()),
+        "underlying_price": pa.array(cols["underlying_price"], type=pa.float32()),
+        "mark_price":       pa.array(cols["mark_price"],       type=pa.float32()),
+        "mark_iv":          pa.array(cols["mark_iv"],          type=pa.float32()),
+        "bid_price":        pa.array(cols["bid_price"],        type=pa.float32()),
+        "bid_amount":       pa.array(cols["bid_amount"],       type=pa.float32()),
+        "bid_iv":           pa.array(cols["bid_iv"],           type=pa.float32()),
+        "ask_price":        pa.array(cols["ask_price"],        type=pa.float32()),
+        "ask_amount":       pa.array(cols["ask_amount"],       type=pa.float32()),
+        "ask_iv":           pa.array(cols["ask_iv"],           type=pa.float32()),
+        "last_price":       pa.array(cols["last_price"],       type=pa.float32()),
+        "open_interest":    pa.array(cols["open_interest"],    type=pa.float32()),
+        "delta":            pa.array(cols["delta"],            type=pa.float32()),
+        "gamma":            pa.array(cols["gamma"],            type=pa.float32()),
+        "vega":             pa.array(cols["vega"],             type=pa.float32()),
+        "theta":            pa.array(cols["theta"],            type=pa.float32()),
     })
-
     pq.write_table(table, out_path, compression="zstd")
+
     size = os.path.getsize(out_path)
-    print(f"\nSaved: {out_path}")
-    print(f"  Size: {size:,} bytes ({size / 1024 / 1024:.1f} MB)")
-    print(f"  Rows: {len(table):,}")
+    print(f"  Saved: {out_path}  ({size / 1024**2:.1f} MB,  {len(table):,} rows)")
 
-    # Per-expiry summary
-    from datetime import datetime
-    unique_expiries = set(rows["expiry_str"])
-    for exp in sorted(unique_expiries):
-        n = sum(1 for e in rows["expiry_str"] if e == exp)
-        strikes = set(s for s, e in zip(rows["strike"], rows["expiry_str"]) if e == exp)
-        print(f"  {exp}: {n:,} rows, {len(strikes)} strikes ({min(strikes):.0f}–{max(strikes):.0f})")
+    # Quick summary using pyarrow (fast, no Python-list iteration).
+    import pyarrow.compute as pc
+    ts_col = table.column("timestamp")
+    t_min = datetime.utcfromtimestamp(pc.min(ts_col).as_py() / 1e6)
+    t_max = datetime.utcfromtimestamp(pc.max(ts_col).as_py() / 1e6)
+    print(f"    Time range: {t_min:%H:%M} – {t_max:%H:%M} UTC")
+    unique_expiries = sorted(dte_cache.keys())
+    print(f"    Expiries ({len(unique_expiries)}): {unique_expiries}")
 
-    ts_min, ts_max = min(rows["timestamp"]), max(rows["timestamp"])
-    print(f"  Time: {datetime.utcfromtimestamp(ts_min/1e6)} → {datetime.utcfromtimestamp(ts_max/1e6)} UTC")
     return out_path
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Extract BTC options to parquet")
-    parser.add_argument("--date", default="2025-03-01", help="YYYY-MM-DD")
-    parser.add_argument("--expiries", nargs="+", help="e.g. 2MAR25 3MAR25")
-    parser.add_argument("--all-btc", action="store_true", help="All BTC expiries")
+    parser.add_argument("date", help="Trade date YYYY-MM-DD")
+    parser.add_argument("--max-dte", type=int, default=28, help="Max days-to-expiry (default: 28)")
+    parser.add_argument("--gz-path", help="Override path to OPTIONS.csv.gz")
     args = parser.parse_args()
-    expiries = set(args.expiries) if args.expiries else None
-    extract(args.date, expiries=expiries, all_btc=args.all_btc)
+    extract(args.date, gz_path=args.gz_path, max_dte=args.max_dte)

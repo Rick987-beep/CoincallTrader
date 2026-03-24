@@ -2,9 +2,13 @@
 tardis_options — Deribit historic option data via tardis.dev.
 
 Workflow:
-    1. download.py  — fetch raw options_chain .csv.gz from tardis.dev
-    2. extract.py   — filter BTC 0DTE/1DTE → compact parquet
-    3. chain.py     — HistoricOptionChain for fast backtest lookups
+    fetch.py    — full pipeline: download → extract → delete raw (date range)
+    download.py — download a single day's OPTIONS.csv.gz (~4.5 GB)
+    extract.py  — filter BTC options with DTE ≤ max_dte → compact parquet
+    chain.py    — HistoricOptionChain for fast backtest lookups
+
+Quick start:
+    python -m analysis.tardis_options.fetch --from 2026-03-09 --to 2026-03-23
 """
 from analysis.tardis_options.chain import HistoricOptionChain
 

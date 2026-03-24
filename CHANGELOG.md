@@ -5,6 +5,61 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.1] - 2026-03-24
+
+### Bug Fixes & Pipeline Additions
+
+#### daily_put_sell — Remove TP limit order system
+The proactive take-profit limit order introduced in a prior session was
+removed. It relied on internal framework state in ways that interacted
+poorly with the lifecycle engine, and the strategy's natural exit — letting
+the option expire worthless — already captures 100% of premium. The TP
+infrastructure added complexity without reliable benefit.
+
+- **Removed** `TP_CAPTURE_PCT` param and `tp_capture_pct` from `slots/slot-01.toml`
+- **Removed** `_ctx` / `_capture_context` / `_tp_filled_exit` / `_place_tp_limit_order`
+- **Removed** `on_runner_created` hook (no longer needed)
+- **Removed** unused imports: `OrderPurpose`, `OrderStatus`, `TradeState`
+- **Updated** `_on_trade_opened`: no longer places TP order after fill
+- **Updated** `_on_trade_closed`: no TP order cancellation; exit reasons
+  simplified to SL or expiry only
+- **Updated** module docstring: reflects SL-or-expiry exit model
+
+#### long_strangle_index_move — Fix BTC→USD display in Telegram
+Deribit denominated all prices in BTC; the Telegram notifications were
+showing raw BTC values as if they were USD figures.
+
+- Entry cost, PnL, and fill prices now converted to USD using BTC index
+  price at close (falls back to BTC display if index unavailable)
+- ROI now calculated on USD values
+- Close leg lines show `@ $XX,XXX` (USD) instead of `@ 0.00XXXX`
+
+#### deployment/deploy-slot.sh — Fix stdout pollution in get_env_file()
+`step` and `ok` log messages inside `get_env_file()` were writing to stdout,
+corrupting the env file path that callers received. Redirected to stderr
+(`>&2`).
+
+#### analysis/tardis_options — Pipeline v2: fetch, retry, resumability
+Full rewrite of the download/extract pipeline:
+
+- **New `fetch.py`** — Orchestrator for a date range: downloads raw
+  `.csv.gz`, extracts to `.parquet`, deletes raw file, then moves to the
+  next day. Automatically skips dates that already have a parquet.
+  Safely resumable — interrupt and re-run without re-downloading.
+- **New `run_fetch.sh`** — Detached shell launcher (`nohup`); survives
+  closing the terminal. Logs to `data/fetch_log.txt`.
+- **New `_validate.py`** — Post-extract validation checks.
+- **`download.py`** — Rewritten: retry loop up to 20×, exponential
+  backoff (10 s → 5 min cap). Documented that tardis.dev does not support
+  HTTP Range / partial content (verified March 2026); dropped connections
+  require a full restart (handled automatically by retry loop).
+- **`extract.py`** — Refactored: DTE filter now uses calendar days from
+  trade date; zstd compression; cleaner public API.
+- **`README.md`** — Comprehensive rewrite reflecting new pipeline
+  (`fetch.py` quickstart, individual step docs, API key notes).
+
+---
+
 ## [1.6.0] - 2026-03-23
 
 ### Slot Configuration System — One-File Deploy

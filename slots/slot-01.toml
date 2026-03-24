@@ -17,6 +17,5 @@ entry_hour_start = 3
 entry_hour_end = 4
 min_margin_pct = 10
 stop_loss_pct = 70
-tp_capture_pct = 0.90
 check_interval = 15
 max_concurrent = 2

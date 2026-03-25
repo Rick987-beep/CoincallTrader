@@ -8,8 +8,8 @@ Workflow:
     chain.py    — HistoricOptionChain for fast backtest lookups
 
 Quick start:
-    python -m analysis.tardis_options.fetch --from 2026-03-09 --to 2026-03-23
+    python -m backtester2.tardis_options.fetch --from 2026-03-09 --to 2026-03-23
 """
-from analysis.tardis_options.chain import HistoricOptionChain
+from backtester2.tardis_options.chain import HistoricOptionChain
 
 __all__ = ["HistoricOptionChain"]

@@ -5,6 +5,46 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.7.0] - 2026-03-25
+
+### Added — Backtester V2 (Real Deribit Prices)
+
+Full options backtester using historic Deribit prices from Tardis, replacing
+the V1 Black-Scholes model with real bid/ask data.
+
+#### Data Foundation
+- **`snapshot_builder.py`** — One-time conversion of raw Tardis tick parquets
+  into 5-min option snapshots + 1-min BTC spot OHLC bars. 15 days builds in
+  ~128s, producing 1.99M option rows and 21.5K spot bars.
+
+#### Market Replay Engine
+- **`market_replay.py`** — Loads snapshots into memory, iterates `MarketState`
+  objects with full option chain access, spot data, and O(1) excursion lookups
+  via pre-computed cumulative max/min arrays.
+- **`strategy_base.py`** — `Trade`/`OpenPosition` dataclasses, `Strategy`
+  protocol (typing.Protocol), composable entry/exit condition helpers
+  (time_window, stop_loss_pct, index_move_trigger, etc.).
+
+#### Strategies
+- **`strategies/straddle_strangle.py`** — Buy 0DTE ATM straddle or OTM
+  strangle, exit on BTC index extrusion. 840-combo parameter grid.
+- **`strategies/daily_put_sell.py`** — Sell 1DTE OTM put, exit on stop-loss
+  or expiry. 20-combo parameter grid.
+
+#### Engine & Reporting
+- **`engine.py`** — Single-pass multi-combo grid evaluation. All 840 straddle
+  combos (50,025 trades) complete in ~21s on M1 Mac.
+- **`reporting_v2.py`** — Strategy-agnostic HTML report generator. Auto-discovers
+  parameter names, generates heatmaps for all 2D param pairs, equity curves,
+  trade logs. No V1 coupling.
+- **`run.py`** — Clean CLI entry point (~115 lines). No V1 imports or shims.
+
+#### Data Integrity
+- Option prices are BTC-denominated, converted to USD via `price × spot`.
+- Entry at ask, exit at bid (conservative worst-fill pricing).
+- Deribit fee model: `MIN(0.03% × index, 12.5% × option_price)` per leg.
+- NaN guards for illiquid strikes with missing bid prices in raw data.
+
 ## [1.6.2] - 2026-03-25
 
 ### Security Hardening — Dashboard & Hub

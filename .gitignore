@@ -81,3 +81,8 @@ archive/
 
 # Large data files (tardis.dev downloads, parquet extracts)
 analysis/tardis_options/data/
+
+# Backtester2 artifacts (snapshots, raw data, generated reports)
+backtester2/snapshots/
+backtester2/tardis_options/data/
+backtester2/*_report.html

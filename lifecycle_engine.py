@@ -34,7 +34,10 @@ import json
 import logging
 import os
 import time
+from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional
+
+from exchanges.deribit.symbols import option_expiry_utc
 
 from account_manager import AccountSnapshot, PositionSnapshot
 from trade_execution import LimitFillManager, ExecutionParams
@@ -302,6 +305,65 @@ class LifecycleEngine:
 
     # ── Exit evaluation ──────────────────────────────────────────────────
 
+    def _is_trade_expired(self, trade: TradeLifecycle) -> bool:
+        """True if any open leg's option has passed its 08:00 UTC expiry."""
+        now = datetime.now(timezone.utc)
+        return any(
+            (exp := option_expiry_utc(leg.symbol)) is not None and now >= exp
+            for leg in trade.open_legs
+        )
+
+    def _settle_expired_trade(self, trade: TradeLifecycle) -> None:
+        """Close a trade whose option legs expired at exchange settlement.
+
+        The exchange already settled the contracts and cancelled open orders.
+        We mirror that: purge our order ledger, record a close-at-zero for
+        each leg (expired worthless = bought back at 0), finalize PnL.
+        """
+        # Purge any in-flight orders from our ledger (already gone on exchange)
+        self._order_manager.cancel_all_for(trade.id)
+
+        # Synthesize close legs at price 0 (expired worthless)
+        trade.close_legs = [
+            TradeLeg(
+                symbol=leg.symbol,
+                qty=leg.filled_qty if leg.filled_qty > 0 else leg.qty,
+                side=leg.close_side,
+                fill_price=0.0,
+                filled_qty=leg.filled_qty if leg.filled_qty > 0 else leg.qty,
+            )
+            for leg in trade.open_legs
+        ]
+        trade.state = TradeState.CLOSED
+        trade.closed_at = time.time()
+        trade._finalize_close()
+
+        symbols = [leg.symbol for leg in trade.open_legs]
+        logger.info(
+            f"Trade {trade.id}: expired at settlement — {symbols} "
+            f"→ CLOSED (PnL={trade.realized_pnl:+.4f})"
+        )
+
+        # Telegram close notification
+        entry_cost = abs(trade.total_entry_cost())
+        pnl = trade.realized_pnl or 0.0
+        roi = (pnl / entry_cost * 100) if entry_cost else 0.0
+        hold_secs = (trade.closed_at - trade.opened_at) if trade.opened_at else 0.0
+        notifier = self._get_notifier()
+        if notifier:
+            try:
+                notifier.notify_trade_closed(
+                    strategy_name=trade.strategy_id or "unknown",
+                    trade_id=trade.id,
+                    pnl=pnl,
+                    roi=roi,
+                    hold_minutes=hold_secs / 60,
+                    entry_cost=entry_cost,
+                    close_legs=trade.close_legs,
+                )
+            except Exception as e:
+                logger.warning(f"Trade {trade.id}: expiry notification failed: {e}")
+
     def _evaluate_exits(self, trade: TradeLifecycle, account: AccountSnapshot) -> None:
         """Check exit conditions for an OPEN trade. Any True → PENDING_CLOSE."""
         for cond in trade.exit_conditions:
@@ -335,6 +397,10 @@ class LifecycleEngine:
             try:
                 if trade.state == TradeState.OPENING:
                     self._check_open_fills(trade)
+
+                elif self._is_trade_expired(trade):
+                    # Option settled at expiry — close at zero, do not retry orders
+                    self._settle_expired_trade(trade)
 
                 elif trade.state == TradeState.OPEN:
                     pnl = trade.structure_pnl(account)

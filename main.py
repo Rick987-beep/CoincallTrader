@@ -20,10 +20,12 @@ import time
 
 from strategy import build_context, StrategyRunner
 from trade_lifecycle import TradeLifecycle, TradeState
+from trade_lifecycle import TradeLeg
 from persistence import TradeStatePersistence
 from health_check import HealthChecker
 from dashboard import start_dashboard
 from config import ENVIRONMENT, DEPLOYMENT_TARGET
+from exchanges.deribit.symbols import option_expiry_utc
 
 _DEV_MODE = DEPLOYMENT_TARGET == "development"
 
@@ -341,14 +343,49 @@ def _recover_trades(ctx, runners):
             continue
 
         # ── OPEN, PENDING_CLOSE, CLOSING: positions must exist ───────────
-        # Verify all open legs still have positions on the exchange
+        # Verify all open legs still have positions on the exchange.
+        # Exception: if the option has already passed its expiry time the
+        # exchange settled it (position qty → 0); treat as CLOSED at zero.
+        expired_legs = []
+        missing_legs = []
         for leg in trade.open_legs:
             if leg.symbol not in exchange_symbols:
-                logger.error(
-                    f"Cannot recover trade {trade.id}: "
-                    f"position {leg.symbol} not found on exchange"
+                from datetime import datetime, timezone
+                exp = option_expiry_utc(leg.symbol)
+                if exp and datetime.now(timezone.utc) >= exp:
+                    expired_legs.append(leg)
+                else:
+                    missing_legs.append(leg)
+
+        if missing_legs:
+            logger.error(
+                f"Cannot recover trade {trade.id}: "
+                f"position(s) {[l.symbol for l in missing_legs]} not found on exchange"
+            )
+            return None
+
+        if expired_legs:
+            # All missing legs are past expiry — record close-at-zero and restore
+            trade.close_legs = [
+                TradeLeg(
+                    symbol=leg.symbol,
+                    qty=leg.filled_qty if leg.filled_qty > 0 else leg.qty,
+                    side=leg.close_side,
+                    fill_price=0.0,
+                    filled_qty=leg.filled_qty if leg.filled_qty > 0 else leg.qty,
                 )
-                return None
+                for leg in trade.open_legs
+            ]
+            trade.state = TradeState.CLOSED
+            import time as _time
+            trade.closed_at = trade.closed_at or _time.time()
+            trade._finalize_close()
+            logger.info(
+                f"Trade {trade.id}: recovered as CLOSED (option expired — "
+                f"PnL={trade.realized_pnl:+.4f})"
+            )
+            ctx.lifecycle_manager.restore_trade(trade)
+            continue
 
         # Normalize CLOSING to safe resume point
         if trade.state == TradeState.CLOSING:

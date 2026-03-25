@@ -11,7 +11,16 @@ Coincall format: {UNDERLYING}USD-{DD}{MMM}{YY}-{STRIKE}-{C|P}
 """
 
 import re
+from datetime import datetime, timezone
 from typing import Optional, Dict
+
+# Options on both Coincall and Deribit expire at 08:00 UTC
+_EXPIRY_HOUR_UTC = 8
+
+_MONTHS = {
+    "JAN": 1, "FEB": 2, "MAR": 3, "APR": 4, "MAY": 5, "JUN": 6,
+    "JUL": 7, "AUG": 8, "SEP": 9, "OCT": 10, "NOV": 11, "DEC": 12,
+}
 
 # Regex: 1-2 digit day, 3-letter month, 2-digit year
 _DERIBIT_RE = re.compile(
@@ -85,3 +94,21 @@ def deribit_to_coincall(symbol: str) -> Optional[str]:
         f"{parts['underlying']}USD-{day}{parts['month']}{parts['year']}"
         f"-{parts['strike']}-{parts['option_type']}"
     )
+
+
+def option_expiry_utc(symbol: str) -> Optional[datetime]:
+    """
+    Return the UTC expiry datetime for an option symbol, or None if unparseable.
+
+    Accepts both Coincall (BTCUSD-25MAR26-67000-P) and Deribit (BTC-25MAR26-67000-P).
+    Options on both exchanges expire at 08:00 UTC on the stated date.
+    """
+    m = _COINCALL_RE.match(symbol) or _DERIBIT_RE.match(symbol)
+    if not m:
+        return None
+    day = int(m.group(2))
+    month = _MONTHS.get(m.group(3).upper())
+    year = 2000 + int(m.group(4))
+    if not month:
+        return None
+    return datetime(year, month, day, _EXPIRY_HOUR_UTC, 0, 0, tzinfo=timezone.utc)

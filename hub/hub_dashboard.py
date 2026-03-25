@@ -157,9 +157,18 @@ app = Flask(
     template_folder=os.path.join(os.path.dirname(__file__), "templates"),
 )
 app.secret_key = secrets.token_hex(32)
+# HTTPONLY: blocks JS document.cookie access (XSS mitigation).
+# SAMESITE=Lax: blocks session cookie from cross-site top-level POST (CSRF mitigation).
+# SECURE intentionally omitted — HTTPS handled by nginx in front.
+app.config["SESSION_COOKIE_HTTPONLY"] = True
+app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
 
 
-# ── Auth ─────────────────────────────────────────────────────────────────
+# ── Auth ───────────────────────────────────────────────────────────────────────
+
+# Brute-force guard: maps remote IP → (consecutive_fail_count, lockout_expiry_epoch).
+# 5 failures → 60 s soft-lock. Reset on success.
+_hub_login_rate: dict = {}  # ip -> (fail_count, lockout_until)
 
 def login_required(f):
     @wraps(f)
@@ -176,9 +185,19 @@ def login_required(f):
 def login():
     error = None
     if request.method == "POST":
-        if request.form.get("password") == HUB_PASSWORD:
+        ip = request.remote_addr or ""
+        count, lockout_until = _hub_login_rate.get(ip, (0, 0.0))
+        now = time.time()
+        if now < lockout_until:
+            remaining = int(lockout_until - now)
+            return render_template("hub_login.html", error=f"Too many attempts — try again in {remaining}s")
+        # constant-time compare: prevents timing side-channel password enumeration
+        if secrets.compare_digest(request.form.get("password") or "", HUB_PASSWORD):
+            _hub_login_rate.pop(ip, None)  # clear failure counter on success
             session["authenticated"] = True
             return redirect(url_for("index"))
+        count += 1
+        _hub_login_rate[ip] = (count, now + 60.0) if count >= 5 else (count, 0.0)
         error = "Invalid password"
     return render_template("hub_login.html", error=error)
 

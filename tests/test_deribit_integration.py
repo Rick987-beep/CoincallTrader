@@ -353,6 +353,11 @@ class TestOrders:
         assert _snap_to_tick(0.0053) == 0.005
         assert _snap_to_tick(0.021) == 0.021
         assert _snap_to_tick(0.0212) == 0.021
+        # Sub-tick price (e.g. deep OTM option near expiry) must clamp to 0.0001,
+        # never floor to 0.0 which Deribit rejects with Invalid params.
+        assert _snap_to_tick(0.000098) == 0.0001
+        assert _snap_to_tick(0.00005) == 0.0001
+        assert _snap_to_tick(0.00001) == 0.0001
 
 
 # ═════════════════════════════════════════════════════════════════════════════

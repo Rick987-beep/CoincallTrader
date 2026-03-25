@@ -2,21 +2,32 @@
 """
 Lifecycle Engine — Trade State Machine
 
-Orchestrates TradeLifecycle objects through the state machine:
-    PENDING_OPEN → OPENING → OPEN → PENDING_CLOSE → CLOSING → CLOSED
+Owns and advances all TradeLifecycle objects through their state machine:
+    PENDING_OPEN → OPENING → OPEN → PENDING_CLOSE → CLOSING → CLOSED | FAILED
 
-Extracted from the original LifecycleManager in trade_lifecycle.py.
-The execution routing logic lives in execution_router.py.
+Architecture:
+  - LifecycleEngine is the entry point that strategies and main.py talk to.
+  - Delegates execution to ExecutionRouter (which in turn uses LimitFillManager
+    or RFQExecutor depending on execution_mode).
+  - Drives the close loop: PENDING_CLOSE → _close_limit (places orders) → CLOSING
+    → _check_close_fills (polls fills) → back to PENDING_CLOSE on failure/partial.
+  - tick(account) is called every 10s by PositionMonitor and advances every
+    active trade one step.  Strategies do not call tick directly.
 
-Usage:
-    from lifecycle_engine import LifecycleEngine
+Key design rules:
+  - Open orders: atomic — all legs or none (prevents naked legs).
+  - Close orders: best_effort — each leg is placed independently; a pricing
+    failure on one leg skips that leg and retries it next tick, rather than
+    aborting the entire close.
+  - Circuit breaker: after MAX_CLOSE_ATTEMPTS (10) the trade transitions to
+    FAILED and logs which symbols still need manual intervention.
 
-    engine = LifecycleEngine()
+Typical wiring in main.py:
+    engine = LifecycleEngine(executor=..., rfq_executor=..., market_data=...)
     position_monitor.on_update(engine.tick)
-
     trade = engine.create(legs=[...], exit_conditions=[...])
     engine.open(trade.id)
-    # tick() handles everything from here
+    # tick() drives everything from here
 """
 
 import json
@@ -44,23 +55,16 @@ class LifecycleEngine:
     """
     Orchestrates one or more TradeLifecycles through their state machines.
 
-    Usage:
-        engine = LifecycleEngine()
+    The engine owns the set of active trades and drives them forward each
+    tick.  Strategies create trades via engine.create() + engine.open() and
+    then step back — the engine handles fills, requotes, exit evaluation,
+    and close execution automatically.
 
-        # Hook into PositionMonitor so tick() runs on every snapshot
-        position_monitor.on_update(engine.tick)
-
-        # Create a trade
-        trade = engine.create(
-            legs=[TradeLeg(symbol="BTCUSD-20FEB26-70000-C", qty=0.01, side="buy")],
-            exit_conditions=[profit_target(50), max_hold_hours(48)],
-            execution_mode="limit",
-        )
-
-        # Open it (places orders)
-        engine.open(trade.id)
-
-        # From here, tick() handles everything
+    Dependencies injected at construction:
+      executor      — ExchangeExecutor (Coincall or Deribit adapter)
+      rfq_executor  — RFQExecutor (multi-leg atomic execution, optional)
+      market_data   — ExchangeMarketData (orderbook, index price)
+      account_manager — AccountManager (for reconciliation, optional)
     """
 
     # Reconciliation runs every N ticks (~50s at 10s poll interval)
@@ -243,30 +247,46 @@ class LifecycleEngine:
 
         result = mgr.check()
 
+        def _sync_fills(close_legs, fill_states):
+            """Sync fill state back to close leg objects, matched by symbol.
+
+            Symbol-based matching (rather than index zip) is required when
+            best_effort placement skips some legs — the fill manager's leg list
+            is then shorter than trade.close_legs and index alignment breaks.
+            """
+            fill_by_symbol = {ls.symbol: ls for ls in fill_states}
+            for leg in close_legs:
+                ls = fill_by_symbol.get(leg.symbol)
+                if ls:
+                    leg.filled_qty = ls.filled_qty
+                    leg.fill_price = ls.fill_price
+                    leg.order_id = ls.order_id
+
         if result == "filled":
-            for ls, leg in zip(mgr.filled_legs, trade.close_legs):
-                leg.filled_qty = ls.filled_qty
-                leg.fill_price = ls.fill_price
-                leg.order_id = ls.order_id
-            trade.state = TradeState.CLOSED
-            trade.closed_at = time.time()
-            trade._finalize_close()
-            logger.info(f"Trade {trade.id}: all close legs filled → CLOSED (PnL={trade.realized_pnl:+.4f})")
+            _sync_fills(trade.close_legs, mgr.filled_legs)
+            if mgr.has_skipped_legs:
+                # Placed legs all filled but some couldn't be priced/placed —
+                # return to PENDING_CLOSE so _close_limit retries the remainder.
+                logger.warning(
+                    f"Trade {trade.id}: placed legs filled but "
+                    f"{len(mgr.skipped_symbols)} leg(s) skipped: "
+                    f"{mgr.skipped_symbols} \u2192 PENDING_CLOSE to retry"
+                )
+                trade.state = TradeState.PENDING_CLOSE
+            else:
+                trade.state = TradeState.CLOSED
+                trade.closed_at = time.time()
+                trade._finalize_close()
+                logger.info(f"Trade {trade.id}: all close legs filled \u2192 CLOSED (PnL={trade.realized_pnl:+.4f})")
 
         elif result == "failed":
             logger.error(f"Trade {trade.id}: close fill manager exhausted requote rounds")
-            for ls, leg in zip(mgr.filled_legs, trade.close_legs):
-                leg.filled_qty = ls.filled_qty
-                leg.fill_price = ls.fill_price
-                leg.order_id = ls.order_id
+            _sync_fills(trade.close_legs, mgr.filled_legs)
             mgr.cancel_all()
             trade.state = TradeState.PENDING_CLOSE
 
         elif result == "requoted":
-            for ls, leg in zip(mgr.filled_legs, trade.close_legs):
-                leg.order_id = ls.order_id
-                leg.filled_qty = ls.filled_qty
-                leg.fill_price = ls.fill_price
+            _sync_fills(trade.close_legs, mgr.filled_legs)
             logger.debug(f"Trade {trade.id}: requoted unfilled close legs, continuing")
 
     def _unwind_filled_legs(self, trade: TradeLifecycle, filled_legs: List[TradeLeg]) -> None:

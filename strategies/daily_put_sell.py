@@ -21,8 +21,17 @@ Open Execution (sell put — patient, up to ~5 min total):
     Place limit sell at our computed fair price.
   Phase 2.2 — Limit at bid + 33% of spread (60s):
     Step closer to bid — one third of the way from bid to fair.
+    Skipped if computed price < fair × (1 − MIN_BID_DISCOUNT_PCT%).
   Phase 2.3 — Limit at bid (60s):
     Hit the bid — aggressive fill to ensure entry.
+    Skipped if bid < fair × (1 − MIN_BID_DISCOUNT_PCT%).
+
+Minimum Fill Price (liquidity guard):
+  MIN_BID_DISCOUNT_PCT controls the worst acceptable sell price relative to
+  fair value.  Default 17%: we won't sell below fair × 0.83.  In thin weekend
+  or overnight markets where bid is far from fair, phases 2.2 and 2.3 will
+  refuse to place and the trade simply does not open.  The stop loss bypasses
+  this check — once in a trade we close no matter what.
 
 Stop Loss (fair-price based, 70% of premium):
   SL threshold = fill_price × 1.7 (70% loss).  Each tick, we recompute
@@ -86,6 +95,9 @@ RFQ_SPREAD_FRACTION = _p("RFQ_SPREAD_FRACTION", 0.33)       # Accept if quote �
 LIMIT_OPEN_FAIR_SECONDS = _p("LIMIT_OPEN_FAIR_SECONDS", 60, int)       # Phase 2.1: quote at fair price
 LIMIT_OPEN_PARTIAL_SECONDS = _p("LIMIT_OPEN_PARTIAL_SECONDS", 60, int) # Phase 2.2: quote at bid + 33% fairspread
 LIMIT_OPEN_BID_SECONDS = _p("LIMIT_OPEN_BID_SECONDS", 60, int)         # Phase 2.3: aggressive at bid
+
+# Liquidity guard — minimum acceptable open fill price
+MIN_BID_DISCOUNT_PCT = _p("MIN_BID_DISCOUNT_PCT", 17)          # Won't sell below fair × (1 - %/100)
 
 # SL close — phased limit buy-to-close (no RFQ)
 SL_CLOSE_FAIR_SECONDS = _p("SL_CLOSE_FAIR_SECONDS", 15, int)   # Buy at fair price
@@ -582,16 +594,20 @@ def daily_put_sell() -> StrategyConfig:
                 reprice_interval=LIMIT_OPEN_FAIR_SECONDS,
             ),
             # Phase 2.2: sell at bid + 33% of fairspread — reprice_interval=duration so no mid-phase drift
+            # min_price_pct_of_fair: refuse to place if computed price < fair × floor
             ExecutionPhase(
                 pricing="fair", fair_aggression=0.67,
                 duration_seconds=LIMIT_OPEN_PARTIAL_SECONDS,
                 reprice_interval=LIMIT_OPEN_PARTIAL_SECONDS,
+                min_price_pct_of_fair=1.0 - MIN_BID_DISCOUNT_PCT / 100.0,
             ),
             # Phase 2.3: sell at bid (aggressive) — tracks bid every 15s
+            # min_price_pct_of_fair: refuse to place if bid < fair × floor
             ExecutionPhase(
                 pricing="fair", fair_aggression=1.0,
                 duration_seconds=LIMIT_OPEN_BID_SECONDS,
                 reprice_interval=15,
+                min_price_pct_of_fair=1.0 - MIN_BID_DISCOUNT_PCT / 100.0,
             ),
         ]),
 

@@ -1,14 +1,23 @@
 #!/usr/bin/env python3
 """
-Execution Router
+Execution Router — bridge between LifecycleEngine and execution backends.
 
-Extracted from LifecycleEngine — routes trade open/close to the correct
-executor based on execution_mode (limit, rfq, or auto-detected).
+Routes trade open/close to the correct executor based on execution_mode:
+  "limit" → LimitFillManager  — per-leg limit orders with phased pricing
+              and fill polling.  Default for small trades and Deribit.
+  "rfq"   → RFQExecutor       — atomic multi-leg package sent to Coincall
+              market makers.  Used when trade notional >= rfq_notional_threshold.
+  auto    → selected by notional size when execution_mode is None.
 
-This module is the bridge between the lifecycle state machine and the
-concrete execution backends:
-  - "limit"  → LimitFillManager (per-leg limit orders)
-  - "rfq"    → RFQExecutor (atomic multi-leg)
+Open vs close semantics (important):
+  Open  — atomic: all legs or none.  A bad price on any one leg aborts
+          placement for the entire batch (prevents naked/unhedged legs).
+  Close — best_effort: each leg is placed independently via place_all(best_effort=True).
+          If one leg can't be priced (e.g. sub-tick deep OTM that got clamped
+          to 0.0 before the _snap_to_tick fix), the others still close.
+          LifecycleEngine retries the skipped legs on the next PENDING_CLOSE tick.
+
+Owned by LifecycleEngine.  Strategies never interact with this directly.
 """
 
 import logging
@@ -32,8 +41,10 @@ class ExecutionRouter:
     Routes trade open/close to the correct executor.
 
     Created and owned by LifecycleEngine.  Strategies never interact with
-    this directly — they set execution_mode on TradeLifecycle and the
-    engine delegates here.
+    this directly — they set execution_mode on TradeLifecycle and call
+    engine.open() / engine.close().  The router resolves the right backend
+    and, for limit-mode closes, applies best_effort placement so a single
+    bad-priced leg never blocks the rest of the position from closing.
     """
 
     def __init__(
@@ -341,8 +352,16 @@ class ExecutionRouter:
         count = trade.metadata.get("_close_attempt_count", 0) + 1
         trade.metadata["_close_attempt_count"] = count
         if count > MAX_CLOSE_ATTEMPTS:
+            remaining = (
+                [leg.symbol for leg in trade.close_legs if leg.filled_qty == 0]
+                if trade.close_legs
+                else [leg.symbol for leg in trade.open_legs]
+            )
             trade.state = TradeState.FAILED
-            trade.error = f"Close failed after {MAX_CLOSE_ATTEMPTS} attempts — manual intervention required"
+            trade.error = (
+                f"Close failed after {MAX_CLOSE_ATTEMPTS} attempts — manual intervention required. "
+                f"Remaining open: {remaining}"
+            )
             logger.critical(f"Trade {trade.id}: {trade.error}")
             return False
 
@@ -363,19 +382,21 @@ class ExecutionRouter:
         mgr = LimitFillManager(self._executor, params, order_manager=self._order_manager, market_data=self._market_data)
 
         # BUG-2026-03-05: reduce_only prevents close orders from building reverse positions
+        # best_effort=True: skip individual legs with bad prices rather than aborting all
         ok = mgr.place_all(
             trade.close_legs,
             reduce_only=True,
+            best_effort=True,
             lifecycle_id=trade.id,
             purpose=OrderPurpose.CLOSE_LEG,
         )
         if not ok:
-            logger.error(f"Trade {trade.id}: failed to place close orders, will retry (attempt {count}/{MAX_CLOSE_ATTEMPTS})")
+            logger.error(f"Trade {trade.id}: failed to place ANY close orders, will retry (attempt {count}/{MAX_CLOSE_ATTEMPTS})")
             trade.state = TradeState.PENDING_CLOSE
             return False
 
         trade.metadata["_close_fill_mgr"] = mgr
-        logger.info(f"Trade {trade.id}: all close orders placed via LimitFillManager")
+        logger.info(f"Trade {trade.id}: close orders placed via LimitFillManager")
         return True
 
     # ── Helpers ──────────────────────────────────────────────────────────

@@ -2,14 +2,32 @@
 """
 Trade Execution Module — Transport & Fill Management Layer
 
-Provides:
-  1. TradeExecutor  — thin API client (place, cancel, query orders)
-  2. ExecutionParams — per-trade fill-management configuration
-  3. LimitFillManager — tracks a set of pending leg orders, polls fills,
-     and requotes on timeout.  Used by trade_lifecycle for "limit" mode.
+Provides three building blocks used by ExecutionRouter for limit-mode trades:
 
-Environment-agnostic — works the same for testnet and production.
-The environment is controlled via config.py.
+  TradeExecutor      — thin Coincall REST client: place_order, cancel_order,
+                       get_order_status.  Not used for Deribit — that exchange
+                       uses DeribitExecutorAdapter in exchanges/deribit/executor.py
+                       which shares the ExchangeExecutor interface.
+
+  ExecutionParams    — per-trade fill-management config: phases list (new) or
+                       legacy flat timeout/requote fields.  Attached to
+                       TradeLifecycle at create time by the strategy.
+
+  LimitFillManager   — manages a batch of limit orders through their fill lifecycle.
+                       Called by LifecycleEngine._check_open_fills and
+                       ._check_close_fills every tick.
+
+                       Open mode  (best_effort=False, default): atomic — any
+                       pricing failure cancels the entire batch.
+                       Close mode (best_effort=True): lenient — legs with bad
+                       prices are skipped and logged; remaining legs are placed.
+                       LifecycleEngine retries skipped legs on the next tick.
+
+                       check() returns one of: "filled" | "requoted" | "failed" | "pending"
+                       filled_legs / has_skipped_legs / skipped_symbols expose state.
+
+Exchange-agnostic: LimitFillManager calls self._executor.place_order() which
+is injected — the same code drives Coincall and Deribit without modification.
 """
 
 import logging
@@ -165,12 +183,18 @@ class ExecutionPhase:
         reprice_interval: Seconds between cancel-and-requote within this phase
             (default 30.0).  Set to a value > duration_seconds to never reprice
             within the phase (place once, wait for fill or phase timeout).
+        min_price_pct_of_fair: Optional floor for pricing="fair" sell orders.
+            If set (e.g. 0.83), the computed price must be ≥ fair × this ratio.
+            Returns None if the floor is not met — causing the order to be
+            skipped/failed rather than placed at an unacceptable price.
+            Has no effect on buy orders or other pricing modes.
     """
     pricing: str = "aggressive"
     duration_seconds: float = 30.0
     buffer_pct: float = 2.0
     fair_aggression: float = 0.0
     reprice_interval: float = 30.0
+    min_price_pct_of_fair: Optional[float] = None
 
     def __post_init__(self):
         allowed = {"aggressive", "mid", "top_of_book", "mark", "passive", "fair"}
@@ -248,32 +272,32 @@ class LimitFillManager:
     """
     Manages fill detection and requoting for a set of limit-order legs.
 
-    Supports two execution modes (selected automatically by ExecutionParams):
+    Created fresh for each open or close attempt by ExecutionRouter.
+    Stored in trade.metadata["_open_fill_mgr"] / "_close_fill_mgr"] so
+    LifecycleEngine can call check() on it every tick until fills complete.
 
-    **Legacy mode** (params.phases is None):
-      Single aggressive pricing phase with timeout-based requoting.
-      Identical to the original behaviour.
+    Pricing modes (set per-phase via ExecutionPhase.pricing):
+      passive, mid, top_of_book, aggressive, mark, fair
 
-    **Phased mode** (params.phases is a list):
-      Walks through an ordered list of ExecutionPhase objects.  Each phase
-      defines its own pricing strategy, duration, and reprice interval.
-      When a phase expires, orders are cancelled and the next phase begins.
-      After the last phase exhausts, returns ``"failed"``.
+    Two execution modes selected by ExecutionParams:
+      Legacy (phases=None)  — single aggressive phase, timeout-based requote.
+      Phased (phases=list)  — walks through phases in order; each phase can
+                              reprice within itself and then escalates on expiry.
 
-    Lifecycle:
-      1. Caller creates the manager with an executor + params.
-      2. ``place_all(legs)`` places initial orders for every leg.
-      3. Each tick, caller invokes ``check()`` which:
-         a. Polls order status for every unfilled leg.
-         b. If all filled → returns ``"filled"``.
-         c. If phase/timeout elapsed → advance or requote → returns ``"requoted"``.
-         d. If all phases/requote rounds exhausted → returns ``"failed"``.
-         e. Otherwise → returns ``"pending"``.
-      4. ``cancel_all()`` cancels any outstanding orders (for cleanup).
-      5. ``filled_legs`` returns the final fill details.
+    place_all() flags:
+      best_effort=False (default, OPEN) — atomic: any failure cancels all.
+      best_effort=True  (CLOSE)         — lenient: skip bad legs, place the rest.
+          Skipped symbols available via has_skipped_legs / skipped_symbols.
+          LifecycleEngine checks has_skipped_legs after "filled" to decide
+          whether to go CLOSED or back to PENDING_CLOSE for the skipped legs.
 
-    This class does NOT own the TradeLifecycle state machine — it is a
-    helper that trade_lifecycle drives via its tick loop.
+    check() return values (called once per tick by LifecycleEngine):
+      "filled"   — all placed legs filled → CLOSED (or PENDING_CLOSE if skips)
+      "requoted" — timeout/phase expired, orders re-placed at fresh prices
+      "failed"   — all phases/requote rounds exhausted → PENDING_CLOSE (close retry)
+      "pending"  — still waiting for fills, no action needed
+
+    This class does NOT own or mutate TradeLifecycle state.
     """
 
     def __init__(self, executor: "TradeExecutor", params: Optional[ExecutionParams] = None,
@@ -283,6 +307,7 @@ class LimitFillManager:
         self._order_manager = order_manager
         self._market_data = market_data
         self._legs: List[_LegFillState] = []
+        self._skipped_symbols: List[str] = []
         self._round_started_at: float = time.time()
 
         # Phased execution state
@@ -308,6 +333,7 @@ class LimitFillManager:
         return None
 
     def place_all(self, legs: List[Dict[str, Any]], reduce_only: bool = False,
+                   best_effort: bool = False,
                    lifecycle_id: Optional[str] = None, purpose: Optional[Any] = None) -> bool:
         """
         Place initial limit orders for all legs.
@@ -316,16 +342,24 @@ class LimitFillManager:
             legs: List of dicts with keys: symbol, qty, side, order_id (out).
                   Each dict is a TradeLeg-like object (duck-typed).
             reduce_only: If True, all orders are placed with reduceOnly flag.
+            best_effort: If True (use for close orders), skip legs with bad prices
+                  or rejected placements rather than aborting the entire batch.
+                  Returns True if ≥1 order was placed; False if none could be placed.
+                  Skipped symbols are accessible via skipped_symbols.
+                  If False (default, for open orders), any failure cancels all
+                  already-placed orders and returns False.
             lifecycle_id: Trade lifecycle ID (for OrderManager tracking).
             purpose: OrderPurpose enum value (for OrderManager tracking).
 
         Returns:
-            True if all orders placed successfully.
-            On failure, already-placed orders are cancelled.
+            True if all orders placed successfully (best_effort=False), or
+            True if at least one order was placed (best_effort=True).
+            False on total failure.
         """
         self._lifecycle_id = lifecycle_id
         self._purpose = purpose
         self._legs = []
+        self._skipped_symbols = []
         self._reduce_only = reduce_only  # BUG-2026-03-05: remember for requotes
         now = time.time()
         self._round_started_at = now
@@ -339,8 +373,8 @@ class LimitFillManager:
         else:
             phase_label = "aggressive (legacy)"
 
-        # BUG-2026-03-05: pre-validate all prices before placing any orders.
-        # Prevents partial placement when one leg has no orderbook liquidity.
+        # Pre-validate all prices before placing any orders.
+        # In best_effort mode, skip legs with bad prices rather than aborting.
         leg_data = []
         for leg in legs:
             symbol = leg.symbol if hasattr(leg, 'symbol') else leg['symbol']
@@ -348,13 +382,32 @@ class LimitFillManager:
             side = leg.side if hasattr(leg, 'side') else leg['side']
             price = self._get_price_for_current_mode(symbol, side)
             if price is None:
+                if best_effort:
+                    logger.warning(f"LimitFillManager: no orderbook price for {symbol} ({side}) — skipping leg (best_effort)")
+                    self._skipped_symbols.append(symbol)
+                    continue
                 logger.error(f"LimitFillManager: no orderbook price for {symbol} ({side})")
                 return False  # no orders placed yet — nothing to cancel
+            if price <= 0:
+                if best_effort:
+                    logger.warning(f"LimitFillManager: price {price} <= 0 for {symbol} ({side}) — skipping leg (best_effort)")
+                    self._skipped_symbols.append(symbol)
+                    continue
+                logger.error(f"LimitFillManager: computed price {price} <= 0 for {symbol} ({side}) — refusing to place order")
+                return False
             leg_data.append((leg, symbol, qty, side, price))
+
+        if not leg_data:
+            logger.error("LimitFillManager: no placeable legs (all skipped or bad prices)")
+            return False
 
         for idx, (leg, symbol, qty, side, price) in enumerate(leg_data):
             result = self._place_single(symbol, qty, side, price, reduce_only, idx)
             if not result:
+                if best_effort:
+                    logger.warning(f"LimitFillManager: placement rejected for {symbol} — skipping leg (best_effort)")
+                    self._skipped_symbols.append(symbol)
+                    continue
                 logger.error(f"LimitFillManager: failed to place order for {symbol}")
                 self.cancel_all()
                 return False
@@ -374,7 +427,17 @@ class LimitFillManager:
                 f"(order {state.order_id}) [{phase_label}]"
             )
 
-        logger.info(f"LimitFillManager: all {len(self._legs)} orders placed, awaiting fills [{phase_label}]")
+        if not self._legs:
+            logger.error("LimitFillManager: no orders were successfully placed")
+            return False
+
+        if self._skipped_symbols:
+            logger.warning(
+                f"LimitFillManager: {len(self._legs)} order(s) placed, "
+                f"{len(self._skipped_symbols)} skipped: {self._skipped_symbols}"
+            )
+        else:
+            logger.info(f"LimitFillManager: all {len(self._legs)} orders placed, awaiting fills [{phase_label}]")
         return True
 
     def check(self) -> str:
@@ -543,6 +606,16 @@ class LimitFillManager:
     def unfilled_legs(self) -> List[_LegFillState]:
         """Legs with zero fills."""
         return [ls for ls in self._legs if ls.filled_qty == 0]
+
+    @property
+    def has_skipped_legs(self) -> bool:
+        """True if any legs were skipped during a best_effort place_all."""
+        return bool(self._skipped_symbols)
+
+    @property
+    def skipped_symbols(self) -> List[str]:
+        """Symbols skipped during a best_effort place_all (bad price or rejected)."""
+        return list(self._skipped_symbols)
 
     # -- Internal -------------------------------------------------------------
 
@@ -765,7 +838,18 @@ class LimitFillManager:
                 a = phase.fair_aggression
                 if side == "sell":
                     spread = fair - best_bid if best_bid is not None else 0
-                    return fair - a * spread
+                    price = fair - a * spread
+                    if phase.min_price_pct_of_fair is not None:
+                        floor = fair * phase.min_price_pct_of_fair
+                        if price < floor:
+                            logger.warning(
+                                f"LimitFillManager: {symbol} computed price ${price:.4f} "
+                                f"< floor ${floor:.4f} "
+                                f"(fair=${fair:.4f} × {phase.min_price_pct_of_fair:.0%}) "
+                                f"— refusing to place order"
+                            )
+                            return None
+                    return price
                 else:  # buy
                     if best_ask is not None:
                         spread = best_ask - fair

@@ -66,6 +66,9 @@ class DashboardLogHandler(logging.Handler):
 # Singleton handler — attached to root logger on first start
 _log_handler: Optional[DashboardLogHandler] = None
 _dashboard_start_time: float = 0.0
+# Brute-force guard: maps remote IP → (consecutive_fail_count, lockout_expiry_epoch).
+# After 5 failures the IP is soft-locked for 60 s. Reset on success.
+_login_rate: dict = {}  # ip -> (fail_count, lockout_until)
 
 
 def _get_log_lines(n: int = 80) -> List[str]:
@@ -91,6 +94,12 @@ def _create_app(
         template_folder=os.path.join(os.path.dirname(__file__), "templates"),
     )
     app.secret_key = secrets.token_hex(32)
+    # HTTPONLY: blocks JS document.cookie access (XSS mitigation).
+    # SAMESITE=Lax: blocks the session cookie from being sent in cross-site
+    # top-level POST requests (CSRF mitigation without a token).
+    # SECURE is intentionally omitted — HTTPS termination is handled by nginx.
+    app.config["SESSION_COOKIE_HTTPONLY"] = True
+    app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
 
     from config import ENVIRONMENT
 
@@ -106,15 +115,39 @@ def _create_app(
             return f(*args, **kwargs)
         return decorated
 
+    # /control/* routes are called only by the hub dashboard (same host, localhost).
+    # This decorator rejects any request that did not originate from 127.0.0.1,
+    # regardless of whether DASHBOARD_MODE is 'full' (bound to 0.0.0.0).
+    # Covers both IPv4 loopback and IPv4-mapped IPv6 (::ffff:127.0.0.1).
+    def localhost_only(f):
+        @wraps(f)
+        def decorated(*args, **kwargs):
+            remote = request.remote_addr
+            if remote not in ('127.0.0.1', '::1', '::ffff:127.0.0.1'):
+                return Response("Forbidden", status=403)
+            return f(*args, **kwargs)
+        return decorated
+
     # ── Pages ────────────────────────────────────────────────────────────
 
     @app.route("/login", methods=["GET", "POST"])
     def login():
         error = None
         if request.method == "POST":
-            if request.form.get("password") == password:
+            ip = request.remote_addr or ""
+            count, lockout_until = _login_rate.get(ip, (0, 0.0))
+            now = time.time()
+            if now < lockout_until:
+                remaining = int(lockout_until - now)
+                return render_template("login.html", error=f"Too many attempts — try again in {remaining}s")
+            # compare_digest does a constant-time comparison, preventing timing
+            # attacks that could otherwise leak password characters byte-by-byte.
+            if secrets.compare_digest(request.form.get("password") or "", password):
+                _login_rate.pop(ip, None)  # clear failure counter on success
                 session["authenticated"] = True
                 return redirect(url_for("index"))
+            count += 1
+            _login_rate[ip] = (count, now + 60.0) if count >= 5 else (count, 0.0)
             error = "Invalid password"
         return render_template("login.html", error=error)
 
@@ -288,8 +321,9 @@ def _create_app(
             return f"{EXCHANGE[:4]}-unknown"
 
     @app.route("/control/status")
+    @localhost_only
     def control_status():
-        """Lightweight JSON status — no auth (bound to localhost only)."""
+        """Lightweight JSON status — localhost only."""
         from config import SLOT_NAME, EXCHANGE, ENVIRONMENT
         snap = ctx.position_monitor.latest
         strategy_data = []
@@ -380,32 +414,36 @@ def _create_app(
         return jsonify(result)
 
     @app.route("/control/pause", methods=["POST"])
+    @localhost_only
     def control_pause():
-        """Pause all strategies — no auth (bound to localhost only)."""
+        """Pause all strategies — localhost only."""
         for r in runners:
             r.disable()
         logger.info("[Control] All strategies paused by hub")
         return jsonify({"ok": True, "action": "paused"})
 
     @app.route("/control/resume", methods=["POST"])
+    @localhost_only
     def control_resume():
-        """Resume all strategies — no auth (bound to localhost only)."""
+        """Resume all strategies — localhost only."""
         for r in runners:
             r.enable()
         logger.info("[Control] All strategies resumed by hub")
         return jsonify({"ok": True, "action": "resumed"})
 
     @app.route("/control/stop", methods=["POST"])
+    @localhost_only
     def control_stop():
-        """Stop all strategies — no auth (bound to localhost only)."""
+        """Stop all strategies — localhost only."""
         for r in runners:
             r.stop()
         logger.info("[Control] All strategies stopped by hub")
         return jsonify({"ok": True, "action": "stopped"})
 
     @app.route("/control/kill", methods=["POST"])
+    @localhost_only
     def control_kill():
-        """Kill switch — close all positions (bound to localhost only)."""
+        """Kill switch — close all positions — localhost only."""
         if closer.is_running:
             return jsonify({"ok": False, "reason": "already_running", "status": closer.status})
         closer.start(runners)

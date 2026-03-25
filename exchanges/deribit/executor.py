@@ -37,7 +37,8 @@ def _snap_to_tick(price: float) -> float:
     if price <= 0:
         return price
     tick = 0.0005 if price >= 0.005 else 0.0001
-    return round(math.floor(price / tick) * tick, 4)
+    snapped = round(math.floor(price / tick) * tick, 4)
+    return max(snapped, tick)  # never send 0.0 — clamp to minimum valid tick
 
 
 class DeribitExecutorAdapter(ExchangeExecutor):

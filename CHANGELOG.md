@@ -5,6 +5,83 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.2] - 2026-03-25
+
+### Security Hardening — Dashboard & Hub
+
+Applied OWASP-aligned hardening to both the slot dashboard (`dashboard.py`)
+and the hub dashboard (`hub/hub_dashboard.py`):
+
+- **Session cookie flags** — `SESSION_COOKIE_HTTPONLY=True` (blocks JS
+  `document.cookie` access, mitigates XSS token theft) and
+  `SESSION_COOKIE_SAMESITE="Lax"` (blocks session cookie in cross-site
+  top-level POST, mitigates CSRF). `SECURE` intentionally omitted: HTTPS
+  termination is handled by nginx in front.
+- **Brute-force login rate limiter** — 5 consecutive wrong passwords
+  triggers a 60-second per-IP soft-lock. Counter resets on first success.
+  Applied to both `dashboard.py` and `hub/hub_dashboard.py`.
+- **Constant-time password comparison** — `==` replaced with
+  `secrets.compare_digest()`, preventing timing side-channel attacks that
+  could otherwise enumerate password characters byte-by-byte.
+- **`localhost_only` decorator** (`dashboard.py`) — All `/control/*` routes
+  now explicitly reject requests from any remote IP, regardless of bind
+  address. Covers `127.0.0.1`, `::1`, and `::ffff:127.0.0.1`.
+
+### Bug Fixes
+
+#### exchanges/deribit/executor.py — Clamp snap-to-tick to minimum valid tick
+Deep OTM options near expiry can have prices below `0.0001 BTC` (Deribit's
+minimum tick). `_snap_to_tick()` was calling `math.floor` on these, producing
+`0.0` — a price Deribit rejects with "Invalid params".
+
+- Added `max(snapped, tick)` clamp: sub-tick prices now floor to `0.0001`
+  (or `0.0005` for prices ≥ 0.005) instead of `0.0`.
+- Added three regression tests in `tests/test_deribit_integration.py`.
+
+#### execution_router.py / lifecycle_engine.py / trade_execution.py — Best-effort close mode
+Previously, if a single leg's computed price was rejected during a close
+attempt (e.g. a deep OTM that got snap-to-tick clamped to 0), the entire
+batch would fail and block all open legs from closing.
+
+- **`LimitFillManager.place_all(best_effort=True)`** — new flag for close
+  orders. In best-effort mode, legs with missing/bad prices are skipped and
+  logged; remaining legs are placed normally. Returns `True` if ≥1 order
+  was placed. Skipped symbols accessible via `has_skipped_legs` /
+  `skipped_symbols` properties.
+- **`ExecutionRouter._close_limit`** — passes `best_effort=True` to
+  `place_all` for all close orders. Improved `MAX_CLOSE_ATTEMPTS` error to
+  list remaining open symbols for easier manual intervention.
+- **`LifecycleEngine._check_close_fills`** — `_sync_fills()` helper replaces
+  index-based `zip()` with symbol-based matching, which is required when
+  best-effort skips legs (fill manager has fewer entries than
+  `trade.close_legs`). After a "filled" result, checks `has_skipped_legs`:
+  if skipped legs remain they go back to `PENDING_CLOSE` for retry next
+  tick; otherwise transitions to `CLOSED` as before.
+
+### Strategy Updates
+
+#### strategies/daily_put_sell.py — Liquidity guard (`MIN_BID_DISCOUNT_PCT`)
+Added a minimum fill-price floor to the limit open execution phases:
+
+- **`MIN_BID_DISCOUNT_PCT = 17`** (overridable via `PARAM_MIN_BID_DISCOUNT_PCT`)
+  — the strategy refuses to sell below `fair × (1 − 17%) = fair × 0.83`.
+- Phase 2.2 (`min_price_pct_of_fair = 0.83`): order skipped if
+  `bid + 33%·spread < fair × 0.83`.
+- Phase 2.3 (`min_price_pct_of_fair = 0.83`): order skipped if
+  `bid < fair × 0.83`.
+- In thin weekend/overnight markets where bid is far from fair, phases 2.2
+  and 2.3 will refuse to place and the trade simply does not open.
+- The stop-loss close bypasses this check — once in a trade we always close.
+- Docstring updated to document the liquidity guard and the new `PARAM_*` var.
+
+### Removed
+
+- **`multileg_orderbook.py`** — Deleted. This was an obsolete standalone
+  prototype for multi-leg RFQ orderbook probing that was superseded by the
+  current `rfq.py` + `execution_router.py` architecture.
+
+---
+
 ## [1.6.1] - 2026-03-24
 
 ### Bug Fixes & Pipeline Additions

@@ -23,6 +23,7 @@ from backtester2.engine import run_grid_full
 from backtester2.reporting_v2 import generate_html
 from backtester2.strategies.straddle_strangle import ExtrusionStraddleStrangle
 from backtester2.strategies.daily_put_sell import DailyPutSell
+from backtester2.strategies.short_straddle_strangle import ShortStraddleStrangle
 from backtester2.config import cfg as _cfg
 
 # ── Strategy Registry ────────────────────────────────────────────
@@ -30,6 +31,7 @@ from backtester2.config import cfg as _cfg
 STRATEGIES = {
     "straddle": ExtrusionStraddleStrangle,
     "put_sell": DailyPutSell,
+    "short_straddle": ShortStraddleStrangle,
 }
 
 DEFAULT_OPTIONS = _cfg.data.options_parquet

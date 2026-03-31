@@ -89,10 +89,15 @@ def _nearest_1dte_expiry(state):
                 best_diff = diff
 
     if best is not None and best_diff != 1:
-        warnings.warn(
-            f"No 1DTE expiry at {state.dt.date()}, nearest is {best_diff}DTE ({best}). Skipping entry.",
-            stacklevel=2,
-        )
+        # Suppress warning at exactly 00:00 UTC: this is the known Tardis daily-file
+        # seam where the snapshot carries only 1–4 sparse expiries (same midnight
+        # data-gap artifact seen in the option snapshot builder). Entries are
+        # correctly skipped; no user action needed.
+        if not (state.dt.hour == 0 and state.dt.minute == 0):
+            warnings.warn(
+                f"No 1DTE expiry at {state.dt.date()}, nearest is {best_diff}DTE ({best}). Skipping entry.",
+                stacklevel=2,
+            )
         return None
     return best
 
@@ -306,7 +311,7 @@ class DailyPutSell:
             put_iv = (quote.mark_iv / 100.0) if quote else 0.5
             exit_usd = bs_put(state.spot, strike, T, put_iv)
 
-        fees_close = deribit_fee_per_leg(state.spot, exit_usd)
+        fees_close = 0.0 if reason == "expiry" else deribit_fee_per_leg(state.spot, exit_usd)
 
         trade = close_trade(state, pos, reason, exit_usd, fees_close)
         trade.metadata["stop_loss_pct"] = self._sl_pct

@@ -141,12 +141,14 @@ def get_ema20() -> Optional[float]:
 
 def is_btc_above_ema20() -> bool:
     """
-    Check if the current BTC price is above the daily EMA-20.
+    Check if the current BTC price is at or above the daily EMA-20.
 
-    Uses the most recent daily close as the "current price" proxy.
+    Uses the most recent daily close from Binance (BTCUSDT perpetual) as the
+    price source — same data already fetched for EMA computation.
+    Blocks entry (fail-safe) if data is unavailable.
 
     Returns:
-        True if BTC close > EMA-20, False otherwise or on data error.
+        True if BTC daily close >= EMA-20, False otherwise or on data error.
     """
     closes = _fetch_daily_closes(count=30)
     if closes is None:
@@ -155,13 +157,13 @@ def is_btc_above_ema20() -> bool:
 
     ema = _compute_ema(closes, 20)
     current = closes[-1]
-    above = current > ema
+    passes = current >= ema
 
     logger.info(
         f"EMA filter: BTC=${current:,.0f}, EMA-20=${ema:,.0f} "
-        f"→ {'ABOVE ✓' if above else 'BELOW ✗'}"
+        f"→ {'BTC ≥ EMA ✓ (entry allowed)' if passes else 'BTC < EMA ✗ (entry blocked)'}"
     )
-    return above
+    return passes
 
 
 def is_btc_below_ema20() -> bool:

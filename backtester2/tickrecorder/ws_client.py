@@ -39,8 +39,9 @@ class DeribitWSClient:
     """
 
     def __init__(self):
-        self._tick_callback = None      # type: Optional[Callable]
-        self._connected_callback = None # type: Optional[Callable]
+        self._tick_callback = None         # type: Optional[Callable]
+        self._connected_callback = None    # type: Optional[Callable]
+        self._disconnected_callback = None # type: Optional[Callable]
         self._instruments = []          # type: List[str]  # Deribit instrument names
         self._subscribed = set()        # type: Set[str]   # currently subscribed channels
         self._ws = None
@@ -68,6 +69,15 @@ class DeribitWSClient:
         """Register callback fired each time the connection is (re)established
         and all channels have been subscribed."""
         self._connected_callback = callback
+
+    def on_disconnected(self, callback):
+        # type: (Callable[[], None]) -> None
+        """Register callback fired each time a live connection drops.
+
+        Not fired for failed initial connection attempts — only fires if
+        the connection was previously established (self._connected was True).
+        """
+        self._disconnected_callback = callback
 
     def set_instruments(self, instrument_names):
         # type: (List[str]) -> None
@@ -221,11 +231,17 @@ class DeribitWSClient:
         except Exception as exc:
             logger.warning("WebSocket unexpected error: %s", exc)
         finally:
+            was_connected = self._connected
             self._connected = False
             self._ws = None
             if self._heartbeat_task is not None:
                 self._heartbeat_task.cancel()
                 self._heartbeat_task = None
+            if was_connected and self._disconnected_callback is not None:
+                try:
+                    self._disconnected_callback()
+                except Exception:
+                    logger.exception("on_disconnected callback raised")
 
     def _handle_message(self, raw):
         # type: (str) -> None

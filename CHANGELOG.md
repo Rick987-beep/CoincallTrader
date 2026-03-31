@@ -5,6 +5,33 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.11.0] - 2026-03-31
+
+### Added — Short Straddle / Strangle Strategy
+
+- **`strategies/short_straddle_strangle.py`** — New 1DTE BTC short volatility strategy: sells an ATM straddle (OFFSET=0) or OTM strangle (OFFSET>0) on the nearest available Deribit expiry; configurable via `qty`, `offset`, `entry_hour`, `stop_loss_pct`, and `max_hold_hours`
+- **`option_selection.py`** — `strangle_by_offset()`: selects OTM call and put legs by USD distance from spot (e.g. OFFSET=1000 → nearest strike to spot±$1000); offset=0 produces an ATM straddle
+- **`tests/test_short_straddle_strangle.py`** — Pure unit tests for the new strategy and `strangle_by_offset()`
+- **`slots/slot-02.toml`** — Slot 02 configured for Short Straddle/Strangle (Deribit, offset=$1500, entry 12:00 UTC, SL=250%, max_hold=16h)
+
+### Changed
+
+- **`main.py`** — Graceful shutdown now calls `r.disable()` instead of `r.stop()` to prevent a race where the PositionMonitor background thread overwrites the persisted OPEN state with PENDING_CLOSE, causing an immediate close on the next restart
+- **`market_data.py`** — `get_option_market_data()` now routes through the active exchange adapter instead of the legacy Coincall-only path; returns `bid`, `ask`, `mark_price`, `implied_volatility`
+- **`ema_filter.py`** — `is_btc_above_ema20()` now uses `>=` (at or above) instead of `>`; price source documented as Binance BTCUSDT daily close (already fetched for EMA computation); log message updated to show "entry allowed / blocked"
+- **`strategies/daily_put_sell.py`** — Entry filter updated to `ema20_filter()` (renamed from `below_ema20_filter()`)
+- **`strategies/__init__.py`** — Cleared all static imports; module is now intentionally empty with a docstring explaining the dynamic import approach used in production (prevents cross-strategy import side-effects)
+- **`hub/templates/_hub_recorder.html`** — Recorder health card now shows a "Missed Today" counter (`gaps_today`)
+- **`tests/conftest.py`** — Added `_mute_telegram` autouse fixture: replaces the Telegram singleton with a no-op instance for all fast tests to prevent accidental live sends
+
+### Changed — Backtester2
+
+- **`backtester2/config.py`** — Added `ScoringConfig` dataclass (`min_trades`, `w_sharpe`, `w_pnl`, `w_max_dd`, `w_dd_days`, `w_profit_factor`) and config loader
+- **`backtester2/config.toml`** — Added `[scoring]` section with default weights (Sharpe 30%, PnL 25%, max-DD 20%, DD-days 15%, profit-factor 10%)
+- **`backtester2/reporting_v2.py`** — Added `_score_combos()`: percentile-ranked composite scoring across eligible combos; equity chart now starts at Day 0 / capital baseline, adds SVG clip path to prevent overflow, x-axis labels renumbered from 0
+- **`backtester2/strategies/straddle_strangle.py`** — Significant refactor to align with upstream `strangle_by_offset()` selection logic
+- **`backtester2/tickrecorder/recorder.py`**, **`backtester2/tickrecorder/ws_client.py`** — Tick recorder reliability improvements
+
 ## [1.10.0] - 2026-03-30
 
 ### Added — Below-EMA-20 Entry Filter & Limit-Only Execution

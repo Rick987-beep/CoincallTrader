@@ -56,3 +56,18 @@ max_vol                 = 3.00    # ceiling: 300% annualised
 model           = "deribit"   # fee model identifier
 index_rate      = 0.0003      # 0.03% of index price (base fee per leg)
 price_cap_frac  = 0.125       # capped at 12.5% of the option leg price
+
+# ── Scoring ───────────────────────────────────────────────────────────────────
+[scoring]
+
+# Combos with fewer trades than this are ineligible for scoring (ranked last).
+min_trades          = 10
+
+# Percentile-rank weights — must sum to 1.0.
+# Each metric is ranked 0→1 across all eligible combos before weighting.
+# max_dd_pct and max_dd_days are INVERTED (1 − rank) so lower drawdown = better score.
+w_sharpe            = 0.30   # risk-adjusted return (higher = better)
+w_pnl               = 0.25   # total PnL (higher = better)
+w_max_dd            = 0.20   # max drawdown % (lower = better — inverted)
+w_dd_days           = 0.15   # drawdown duration in days (lower = better — inverted)
+w_profit_factor     = 0.10   # gross win / gross loss (higher = better)

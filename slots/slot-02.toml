@@ -1,20 +1,21 @@
 # ===========================================================================
-# Slot 02 — Long Strangle Index Move (Deribit)
+# Slot 02 — Short Straddle / Strangle (Deribit)
+#
+# Backtester2 combo #1 (score 0.983): offset=$1500, entry=12:00 UTC,
+# SL=250%, max_hold=16h — $2,480 PnL, 14 trades, 79% win rate, Sharpe 18.23.
 #
 # Edit params below, then deploy:
 #   ./deployment/deploy-slot.sh 02
 # ===========================================================================
 
-name = "Long Strangle Index Move"
-strategy = "long_strangle_index_move"
+name = "Short Straddle Strangle"
+strategy = "short_straddle_strangle"
 account = "deribit-main"
 
 [params]
-qty = 0.1
-strike_offset_usd = 2000
-open_hour = 13
-close_hour = 18
-close_minute = 0
-move_distance_usd = 1100
-min_margin_pct = 20
-check_interval = 30
+qty = 0.8
+offset = 1500
+entry_hour = 12
+stop_loss_pct = 2.5
+max_hold_hours = 16
+check_interval = 15

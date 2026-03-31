@@ -82,9 +82,14 @@ async def _run_recorder():
         # type: () -> None
         health.on_connected()
 
+    def on_ws_disconnected():
+        # type: () -> None
+        health.on_disconnected()
+
     tracker.on_change(on_instruments_changed)
     ws.on_ticker(on_tick)
     ws.on_connected(on_ws_connected)
+    ws.on_disconnected(on_ws_disconnected)
 
     # ── Start health endpoint ─────────────────────────────────────────────────
     start_health_server(health)
@@ -172,9 +177,13 @@ async def _burst_snapshot_loop(snap, ws, health):
 
         # ── Take snapshot ─────────────────────────────────────────────────────
         try:
+            prev_gaps = snap.gaps_today
             took = snap.maybe_snapshot()
             if took:
                 health.update_from_snapshotter(snap)
+                new_gaps = snap.gaps_today - prev_gaps
+                if new_gaps > 0:
+                    health.on_gap(new_gaps)
                 free_mb = _disk_free_mb()
                 if free_mb != -1 and free_mb < config.DISK_FREE_WARN_MB:
                     health.notify_critical(
@@ -209,13 +218,11 @@ async def _instrument_refresh_loop(tracker, ws):
 
 async def _disconnect_alert_loop(health, ws):
     # type: (RecorderHealth, DeribitWSClient) -> None
-    """Detect prolonged disconnects and update health state."""
+    """Send Telegram alert if a disconnect persists beyond the threshold."""
     while True:
         await asyncio.sleep(30)
         try:
-            if not ws.is_connected:
-                health.on_disconnected()
-                health.check_disconnect_alert()
+            health.check_disconnect_alert()
         except Exception:
             logger.exception("Disconnect alert loop error")
 

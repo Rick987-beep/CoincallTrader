@@ -36,6 +36,10 @@
       <value>{{ r.ws_reconnects }}</value>
     </div>
     <div class="metric">
+      <label>Missed Today</label>
+      <value>{{ r.gaps_today }}</value>
+    </div>
+    <div class="metric">
       <label>Uptime</label>
       <value>{{ '%dh %dm' | format(r.uptime_seconds // 3600, (r.uptime_seconds % 3600) // 60) }}</value>
     </div>

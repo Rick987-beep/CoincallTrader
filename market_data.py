@@ -471,8 +471,17 @@ def get_option_greeks(symbol: str) -> Optional[Dict[str, float]]:
 
 
 def get_option_market_data(symbol: str) -> Optional[Dict[str, float]]:
-    """Get option market data (Coincall-only, kept for legacy callers)."""
-    return market_data.get_option_market_data(symbol)
+    """Get option market data via the active exchange adapter."""
+    adapter = _get_adapter()
+    details = adapter.get_option_details(symbol)
+    if not details:
+        return None
+    return {
+        "bid": float(details.get("bid", 0)),
+        "ask": float(details.get("ask", 0)),
+        "mark_price": float(details.get("markPrice", 0)),
+        "implied_volatility": float(details.get("impliedVolatility", 0)),
+    }
 
 
 def get_option_orderbook(symbol: str) -> Optional[Dict[str, Any]]:

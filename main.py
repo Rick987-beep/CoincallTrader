@@ -510,11 +510,19 @@ def main():
 
             # Stop health checker first
             health_checker.stop()
-            
-            # Close all strategies
+
+            # IMPORTANT: use disable(), NOT stop().
+            # stop() force-closes all active trades on the exchange — it is
+            # designed for the kill-switch (position_closer.py) only.
+            # During a graceful shutdown (deploy / restart), state has already
+            # been persisted above and recovery will resume monitoring on next
+            # boot. Calling stop() here causes a race: the PositionMonitor
+            # background thread may still be mid-tick and will overwrite the
+            # persisted OPEN snapshot with PENDING_CLOSE, triggering an
+            # immediate close on restart before any exit condition is met.
             for r in runners:
-                r.stop()
-            
+                r.disable()
+
             ctx.position_monitor.stop()
             logger.info("Shutdown complete")
         except Exception as e:

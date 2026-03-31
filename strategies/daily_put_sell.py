@@ -43,7 +43,7 @@ import time
 from datetime import datetime, timezone
 from typing import Optional
 
-from ema_filter import below_ema20_filter
+from ema_filter import ema20_filter
 from market_data import get_btc_index_price, get_option_market_data
 from option_selection import LegSpec
 from strategy import (
@@ -467,7 +467,7 @@ def daily_put_sell() -> StrategyConfig:
         # ── When to enter ────────────────────────────────────────────
         entry_conditions=[
             time_window(ENTRY_HOUR_START, ENTRY_HOUR_END),
-            below_ema20_filter(),
+            ema20_filter(),
         ],
 
         # ── When to exit ─────────────────────────────────────────────

@@ -12,6 +12,7 @@ from unittest.mock import MagicMock
 
 from account_manager import AccountSnapshot, PositionSnapshot
 from order_manager import OrderManager
+import telegram_notifier
 
 
 # =============================================================================
@@ -126,6 +127,25 @@ def mock_executor():
 @pytest.fixture
 def mock_market_data():
     return MockMarketData()
+
+
+# =============================================================================
+# Mute Telegram for all fast tests
+# =============================================================================
+
+@pytest.fixture(autouse=True)
+def _mute_telegram():
+    """Replace the Telegram singleton with a no-op instance for every test.
+
+    Prevents any test from firing live Telegram messages.  The live Telegram
+    tests (tests/live/) are excluded from the fast suite via the 'live' marker
+    and should set up their own notifier if needed.
+    """
+    silent = telegram_notifier.TelegramNotifier(bot_token="", chat_id="")
+    original = telegram_notifier._instance
+    telegram_notifier._instance = silent
+    yield
+    telegram_notifier._instance = original
 
 
 @pytest.fixture

@@ -65,11 +65,22 @@ class FeesConfig:
 
 
 @dataclass
+class ScoringConfig:
+    min_trades:      int
+    w_sharpe:        float
+    w_pnl:           float
+    w_max_dd:        float
+    w_dd_days:       float
+    w_profit_factor: float
+
+
+@dataclass
 class BacktesterConfig:
     data: DataConfig
     simulation: SimulationConfig
     pricing: PricingConfig
     fees: FeesConfig
+    scoring: ScoringConfig
 
 
 # ── Loader ────────────────────────────────────────────────────────
@@ -95,6 +106,7 @@ def load_config(path=_CONFIG_PATH):
     s = raw["simulation"]
     p = raw["pricing"]
     f = raw["fees"]
+    sc = raw["scoring"]
 
     return BacktesterConfig(
         data=DataConfig(
@@ -128,6 +140,14 @@ def load_config(path=_CONFIG_PATH):
             model=str(f["model"]),
             index_rate=float(f["index_rate"]),
             price_cap_frac=float(f["price_cap_frac"]),
+        ),
+        scoring=ScoringConfig(
+            min_trades=int(sc["min_trades"]),
+            w_sharpe=float(sc["w_sharpe"]),
+            w_pnl=float(sc["w_pnl"]),
+            w_max_dd=float(sc["w_max_dd"]),
+            w_dd_days=float(sc["w_dd_days"]),
+            w_profit_factor=float(sc["w_profit_factor"]),
         ),
     )
 

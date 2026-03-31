@@ -866,3 +866,49 @@ def strangle(
             underlying=underlying,
         ),
     ]
+
+
+def strangle_by_offset(
+    qty: float,
+    offset: int = 1000,
+    dte = "next",
+    side: str = "sell",
+    underlying: str = "BTC",
+) -> List[LegSpec]:
+    """
+    OTM strangle selected by USD offset from spot — sell (or buy) an OTM call
+    and an OTM put, each `offset` dollars away from the current spot price.
+
+    The nearest available strike to (spot + offset) is chosen for the call and
+    (spot - offset) for the put, matching Deribit's $500 strike spacing exactly.
+    offset=0 produces an ATM straddle (both legs at spot).
+
+    Args:
+        qty: Contract quantity per leg.
+        offset: USD distance from spot for each wing (>= 0).
+        dte: Days to expiry — "next" for nearest available, or int (0=0DTE, 1=1DTE, …).
+        side: "buy" or "sell".
+        underlying: Underlying asset.
+
+    Returns:
+        List of two LegSpec objects [OTM call, OTM put].
+    """
+    expiry = {"dte": dte}
+    return [
+        LegSpec(
+            option_type="C",
+            side=side,
+            qty=qty,
+            strike_criteria={"type": "spotOffset", "value": +offset},
+            expiry_criteria=expiry,
+            underlying=underlying,
+        ),
+        LegSpec(
+            option_type="P",
+            side=side,
+            qty=qty,
+            strike_criteria={"type": "spotOffset", "value": -offset},
+            expiry_criteria=expiry,
+            underlying=underlying,
+        ),
+    ]

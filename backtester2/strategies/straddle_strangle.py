@@ -17,16 +17,14 @@ One trade per day:
     trade closes. The date is stamped from entry_time (not exit_time) so
     overnight holds don't reset the guard on the next day.
 
-Grid parameters (5,040 combos):
-    offset        [0, 500, 1000, 1500, 2000, 2500, 3000]  — USD distance
-                  from ATM for the strangle legs (0 = ATM straddle)
-    index_trigger [300, 400, 500, 600, 700, 800, 1000,
-                  1200, 1500, 2000]  — BTC move in USD to trigger exit;
-                  checked against both the 5-min close and every 1-min
-                  bar high/low inside the window (no spike is missed)
-    max_hold      [1..12]   — max hours before forced time-out close
-    entry_hour    [3, 6, 9, 12, 15, 19]  — UTC hour at which entry is
-                  attempted (one-hour window, weekdays only)
+Grid parameters:
+    offset        — USD distance from ATM for the strangle legs (0 = ATM straddle)
+    index_trigger — BTC move in USD to trigger exit; checked against both the
+                    5-min close and every 1-min bar high/low inside the window
+                    (no intra-bar spike is missed)
+    max_hold      — max hours before forced time-out close
+    entry_hour    — UTC hour at which entry is attempted (one-hour window,
+                    weekdays only)
 
 Trigger detection:
     index_move_trigger() checks abs(spot - entry_spot) >= trigger on
@@ -46,18 +44,17 @@ Fees:
 """
 import re
 from datetime import datetime
+from functools import lru_cache
 from typing import Any, Dict, List, Optional
 
-from backtester2.pricing import deribit_fee_per_leg, bs_call, bs_put, HOURS_PER_YEAR
+from backtester2.pricing import deribit_fee_per_leg, bs_call, bs_put, HOURS_PER_YEAR, EXPIRY_HOUR_UTC
 from backtester2.strategy_base import (
     OpenPosition, Trade, close_trade,
     time_window, weekday_only, index_move_trigger, max_hold_hours,
 )
 
-# Deribit 0DTE expiry hour
-EXPIRY_HOUR_UTC = 8
 
-
+@lru_cache(maxsize=64)
 def _parse_expiry_date(expiry_code):
     # type: (str) -> Optional[datetime]
     """Parse Deribit expiry code like '9MAR26' to a datetime date."""
@@ -75,15 +72,6 @@ def _parse_expiry_date(expiry_code):
     if month is None:
         return None
     return datetime(year, month, day)
-
-
-def _is_0dte(expiry_code, current_dt):
-    # type: (str, datetime) -> bool
-    """Check if expiry is 0DTE (expires today, after 08:00 UTC)."""
-    exp_date = _parse_expiry_date(expiry_code)
-    if exp_date is None:
-        return False
-    return exp_date.date() == current_dt.date()
 
 
 def _nearest_valid_expiry(state):
@@ -126,9 +114,9 @@ class ExtrusionStraddleStrangle:
 
     PARAM_GRID = {
         "offset": [0, 500, 1000, 1500, 2000],
-        "index_trigger": [500, 1000, 1500, 2000],
-        "max_hold": [1, 2, 3, 4, 5, 6, 7, 8],
-        "entry_hour": [11, 12, 13, 14, 15],
+        "index_trigger": [400, 500, 600, 700, 800, 1000, 1100, 1200, 1300, 1400, 1500, 2000],
+        "max_hold": [1, 2, 3, 4, 5, 6, 7, 8,9,10 ],
+        "entry_hour": [8,9,10,11, 12, 13, 14, 15],
     }
 
     def __init__(self):
@@ -326,7 +314,7 @@ class ExtrusionStraddleStrangle:
 
         fee_call = deribit_fee_per_leg(state.spot, exit_usd / 2)
         fee_put = deribit_fee_per_leg(state.spot, exit_usd / 2)
-        fees_close = fee_call + fee_put
+        fees_close = 0.0 if reason == "expiry" else fee_call + fee_put
 
         trade = close_trade(state, pos, reason, exit_usd, fees_close)
         trade.metadata["index_trigger"] = self._trigger

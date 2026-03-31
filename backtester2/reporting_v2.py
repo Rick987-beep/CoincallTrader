@@ -16,6 +16,8 @@ import pandas as pd
 from datetime import datetime, timedelta
 from itertools import combinations
 
+from backtester2.config import cfg
+
 
 # ── Per-Combo Stats ──────────────────────────────────────────────
 
@@ -92,6 +94,60 @@ def _all_combo_stats(df, keys, capital=10000):
             "max_dd_days":   int(max_dd_days_all.get(combo_idx, 0)),
         }
     return result
+
+
+# ── Combo Scoring ─────────────────────────────────────────────────
+
+def _score_combos(all_stats):
+    """Rank combos using a percentile-weighted composite score (0–1).
+
+    Each metric is percentile-ranked across eligible combos (0 = worst, 1 = best).
+    Metrics where *lower is better* (max_dd_pct, max_dd_days) are inverted with
+    (1 − rank) before weighting, so the safest combo still scores 1.0 on those.
+
+    Combos below cfg.scoring.min_trades are ineligible and receive score 0.0,
+    sinking them to the bottom of the ranked list.
+
+    Returns dict[key → float].
+    """
+    sc = cfg.scoring
+    items = list(all_stats.items())
+    eligible = [(k, s) for k, s in items if s["n"] >= sc.min_trades]
+
+    if not eligible:
+        return {k: 0.0 for k, _ in items}
+
+    def _prank(vals):
+        """Percentile rank: 0.0 (lowest value) → 1.0 (highest value)."""
+        n = len(vals)
+        if n == 1:
+            return [0.5]
+        order = sorted(range(n), key=lambda i: vals[i])
+        ranks = [0.0] * n
+        for pos, idx in enumerate(order):
+            ranks[idx] = pos / (n - 1)
+        return ranks
+
+    sharpe_r = _prank([s["sharpe"]        for _, s in eligible])
+    pnl_r    = _prank([s["total_pnl"]     for _, s in eligible])
+    dd_r     = _prank([s["max_dd_pct"]    for _, s in eligible])   # inverted below
+    ddd_r    = _prank([s["max_dd_days"]   for _, s in eligible])   # inverted below
+    pf_r     = _prank([s["profit_factor"] for _, s in eligible])
+
+    scores = {}
+    for i, (k, _) in enumerate(eligible):
+        scores[k] = (
+            sc.w_sharpe          * sharpe_r[i]
+            + sc.w_pnl           * pnl_r[i]
+            + sc.w_max_dd        * (1.0 - dd_r[i])
+            + sc.w_dd_days       * (1.0 - ddd_r[i])
+            + sc.w_profit_factor * pf_r[i]
+        )
+
+    # Ineligible combos score 0 and sink to the bottom
+    for k, _ in items:
+        scores.setdefault(k, 0.0)
+    return scores
 
 
 # ── Equity Metrics ───────────────────────────────────────────────
@@ -313,9 +369,12 @@ def _equity_chart_svg(daily_rows, capital=10000, width=860, height=260):
     pw = width - ml - mr
     ph = height - mt - mb
 
-    n = len(daily_rows)
     eq_vals = [row[3] for row in daily_rows]
-    y_min, y_max = min(eq_vals), max(eq_vals)
+    # Prepend Day 0 = initial capital so x-axis starts at 0
+    plot_vals = [capital] + eq_vals
+    n_pts = len(plot_vals)
+    # Include capital in y range so the baseline is always within the plot
+    y_min, y_max = min(plot_vals), max(plot_vals)
     y_range = max(y_max - y_min, 1.0)
     y_lo = y_min - y_range * 0.05
     y_hi = y_max + y_range * 0.05
@@ -337,8 +396,8 @@ def _equity_chart_svg(daily_rows, capital=10000, width=860, height=260):
         y_ticks.append(t)
         t += step
 
-    def sx(i):    # day index → pixel x
-        return ml + i / max(n - 1, 1) * pw
+    def sx(i):    # point index (0 = Day 0) → pixel x
+        return ml + i / max(n_pts - 1, 1) * pw
 
     def sy(v):    # equity value → pixel y
         return mt + (1.0 - (v - y_lo) / (y_hi - y_lo)) * ph
@@ -348,6 +407,13 @@ def _equity_chart_svg(daily_rows, capital=10000, width=860, height=260):
         f'style="display:block;font-family:-apple-system,BlinkMacSystemFont,sans-serif;'
         f'font-size:11px;color:#333">'
     ]
+
+    # Clip path for plot area (prevents fill/line overflow into margins)
+    parts.append(
+        f'<defs><clipPath id="plot-clip">'
+        f'<rect x="{ml}" y="{mt}" width="{pw}" height="{ph}"/>'
+        f'</clipPath></defs>'
+    )
 
     # Plot area background
     parts.append(
@@ -381,18 +447,17 @@ def _equity_chart_svg(daily_rows, capital=10000, width=860, height=260):
         )
 
     # X-axis tick labels (day number, spread evenly, ~8 labels max)
-    x_step = max(1, round(n / 8))
-    for i in range(n):
-        if i == 0 or i == n - 1 or i % x_step == 0:
+    x_step = max(1, round(n_pts / 8))
+    for i in range(n_pts):
+        if i == 0 or i == n_pts - 1 or i % x_step == 0:
             px = sx(i)
-            day_num = i + 1
             parts.append(
                 f'<line x1="{px:.1f}" y1="{mt+ph}" x2="{px:.1f}" y2="{mt+ph+4}" '
                 f'stroke="#aaa" stroke-width="1"/>'
             )
             parts.append(
                 f'<text x="{px:.1f}" y="{mt+ph+16}" text-anchor="middle" fill="#666">'
-                f'Day {day_num}</text>'
+                f'Day {i}</text>'
             )
 
     # Axis lines
@@ -413,26 +478,26 @@ def _equity_chart_svg(daily_rows, capital=10000, width=860, height=260):
         f'text-anchor="middle" fill="#555" font-size="11">Day #</text>'
     )
 
-    # Fill under curve (light blue area)
+    # Fill under curve (light blue area, clipped to plot bounds)
     fill_pts = (
         f"{sx(0):.1f},{sy(capital):.1f} "
-        + " ".join(f"{sx(i):.1f},{sy(v):.1f}" for i, v in enumerate(eq_vals))
-        + f" {sx(n-1):.1f},{sy(capital):.1f}"
+        + " ".join(f"{sx(i):.1f},{sy(v):.1f}" for i, v in enumerate(plot_vals))
+        + f" {sx(n_pts-1):.1f},{sy(capital):.1f}"
     )
     parts.append(
-        f'<polygon points="{fill_pts}" fill="#1565C0" fill-opacity="0.07"/>'
+        f'<polygon points="{fill_pts}" fill="#1565C0" fill-opacity="0.07" clip-path="url(#plot-clip)"/>'
     )
 
     # Equity curve line
-    line_pts = " ".join(f"{sx(i):.1f},{sy(v):.1f}" for i, v in enumerate(eq_vals))
+    line_pts = " ".join(f"{sx(i):.1f},{sy(v):.1f}" for i, v in enumerate(plot_vals))
     parts.append(
         f'<polyline points="{line_pts}" fill="none" stroke="#1565C0" '
-        f'stroke-width="2" stroke-linejoin="round"/>'
+        f'stroke-width="2" stroke-linejoin="round" clip-path="url(#plot-clip)"/>'
     )
 
     # Final dot
     parts.append(
-        f'<circle cx="{sx(n-1):.1f}" cy="{sy(eq_vals[-1]):.1f}" r="3" '
+        f'<circle cx="{sx(n_pts-1):.1f}" cy="{sy(plot_vals[-1]):.1f}" r="3" '
         f'fill="#1565C0"/>'
     )
 
@@ -735,8 +800,8 @@ def generate_html(strategy_name, param_grid, df, keys, date_range, n_intervals, 
     """
     # ── Compute stats ─────────────────────────────────────────────
     all_stats = _all_combo_stats(df, keys, capital=account_size)
-
-    ranked = sorted(all_stats.items(), key=lambda x: x[1]["total_pnl"], reverse=True)
+    scores    = _score_combos(all_stats)
+    ranked    = sorted(all_stats.items(), key=lambda x: scores[x[0]], reverse=True)
     total_trades = sum(s["n"] for s in all_stats.values())
     param_names = sorted(param_grid.keys())
 
@@ -850,13 +915,25 @@ def generate_html(strategy_name, param_grid, df, keys, date_range, n_intervals, 
     # ── Top 20 combos table ──────────────────────────────────────
     top_n = min(20, len(ranked))
     parts.append(f'<h2>Top {top_n} Combos</h2>')
+    _sc = cfg.scoring
+    parts.append(
+        f'<p style="color:#555;font-size:13px;margin:4px 0 8px">'
+        f'Ranked by composite score &mdash; '
+        f'<b>Sharpe</b> {_sc.w_sharpe*100:.0f}% &middot; '
+        f'<b>PnL</b> {_sc.w_pnl*100:.0f}% &middot; '
+        f'<b>Max&nbsp;DD</b> {_sc.w_max_dd*100:.0f}% (&#x2193;&nbsp;better) &middot; '
+        f'<b>DD&nbsp;Days</b> {_sc.w_dd_days*100:.0f}% (&#x2193;&nbsp;better) &middot; '
+        f'<b>Profit&nbsp;Factor</b> {_sc.w_profit_factor*100:.0f}% &nbsp;|&nbsp; '
+        f'min trades: {_sc.min_trades}'
+        f'</p>'
+    )
     parts.append('<div class="hm-wrap"><table>')
     hdr = "<tr><th>#</th>"
     for p in param_names:
         hdr += f"<th>{_param_label(p)}</th>"
     hdr += ("<th>Trades</th><th>Total PnL</th><th>Avg PnL</th><th>Med PnL</th>"
             "<th>Win%</th><th>Max Win</th><th>Max Loss</th>"
-            "<th>Max DD</th><th>DD Days</th><th>Sharpe</th><th>PF</th></tr>")
+            "<th>Max DD</th><th>DD Days</th><th>Sharpe</th><th>PF</th><th>Score</th></tr>")
     parts.append(hdr)
     for rank, (key, s) in enumerate(ranked[:top_n], 1):
         params = dict(key)
@@ -877,7 +954,8 @@ def generate_html(strategy_name, param_grid, df, keys, date_range, n_intervals, 
             f'<td class="neg">{s["max_dd_pct"]:.1f}%</td>'
             f'<td class="neg">{s["max_dd_days"]}d</td>'
             f'<td>{s["sharpe"]:.2f}</td>'
-            f'<td>{pf_str}</td></tr>'
+            f'<td>{pf_str}</td>'
+            f'<td>{scores[key]:.3f}</td></tr>'
         )
         parts.append(row)
     parts.append("</table></div>")

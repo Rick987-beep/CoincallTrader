@@ -1,57 +1,68 @@
 #!/usr/bin/env python3
 """
-short_strangle_delta_tp.py — Short N-DTE strangle (delta-selected) with SL + TP + time/expiry exit.
+short_strangle_weekly_cap.py — Capacity-managed short strangle with weekly DTE targeting.
 
-Identical to short_strangle_delta.py but adds a take-profit exit:
+Extends short_strangle_weekly_tp with a capacity book:
 
-    take_profit_pct — close when the cost to buy back both legs (at ask)
-                      has fallen to  entry_premium × (1 - take_profit_pct).
+    target_max_open  — maximum number of strangles allowed open simultaneously
+    max_daily_new    — maximum new strangles to open on any single day
 
-    Example: take_profit_pct=0.60 → close when combined ask drops to 40 %
-             of the premium collected at entry.
+Each day, at most min(max_daily_new, target_max_open - current_open) new
+strangles are opened.  Once any units are opened that day, no further
+openings happen until the next calendar day.
 
-TP repricing uses raw ask prices (no mark/fair floor) — simple bid/ask only.
-SL repricing is unchanged from the original strategy.
+This prevents lump-risk from opening many positions on one volatile day,
+while letting the book refill gradually after TP/SL/expiry closures.
 
-All other behaviour (delta selection, entry window, SL, max-hold, expiry
-settlement) is identical to ShortStrangleDelta.
+Exits per position (all evaluated independently each tick):
+    take_profit  — combined ask <= entry_premium × (1 - take_profit_pct)
+    stop_loss    — combined ask >= entry_premium × (1 + stop_loss_pct)
+    max_hold     — position held >= max_hold_days calendar days (0 = disabled)
+    expiry       — settlement at expiry hour (intrinsic value)
+    end_of_data  — force-closed at market at last data tick
+
+Counting:
+    1 unit = 1 strangle = 1 contract per leg (call + put)
+    current_open = len(self._positions)
 """
 import re
-from datetime import datetime, timedelta
+from datetime import datetime
 from functools import lru_cache
 from typing import Any, Dict, List, Optional
 
 from backtester.pricing import deribit_fee_per_leg, EXPIRY_HOUR_UTC
 from backtester.strategy_base import (
     OpenPosition, Trade, close_trade,
-    time_window, stop_loss_pct, max_hold_hours,
+    time_window, stop_loss_pct, max_hold_days,
 )
 
 
 # ------------------------------------------------------------------
-# Helpers (identical to short_strangle_delta.py)
+# Expiry helpers (identical to short_strangle_weekly_tp)
 # ------------------------------------------------------------------
 
-@lru_cache(maxsize=64)
+_MONTH_MAP = {
+    "JAN": 1, "FEB": 2, "MAR": 3, "APR": 4,
+    "MAY": 5, "JUN": 6, "JUL": 7, "AUG": 8,
+    "SEP": 9, "OCT": 10, "NOV": 11, "DEC": 12,
+}
+
+
+@lru_cache(maxsize=128)
 def _parse_expiry_date(expiry_code):
     # type: (str) -> Optional[datetime]
-    month_map = {
-        "JAN": 1, "FEB": 2, "MAR": 3, "APR": 4,
-        "MAY": 5, "JUN": 6, "JUL": 7, "AUG": 8,
-        "SEP": 9, "OCT": 10, "NOV": 11, "DEC": 12,
-    }
     m = re.match(r"(\d{1,2})([A-Z]{3})(\d{2})", expiry_code)
     if not m:
         return None
     day = int(m.group(1))
-    month = month_map.get(m.group(2))
+    month = _MONTH_MAP.get(m.group(2))
     year = 2000 + int(m.group(3))
     if month is None:
         return None
     return datetime(year, month, day)
 
 
-@lru_cache(maxsize=64)
+@lru_cache(maxsize=128)
 def _expiry_dt_utc(expiry_code, tzinfo):
     # type: (str, Any) -> Optional[datetime]
     exp_date = _parse_expiry_date(expiry_code)
@@ -60,14 +71,25 @@ def _expiry_dt_utc(expiry_code, tzinfo):
     return exp_date.replace(hour=EXPIRY_HOUR_UTC, tzinfo=tzinfo)
 
 
-def _select_expiry(state, dte):
+def _select_expiry_for_week(state, target_weeks):
     # type: (Any, int) -> Optional[str]
-    target_date = state.dt.date() + timedelta(days=dte)
+    """Return the expiry in [target_weeks*7, target_weeks*7+6] DTE with lowest DTE."""
+    lo = target_weeks * 7
+    hi = lo + 6
+    today = state.dt.date()
+
+    best_expiry = None
+    best_dte = None
     for exp in state.expiries():
         exp_date = _parse_expiry_date(exp)
-        if exp_date is not None and exp_date.date() == target_date:
-            return exp
-    return None
+        if exp_date is None:
+            continue
+        dte = (exp_date.date() - today).days
+        if lo <= dte <= hi:
+            if best_dte is None or dte < best_dte:
+                best_expiry = exp
+                best_dte = dte
+    return best_expiry
 
 
 def _select_by_delta(chain, target_delta):
@@ -84,52 +106,63 @@ def _select_by_delta(chain, target_delta):
 # Strategy
 # ------------------------------------------------------------------
 
-class ShortStrangleDeltaTp:
-    """Sell N-DTE OTM strangle (delta-selected); exit on TP, SL, time exit, or expiry."""
+class ShortStrangleWeeklyCap:
+    """Capacity-managed daily short strangle with week-bucket DTE targeting.
 
-    name = "short_strangle_delta_tp"
+    Capacity rules (evaluated once per day in entry window):
+        slots_available = target_max_open - len(self._positions)
+        n_to_open       = min(max_daily_new, slots_available)
+
+    Once any units are opened on a given day, no further openings happen
+    that day.  If the book is full, no openings happen (and the day is NOT
+    marked as used — we try again tomorrow).
+    """
+
+    name = "short_strangle_weekly_cap"
     DATE_RANGE = ("2026-03-09", "2026-03-23")
     DESCRIPTION = (
-        "Sells a strangle on a Deribit expiry N calendar days ahead (dte=1/2/3), "
-        "with legs chosen by target delta (e.g. delta=0.25 → 25-delta call + put). "
-        "Adds a take-profit: close when combined ask drops to (1-tp_pct) × entry premium. "
-        "TP uses raw ask prices. SL uses the same repricing as the base strategy. "
-        "One entry per day; up to dte+1 positions open concurrently. "
-        "Entries allowed 01:00–23:00 UTC. "
-        "Exits on take-profit, stop-loss, optional max hold duration, or expiry settlement."
+        "Sells delta-selected OTM strangles targeting a week-bucket expiry. "
+        "Capacity book: at most target_max_open positions open simultaneously; "
+        "at most max_daily_new new positions per calendar day. "
+        "Exits per-position on TP, SL, max-hold-days, expiry settlement, "
+        "or end-of-data mark-to-market close."
     )
 
     PARAM_GRID = {
-        "dte":              [1, 2],
-        "delta":            [0.1, 0.15, 0.2, 0.25, 0.3],
-        "entry_hour":       [8, 10, 12, 14, 16, 18, 20],
-        "stop_loss_pct":    [0.75, 1.0, 1.5, 2.0, 3.0],
-        "take_profit_pct":  [0.4, 0.5, 0.6, 0.7],
-        "max_hold_hours":   [0, 6,8,10,12,18,24,36],  # 0 = hold to expiry
+        "target_weeks":    [1, 2, 3],
+        "delta":           [0.10, 0.15, 0.20],
+        "entry_hour":      [10, 16 ],
+        "stop_loss_pct":   [2.0, 3.0],
+        "take_profit_pct": [0.40, 0.55, 0.75],
+        "max_hold_days":   [0, 7],
+        "target_max_open": [3, 5, 7],
+        "max_daily_new":   [1, 2, 3],
     }
 
     def __init__(self):
         self._positions = []          # type: List[OpenPosition]
-        self._dte = 1
-        self._max_concurrent = 1
-        self._delta = 0.25
-        self._sl_pct = 1.0
+        self._target_weeks = 2
+        self._delta = 0.15
+        self._sl_pct = 2.0
         self._tp_pct = 0.50
         self._entry_hour = 10
-        self._max_hold_hours = 0
+        self._max_hold_days = 0
+        self._target_max_open = 5
+        self._max_daily_new = 1
         self._last_trade_date = None  # type: Optional[Any]
         self._entry_conditions = []
         self._exit_conditions = []
 
     def configure(self, params):
         # type: (Dict[str, Any]) -> None
-        self._dte = params.get("dte", 1)
+        self._target_weeks = params.get("target_weeks", 2)
         self._delta = params["delta"]
         self._sl_pct = params["stop_loss_pct"]
         self._tp_pct = params["take_profit_pct"]
         self._entry_hour = params.get("entry_hour", 10)
-        self._max_hold_hours = params.get("max_hold_hours", 0)
-        self._max_concurrent = self._dte + 1
+        self._max_hold_days = params.get("max_hold_days", 0)
+        self._target_max_open = params.get("target_max_open", 5)
+        self._max_daily_new = params.get("max_daily_new", 1)
         self._positions = []
         self._last_trade_date = None
 
@@ -139,13 +172,14 @@ class ShortStrangleDeltaTp:
         self._exit_conditions = [
             stop_loss_pct(self._sl_pct),
         ]
-        if self._max_hold_hours > 0:
-            self._exit_conditions.append(max_hold_hours(self._max_hold_hours))
+        if self._max_hold_days > 0:
+            self._exit_conditions.append(max_hold_days(self._max_hold_days))
 
     def on_market_state(self, state):
         # type: (Any) -> List[Trade]
         trades = []
 
+        # --- Exit pass ---
         to_close = []
         for pos in list(self._positions):
             reason = self._check_expiry(state, pos)
@@ -156,27 +190,37 @@ class ShortStrangleDeltaTp:
                     reason = exit_cond(state, pos)
                     if reason:
                         break
+            # Guard: skip tick if option data missing (data gap), except expiry settlement
             if reason and reason != "expiry":
                 expiry = pos.metadata["expiry"]
                 if (state.get_option(expiry, pos.metadata["call_strike"], True) is None
                         or state.get_option(expiry, pos.metadata["put_strike"], False) is None):
-                    reason = None  # data gap — retry next tick
+                    reason = None
             if reason:
                 trades.append(self._close(state, pos, reason))
                 to_close.append(pos)
         for pos in to_close:
             self._positions.remove(pos)
 
-        if len(self._positions) < self._max_concurrent:
-            today = state.dt.date()
-            if self._last_trade_date != today:
-                if all(cond(state) for cond in self._entry_conditions):
-                    self._try_open(state)
+        # --- Entry pass ---
+        today = state.dt.date()
+        if self._last_trade_date != today:
+            if all(cond(state) for cond in self._entry_conditions):
+                slots = self._target_max_open - len(self._positions)
+                n_to_open = min(self._max_daily_new, slots)
+                if n_to_open > 0:
+                    for _ in range(n_to_open):
+                        self._try_open(state)
+                    # Mark today used only if we actually opened (try_open may skip
+                    # if chain data unavailable, but we still mark to avoid retries
+                    # within the same tick sequence)
+                    self._last_trade_date = today
 
         return trades
 
     def on_end(self, state):
         # type: (Any) -> List[Trade]
+        """Force-close all remaining positions at market (last data tick)."""
         trades = []
         for pos in list(self._positions):
             trades.append(self._close(state, pos, "end_of_data"))
@@ -191,12 +235,14 @@ class ShortStrangleDeltaTp:
     def describe_params(self):
         # type: () -> Dict[str, Any]
         return {
-            "dte":              self._dte,
-            "delta":            self._delta,
-            "stop_loss_pct":    self._sl_pct,
-            "take_profit_pct":  self._tp_pct,
-            "entry_hour":       self._entry_hour,
-            "max_hold_hours":   self._max_hold_hours,
+            "target_weeks":    self._target_weeks,
+            "delta":           self._delta,
+            "stop_loss_pct":   self._sl_pct,
+            "take_profit_pct": self._tp_pct,
+            "entry_hour":      self._entry_hour,
+            "max_hold_days":   self._max_hold_days,
+            "target_max_open": self._target_max_open,
+            "max_daily_new":   self._max_daily_new,
         }
 
     # ------------------------------------------------------------------
@@ -214,7 +260,7 @@ class ShortStrangleDeltaTp:
 
     def _check_take_profit(self, state, pos):
         # type: (Any, OpenPosition) -> Optional[str]
-        """Close when combined ask cost drops to (1 - tp_pct) × entry premium.
+        """Close when combined ask drops to (1 - tp_pct) × entry premium.
 
         Uses raw ask prices — no mark/fair floor.
         Returns None if ask data is missing for either leg (skip tick).
@@ -227,17 +273,16 @@ class ShortStrangleDeltaTp:
         if call_q is None or put_q is None:
             return None
         if call_q.ask <= 0 or put_q.ask <= 0:
-            return None  # missing ask — skip tick
+            return None
         current_usd = call_q.ask_usd + put_q.ask_usd
-        _ep = pos.entry_price_usd
-        profit_ratio = (_ep - current_usd) / (_ep if _ep > 0.01 else 0.01)
+        profit_ratio = (pos.entry_price_usd - current_usd) / max(pos.entry_price_usd, 0.01)
         if profit_ratio >= self._tp_pct:
             return "take_profit"
         return None
 
     def _try_open(self, state):
         # type: (Any) -> None
-        expiry = _select_expiry(state, self._dte)
+        expiry = _select_expiry_for_week(state, self._target_weeks)
         if expiry is None:
             return
 
@@ -253,7 +298,6 @@ class ShortStrangleDeltaTp:
 
         if call is None or put is None:
             return
-
         if call.bid <= 0 or put.bid <= 0:
             return
 
@@ -266,6 +310,10 @@ class ShortStrangleDeltaTp:
         fee_call = deribit_fee_per_leg(state.spot, call_entry_usd)
         fee_put  = deribit_fee_per_leg(state.spot, put_entry_usd)
         exp_dt   = _expiry_dt_utc(expiry, state.dt.tzinfo)
+
+        today = state.dt.date()
+        exp_date = _parse_expiry_date(expiry)
+        dte = (exp_date.date() - today).days if exp_date else None
 
         pos = OpenPosition(
             entry_time=state.dt,
@@ -287,18 +335,18 @@ class ShortStrangleDeltaTp:
             entry_price_usd=entry_usd,
             fees_open=fee_call + fee_put,
             metadata={
-                "target_delta":    self._delta,
-                "expiry":          expiry,
-                "expiry_dt":       exp_dt,
-                "direction":       "sell",
-                "call_strike":     call.strike,
-                "put_strike":      put.strike,
-                "call_delta":      call.delta,
-                "put_delta":       put.delta,
+                "target_delta":  self._delta,
+                "expiry":        expiry,
+                "expiry_dt":     exp_dt,
+                "direction":     "sell",
+                "call_strike":   call.strike,
+                "put_strike":    put.strike,
+                "call_delta":    call.delta,
+                "put_delta":     put.delta,
+                "dte_at_entry":  dte,
             },
         )
         self._positions.append(pos)
-        self._last_trade_date = state.dt.date()
 
     def _close(self, state, pos, reason):
         # type: (Any, OpenPosition, str) -> Trade
@@ -310,7 +358,6 @@ class ShortStrangleDeltaTp:
             call_exit_usd = max(0.0, state.spot - call_strike)
             put_exit_usd  = max(0.0, put_strike  - state.spot)
         else:
-            # Buy back at ask; fall back to entry price on missing data.
             call_q = state.get_option(expiry, call_strike, True)
             put_q  = state.get_option(expiry, put_strike,  False)
             call_exit_usd = (call_q.ask_usd if call_q and call_q.ask > 0
@@ -325,8 +372,11 @@ class ShortStrangleDeltaTp:
         )
 
         trade = close_trade(state, pos, reason, exit_usd, fees_close)
-        trade.metadata["dte"]              = self._dte
-        trade.metadata["stop_loss_pct"]    = self._sl_pct
-        trade.metadata["take_profit_pct"]  = self._tp_pct
-        trade.metadata["max_hold_hours"]   = self._max_hold_hours
+        trade.metadata["target_weeks"]    = self._target_weeks
+        trade.metadata["stop_loss_pct"]   = self._sl_pct
+        trade.metadata["take_profit_pct"] = self._tp_pct
+        trade.metadata["max_hold_days"]   = self._max_hold_days
+        trade.metadata["target_max_open"] = self._target_max_open
+        trade.metadata["max_daily_new"]   = self._max_daily_new
+        trade.metadata["dte_at_entry"]    = pos.metadata.get("dte_at_entry")
         return trade

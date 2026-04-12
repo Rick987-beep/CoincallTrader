@@ -1,15 +1,26 @@
 #!/usr/bin/env python3
 """
-strategy_base.py — Strategy protocol, data types, and composable condition helpers.
+strategy_base.py — Strategy protocol, trade dataclasses, and composable
+condition helpers.
 
 Defines the contract between strategies and the backtest engine:
-    - Strategy protocol (configure → on_market_state → on_end → reset)
-    - Trade / OpenPosition dataclasses
-    - Reusable entry conditions (time_window, weekday_only, etc.)
-    - Reusable exit conditions (index_move_trigger, max_hold_hours, etc.)
+  • Trade / OpenPosition dataclasses — carried through the engine and
+    consumed by results.py.
+  • Strategy protocol — structural typing (configure → on_market_state →
+    on_end → reset). Strategies do not need to inherit from anything.
+  • Entry condition factories — composable callables (MarketState) → bool:
+      time_window, weekday_only, at_interval
+  • Exit condition factories — composable callables (MarketState, OpenPosition)
+    → Optional[str]:
+      stop_loss_pct, profit_target_pct, max_hold_hours, max_hold_days,
+      time_exit, index_move_trigger
+  • _reprice_legs() — marks all legs of an open position to market price.
+    Writes the result to pos._last_reprice_usd so the engine’s NAV tracker
+    can reuse it without a second call (avoids double reprice per tick).
+  • close_trade() — builds a Trade from an OpenPosition being closed.
 
-Strategies compose conditions from these helpers — same pattern as
-production's StrategyConfig but stripped of execution concerns.
+Security note: no user-supplied strings are evaluated; all strategy
+parameters are plain Python scalars validated by the strategy’s configure().
 """
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -49,6 +60,9 @@ class OpenPosition:
     entry_price_usd: float      # Total premium paid/received (sum of legs)
     fees_open: float            # Entry fees (USD)
     metadata: Dict[str, Any] = field(default_factory=dict)
+    # Reprice cache: set by _reprice_legs on each call; read by the engine's
+    # _open_unrealized_pnl to avoid a second reprice of the same tick.
+    _last_reprice_usd: Optional[float] = field(default=None, repr=False)
 
 
 # ------------------------------------------------------------------
@@ -192,6 +206,17 @@ def max_hold_hours(hours):
     return check
 
 
+def max_hold_days(days):
+    # type: (int) -> ExitCondition
+    """Force-close after N calendar days held (day-boundary check at midnight UTC)."""
+    def check(state, pos):
+        held_days = (state.dt.date() - pos.entry_time.date()).days
+        if held_days >= days:
+            return "max_hold"
+        return None
+    return check
+
+
 def time_exit(hour, minute=0):
     # type: (int, int) -> ExitCondition
     """Hard close at specific UTC wall-clock time (same day as entry)."""
@@ -216,15 +241,15 @@ def stop_loss_pct(pct):
         current_usd = _reprice_legs(state, pos)
         if current_usd is None:
             return None
+        _ep = pos.entry_price_usd
+        _denom = _ep if _ep > 0.01 else 0.01
         if pos.metadata.get("direction") == "sell":
             # Short premium: loss = current cost to buy back exceeds received
-            loss_ratio = (current_usd - pos.entry_price_usd) / max(pos.entry_price_usd, 0.01)
-            if loss_ratio >= pct:
+            if (current_usd - _ep) / _denom >= pct:
                 return "stop_loss"
         else:
             # Long premium: loss = value dropped below entry cost
-            loss_ratio = (pos.entry_price_usd - current_usd) / max(pos.entry_price_usd, 0.01)
-            if loss_ratio >= pct:
+            if (_ep - current_usd) / _denom >= pct:
                 return "stop_loss"
         return None
     return check
@@ -284,9 +309,10 @@ def _reprice_legs(state, pos):
                 else:
                     return None  # Too illiquid to estimate — skip tick
             else:
-                # Floor: use max(ask, mark) so a stale/thin ask can't price below mark.
-                # This is still conservative — we never price better than ask.
-                effective_ask = max(quote.ask, quote.mark)
+                # Floor: max(ask, mark) — inlined to avoid builtins.max overhead
+                _a = quote.ask
+                _m = quote.mark
+                effective_ask = _a if _a > _m else _m
             total += effective_ask * quote.spot
         else:
             if quote.bid == 0.0:
@@ -297,6 +323,7 @@ def _reprice_legs(state, pos):
                     return None  # Too illiquid to estimate — skip tick
             else:
                 total += quote.bid_usd
+    pos._last_reprice_usd = total
     return total
 
 

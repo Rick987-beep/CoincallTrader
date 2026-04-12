@@ -124,7 +124,7 @@ RECORDER_DATA_DIR=/opt/ct/recorder/data
 
 The recorder shares Telegram credentials with the trading slots. `RECORDER_DATA_DIR` sets where
 parquet files are written on the server. Additional `RECORDER_*` overrides are available — see
-`backtester2/tickrecorder/config.py` for the full list.
+`backtester/tickrecorder/config.py` for the full list.
 
 ---
 

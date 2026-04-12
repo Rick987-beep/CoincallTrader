@@ -1,21 +1,26 @@
 # ===========================================================================
-# Slot 01 — Daily Put Sell (Coincall)
+# Slot 01 — Put Sell 80 DTE (Coincall)
+#
+# Sells one OTM BTC put per day near -0.15 delta, targeting the nearest
+# monthly expiry >=80 DTE (±15 day window).  TP at 95% captured, SL at
+# 250% loss.  EMA-20 filter blocks entry when BTC daily close < EMA-20.
+# Up to 90 concurrent open trades (monthly expiry clustering).
 #
 # Edit params below, then deploy:
 #   ./deployment/deploy-slot.sh 01
 # ===========================================================================
 
-name = "Daily Put Sell"
-strategy = "daily_put_sell"
+name = "Put Sell 80 DTE"
+strategy = "put_sell_80dte"
 account = "coincall-main"
 
 [params]
-qty = 0.8
-target_delta = -0.10
-dte = 1
-entry_hour_start = 3
-entry_hour_end = 4
-min_margin_pct = 10
-stop_loss_pct = 70
-check_interval = 15
-max_concurrent = 2
+qty              = 0.1    # BTC per contract
+target_delta     = -0.15  # OTM put delta target
+dte              = 80     # target DTE; ±15 day window ensures daily entry
+entry_hour_start = 13     # entry window open (UTC)
+entry_hour_end   = 14     # entry window close (UTC)
+take_profit_pct  = 95     # close when 95% of premium captured
+stop_loss_pct    = 250    # close when option price = 3.5× fill (250% loss)
+check_interval   = 30     # seconds between ticks (safe up to ~90 concurrent)
+max_concurrent   = 90     # monthly expiry clustering — up to 90 open trades

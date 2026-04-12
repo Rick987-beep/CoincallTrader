@@ -45,6 +45,7 @@ from strategy import (
     StrategyConfig,
     max_hold_hours,
     time_window,
+    weekday_filter,
 )
 from trade_execution import ExecutionParams, ExecutionPhase
 from trade_lifecycle import RFQParams
@@ -67,7 +68,8 @@ DTE   = _p("DTE",   1, int)         # calendar days to target expiry (1, 2, or 3
 DELTA = _p("DELTA", 0.25)           # target absolute delta per leg (e.g. 0.25 → 25Δ)
 
 # Scheduling
-ENTRY_HOUR = _p("ENTRY_HOUR", 4, int)        # UTC hour to open (one-hour window)
+ENTRY_HOUR      = _p("ENTRY_HOUR",      4,   int)   # UTC hour to open (one-hour window)
+WEEKEND_FILTER  = _p("WEEKEND_FILTER",  1,   int)   # 1 = block new opens on Sat/Sun (default on)
 
 # Risk
 STOP_LOSS_PCT   = _p("STOP_LOSS_PCT",   1.0)       # SL fires when combined fair ≥ premium × (1 + pct)
@@ -430,6 +432,9 @@ def short_strangle_delta() -> StrategyConfig:
         # ── When to enter ─────────────────────────────────────────────
         entry_conditions=[
             time_window(ENTRY_HOUR, ENTRY_HOUR + 4),
+            *([
+                weekday_filter(["mon", "tue", "wed", "thu", "fri"])
+            ] if WEEKEND_FILTER else []),
         ],
 
         # ── When to exit ──────────────────────────────────────────────

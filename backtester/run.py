@@ -20,12 +20,17 @@ if PROJECT_ROOT not in sys.path:
 
 from backtester.market_replay import MarketReplay
 from backtester.engine import run_grid_full
+from backtester.results import GridResult
 from backtester.reporting_v2 import generate_html
 from backtester.strategies.straddle_strangle import ExtrusionStraddleStrangle
 from backtester.strategies.daily_put_sell import DailyPutSell
 from backtester.strategies.short_straddle_strangle import ShortStraddleStrangle
 from backtester.strategies.short_strangle_delta import ShortStrangleDelta
 from backtester.strategies.short_strangle_delta_tp import ShortStrangleDeltaTp
+from backtester.strategies.deltaswipswap import DeltaSwipSwap
+from backtester.strategies.deltaswipswap1m import DeltaSwipSwap1m
+from backtester.strategies.short_strangle_weekly_tp import ShortStrangleWeeklyTp
+from backtester.strategies.short_strangle_weekly_cap import ShortStrangleWeeklyCap
 from backtester.config import cfg as _cfg
 
 # ── Strategy Registry ────────────────────────────────────────────
@@ -36,6 +41,10 @@ STRATEGIES = {
     "short_straddle": ShortStraddleStrangle,
     "delta_strangle": ShortStrangleDelta,
     "delta_strangle_tp": ShortStrangleDeltaTp,
+    "deltaswipswap": DeltaSwipSwap,
+    "deltaswipswap1m": DeltaSwipSwap1m,
+    "weekly_strangle_tp": ShortStrangleWeeklyTp,
+    "weekly_strangle_cap": ShortStrangleWeeklyCap,
 }
 
 DEFAULT_OPTIONS = _cfg.data.options_parquet
@@ -101,14 +110,15 @@ def main():
         print(f"    {label}  →  ${row.total_pnl:,.0f}  ({row.n} trades, {wr:.0f}% win)")
 
     # Generate HTML report
+    result = GridResult(
+        df, keys, nav_daily_df, final_nav_df,
+        param_grid=strategy_cls.PARAM_GRID,
+        account_size=float(_cfg.simulation.account_size_usd),
+        date_range=date_range,
+    )
     html = generate_html(
         strategy_name=strategy_cls.name,
-        param_grid=strategy_cls.PARAM_GRID,
-        df=df,
-        keys=keys,
-        nav_daily_df=nav_daily_df,
-        final_nav_df=final_nav_df,
-        date_range=date_range,
+        result=result,
         n_intervals=len(replay._timestamps),
         runtime_s=grid_time,
         strategy_description=getattr(strategy_cls, "DESCRIPTION", ""),

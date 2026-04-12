@@ -67,8 +67,9 @@ logs/
 .DS_Store
 Thumbs.db
 
-# Deployment secrets (VPS connection details)
+# Deployment secrets (VPS connection details + server IPs)
 .deploy.slots.env
+servers.toml
 
 # Slot & hub env files (per-slot API keys/config)
 .env.slot-*
@@ -86,3 +87,12 @@ analysis/tardis_options/data/
 backtester2/snapshots/
 backtester2/tardis_options/data/
 backtester2/*_report.html
+
+# Backtester artifacts (data, raw ingest, tardis downloads, reports)
+backtester/data/
+backtester/ingest/raw/
+backtester/ingest/tardis/data/
+backtester/ingest/tickrecorder/data/
+backtester/ingest/tickrecorder/merged/
+backtester/reports/
+*.parquet

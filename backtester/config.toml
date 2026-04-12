@@ -31,6 +31,7 @@ parquet_compression = "zstd"
 account_size_usd        = 10_000  # virtual account size (used in equity curve)
 progress_interval       = 500     # print engine progress every N market states
 top_n_console           = 5       # top combos printed to terminal after run
+top_n_report            = 20      # top combos for detailed equity metrics in HTML report
 
 # ── Pricing ───────────────────────────────────────────────────────────────────
 [pricing]
@@ -78,6 +79,7 @@ slip_pct_zero_price     = 0.25
 model           = "deribit"   # fee model identifier
 index_rate      = 0.0003      # 0.03% of index price (base fee per leg)
 price_cap_frac  = 0.125       # capped at 12.5% of the option leg price
+perp_taker_rate = 0.0005      # 0.05% taker fee per BTC-PERPETUAL trade
 
 # ── Scoring ───────────────────────────────────────────────────────────────────
 [scoring]
@@ -87,9 +89,12 @@ min_trades          = 10
 
 # Percentile-rank weights — must sum to 1.0.
 # Each metric is ranked 0→1 across all eligible combos before weighting.
-# max_dd_pct and max_dd_days are INVERTED (1 − rank) so lower drawdown = better score.
-w_sharpe            = 0.30   # risk-adjusted return (higher = better)
-w_pnl               = 0.25   # total PnL (higher = better)
-w_max_dd            = 0.20   # max drawdown % (lower = better — inverted)
-w_dd_days           = 0.15   # drawdown duration in days (lower = better — inverted)
-w_profit_factor     = 0.10   # gross win / gross loss (higher = better)
+# max_dd_pct and ulcer are INVERTED (1 − rank) so lower values = better score.
+w_sharpe        = 0.15   # risk-adjusted return (higher = better)
+w_pnl           = 0.15   # total PnL (higher = better)
+w_max_dd        = 0.15   # max drawdown % intraday (lower = better — inverted)
+w_profit_factor = 0.10   # gross win / gross loss (higher = better)
+w_r_squared     = 0.15   # R² of equity curve vs linear trend (higher = better)
+w_omega         = 0.10   # Omega ratio of daily returns (higher = better)
+w_ulcer         = 0.10   # Ulcer Index (lower = better — inverted)
+w_consistency   = 0.10   # fraction of calendar months with positive return (higher = better)

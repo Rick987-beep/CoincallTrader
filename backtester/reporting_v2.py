@@ -1,321 +1,33 @@
 #!/usr/bin/env python3
 """
-reporting_v2.py — Strategy-agnostic HTML report for backtester V2.
+reporting_v2.py — Strategy-agnostic self-contained HTML report generator.
 
-Works with (df, keys) from engine.run_grid_full().
-Auto-discovers parameter names and generates heatmaps for high-signal pairs.
+Receives a fully pre-computed GridResult and renders it into a single-file
+HTML report with no external dependencies. Does zero analysis or recomputation
+— all metrics, equity curves, and fan-chart data are read directly from the
+GridResult attributes supplied by results.py.
+
+Report sections:
+  • Risk summary bar — key metrics for the best combo at a glance
+  • Best-combo box — parameters, all scoring metrics, Sortino, Calmar
+  • Fan chart — equity curves for the top-N combos, shaded intraday band
+  • Leaderboard — top-N combos ranked by composite score with all metrics
+  • Heatmaps — auto-generated for every 2D parameter pair
+  • Trade log — every entry/exit for the best combo
 
 Usage:
     from backtester.reporting_v2 import generate_html
-    html = generate_html(strategy_name, param_grid, df, keys, date_range, ...)
+    html = generate_html(result, strategy_name=..., n_intervals=..., runtime_s=...)
+    with open('report.html', 'w') as f:
+        f.write(html)
 """
 import math
-import statistics
-import numpy as np
 import pandas as pd
-from datetime import datetime, timedelta
+from datetime import datetime
 from itertools import combinations
 
 from backtester.config import cfg
-
-
-# ── Per-Combo Stats ──────────────────────────────────────────────
-
-def _all_combo_stats(df, keys, capital=10000, nav_daily_df=None):
-    """Vectorised per-combo stats for all combos at once.
-
-    Uses pandas groupby so 5000 combos cost one pass, not 5000 Python loops.
-    Returns dict[param_tuple → stats_dict].
-    """
-    if df.empty:
-        return {}
-
-    g = df.groupby("combo_idx")
-
-    n           = g["pnl"].count()
-    total_pnl   = g["pnl"].sum()
-    avg_pnl     = g["pnl"].mean()
-    median_pnl  = g["pnl"].median()
-    std_pnl     = g["pnl"].std(ddof=1).fillna(0.0)
-    win_rate    = (df["pnl"] > 0).groupby(df["combo_idx"]).sum() / n
-    max_win     = g["pnl"].max()
-    max_loss    = g["pnl"].min()
-
-    gross_win  = (df[df["pnl"] > 0].groupby("combo_idx")["pnl"]
-                  .sum().reindex(n.index, fill_value=0.0))
-    gross_loss = (df[df["pnl"] < 0].groupby("combo_idx")["pnl"]
-                  .sum().abs().reindex(n.index, fill_value=0.0))
-    pf = (gross_win / gross_loss.replace(0, np.nan)).fillna(99.9).clip(upper=99.9)
-
-    # Vectorised Sharpe: pivot to (calendar_days × combo_idx) matrix
-    daily_by_combo = df.groupby(["combo_idx", "entry_date"])["pnl"].sum()
-    daily_pivot = daily_by_combo.unstack(level=0, fill_value=0.0)
-    all_dates = (pd.date_range(df["entry_date"].min(),
-                               df["entry_date"].max(), freq="D")
-                 .strftime("%Y-%m-%d"))
-    daily_pivot = daily_pivot.reindex(all_dates, fill_value=0.0)
-    avg_d = daily_pivot.mean()
-    std_d = daily_pivot.std(ddof=1).replace(0, np.nan)
-    sharpe = (avg_d / std_d * 365 ** 0.5).fillna(0.0)
-
-    # Drawdown block: prefer daily NAV low/high/close (includes open PnL).
-    # Semantics:
-    #   - max_dd_pct / max_dd_days: end-of-day close based (nav_close)
-    #   - max_intraday_dd_pct: intraday low against running close high watermark
-    if nav_daily_df is not None and not nav_daily_df.empty:
-        nav = nav_daily_df.copy()
-        nav["date"] = nav["date"].astype(str)
-
-        nav_close = nav.pivot(index="date", columns="combo_idx", values="nav_close")
-        nav_low = nav.pivot(index="date", columns="combo_idx", values="nav_low")
-
-        all_dates = pd.date_range(nav["date"].min(), nav["date"].max(), freq="D").strftime("%Y-%m-%d")
-        nav_close = nav_close.reindex(all_dates)
-        nav_low = nav_low.reindex(all_dates)
-
-        nav_close = nav_close.ffill().fillna(capital)
-        nav_low = nav_low.fillna(nav_close)
-
-        running_peak_close = nav_close.cummax()
-
-        # End-of-day drawdown (for scoring and dd-days)
-        dd_eod_pivot = (running_peak_close - nav_close) / running_peak_close.replace(0, np.nan)
-        max_dd_pct_all = (dd_eod_pivot.max() * 100).fillna(0.0)
-        underwater = nav_close < running_peak_close
-
-        # Intraday drawdown (separate informational metric)
-        dd_intraday_pivot = (running_peak_close - nav_low) / running_peak_close.replace(0, np.nan)
-        max_intraday_dd_pct_all = (dd_intraday_pivot.max() * 100).fillna(0.0)
-    else:
-        # Fallback: realized-only daily closes from closed trades.
-        equity_pivot = capital + daily_pivot.cumsum()
-        running_peak = equity_pivot.cummax()
-        dd_pivot = (running_peak - equity_pivot) / running_peak.replace(0, np.nan)
-        max_dd_pct_all = (dd_pivot.max() * 100).fillna(0.0)
-        underwater = equity_pivot < running_peak
-        max_intraday_dd_pct_all = max_dd_pct_all
-
-    # Max drawdown duration: longest run of days below peak equity
-    def _max_consec(col):
-        best = cur = 0
-        for v in col:
-            cur = cur + 1 if v else 0
-            if cur > best:
-                best = cur
-        return best
-    max_dd_days_all = underwater.apply(_max_consec)
-
-    result = {}
-    for combo_idx, key in enumerate(keys):
-        if combo_idx not in n.index:
-            continue
-        result[key] = {
-            "n":             int(n[combo_idx]),
-            "total_pnl":     float(total_pnl[combo_idx]),
-            "avg_pnl":       float(avg_pnl[combo_idx]),
-            "median_pnl":    float(median_pnl[combo_idx]),
-            "stdev":         float(std_pnl.get(combo_idx, 0.0)),
-            "win_rate":      float(win_rate.get(combo_idx, 0.0)),
-            "max_win":       float(max_win[combo_idx]),
-            "max_loss":      float(max_loss[combo_idx]),
-            "profit_factor": float(pf.get(combo_idx, 0.0)),
-            "sharpe":        float(sharpe.get(combo_idx, 0.0)),
-            "max_dd_pct":    float(max_dd_pct_all.get(combo_idx, 0.0)),
-            "max_intraday_dd_pct": float(max_intraday_dd_pct_all.get(combo_idx, 0.0)),
-            "max_dd_days":   int(max_dd_days_all.get(combo_idx, 0)),
-        }
-    return result
-
-
-# ── Combo Scoring ─────────────────────────────────────────────────
-
-def _score_combos(all_stats):
-    """Rank combos using a percentile-weighted composite score (0–1).
-
-    Each metric is percentile-ranked across eligible combos (0 = worst, 1 = best).
-    Metrics where *lower is better* (max_dd_pct, max_dd_days) are inverted with
-    (1 − rank) before weighting, so the safest combo still scores 1.0 on those.
-
-    Combos below cfg.scoring.min_trades are ineligible and receive score 0.0,
-    sinking them to the bottom of the ranked list.
-
-    Returns dict[key → float].
-    """
-    sc = cfg.scoring
-    items = list(all_stats.items())
-    eligible = [(k, s) for k, s in items if s["n"] >= sc.min_trades]
-
-    if not eligible:
-        return {k: 0.0 for k, _ in items}
-
-    def _prank(vals):
-        """Percentile rank: 0.0 (lowest value) → 1.0 (highest value)."""
-        n = len(vals)
-        if n == 1:
-            return [0.5]
-        order = sorted(range(n), key=lambda i: vals[i])
-        ranks = [0.0] * n
-        for pos, idx in enumerate(order):
-            ranks[idx] = pos / (n - 1)
-        return ranks
-
-    sharpe_r = _prank([s["sharpe"]        for _, s in eligible])
-    pnl_r    = _prank([s["total_pnl"]     for _, s in eligible])
-    dd_r     = _prank([s["max_dd_pct"]    for _, s in eligible])   # inverted below
-    ddd_r    = _prank([s["max_dd_days"]   for _, s in eligible])   # inverted below
-    pf_r     = _prank([s["profit_factor"] for _, s in eligible])
-
-    scores = {}
-    for i, (k, _) in enumerate(eligible):
-        scores[k] = (
-            sc.w_sharpe          * sharpe_r[i]
-            + sc.w_pnl           * pnl_r[i]
-            + sc.w_max_dd        * (1.0 - dd_r[i])
-            + sc.w_dd_days       * (1.0 - ddd_r[i])
-            + sc.w_profit_factor * pf_r[i]
-        )
-
-    # Ineligible combos score 0 and sink to the bottom
-    for k, _ in items:
-        scores.setdefault(k, 0.0)
-    return scores
-
-
-# ── Equity Metrics ───────────────────────────────────────────────
-
-def equity_metrics(df_combo, capital=10000, nav_daily_combo=None):
-    """Build daily equity curve and compute risk metrics from a per-combo DataFrame.
-
-    Sortino and Calmar match QuantStats formulas.
-    """
-    if nav_daily_combo is not None and not nav_daily_combo.empty:
-        nav = nav_daily_combo.copy()
-        nav["date"] = nav["date"].astype(str)
-        nav = nav.sort_values("date")
-
-        first = datetime.strptime(nav["date"].iloc[0], "%Y-%m-%d").date()
-        last = datetime.strptime(nav["date"].iloc[-1], "%Y-%m-%d").date()
-        all_dates = pd.date_range(first, last, freq="D").strftime("%Y-%m-%d")
-
-        nav_close = nav.set_index("date")["nav_close"].reindex(all_dates).ffill().fillna(capital)
-        nav_low = nav.set_index("date")["nav_low"].reindex(all_dates)
-        nav_low = nav_low.fillna(nav_close)
-
-        daily_returns = nav_close.diff().fillna(nav_close.iloc[0] - capital).tolist()
-        cumulative = []
-        cum = 0.0
-        peak_close = capital
-        peak_close_at_max_dd = capital
-        max_dd_pct = 0.0
-        max_intraday_dd_pct = 0.0
-        peak_close_at_max_intraday_dd = capital
-
-        for i, ds in enumerate(all_dates):
-            pnl = float(daily_returns[i])
-            cum += pnl
-            eq = float(nav_close.iloc[i])
-            peak_close = max(peak_close, eq)
-            low = float(nav_low.iloc[i])
-
-            # End-of-day drawdown uses close only
-            dd_pct_eod = (peak_close - eq) / peak_close if peak_close > 0 else 0.0
-            if dd_pct_eod > max_dd_pct:
-                max_dd_pct = dd_pct_eod
-                peak_close_at_max_dd = peak_close
-
-            # Intraday drawdown uses low vs running close high watermark
-            dd_pct_intraday = (peak_close - low) / peak_close if peak_close > 0 else 0.0
-            if dd_pct_intraday > max_intraday_dd_pct:
-                max_intraday_dd_pct = dd_pct_intraday
-                peak_close_at_max_intraday_dd = peak_close
-            cumulative.append((ds, pnl, cum, eq))
-    else:
-        if df_combo is None or df_combo.empty:
-            return None
-
-        date_pnl = df_combo.groupby("entry_date")["pnl"].sum().to_dict()
-
-        sorted_dates = sorted(date_pnl.keys())
-        first = datetime.strptime(sorted_dates[0], "%Y-%m-%d").date()
-        last = datetime.strptime(sorted_dates[-1], "%Y-%m-%d").date()
-        daily = []
-        d = first
-        while d <= last:
-            ds = d.strftime("%Y-%m-%d")
-            daily.append((ds, date_pnl.get(ds, 0.0)))
-            d += timedelta(days=1)
-
-        cum = 0.0
-        peak = capital
-        peak_at_max_dd = capital
-        max_dd_pct = 0.0
-        cumulative = []
-        for ds, pnl in daily:
-            cum += pnl
-            eq = capital + cum
-            peak = max(peak, eq)
-            dd_pct = (peak - eq) / peak if peak > 0 else 0.0
-            if dd_pct > max_dd_pct:
-                max_dd_pct = dd_pct
-                peak_at_max_dd = peak
-            cumulative.append((ds, pnl, cum, eq))
-
-        daily_returns = [pnl for _, pnl in daily]
-        max_intraday_dd_pct = max_dd_pct
-        peak_close_at_max_intraday_dd = peak_at_max_dd
-
-    max_dd = max_dd_pct * peak_close_at_max_dd
-    max_intraday_dd = max_intraday_dd_pct * peak_close_at_max_intraday_dd
-
-    gross_win = sum(p for p in daily_returns if p > 0)
-    gross_loss = abs(sum(p for p in daily_returns if p < 0))
-    pf = (gross_win / gross_loss) if gross_loss > 0 else 99.9
-
-    # Crypto: 365 trading days per year (matches QuantStats periods= usage for crypto)
-    PERIODS = 365
-
-    # Sharpe (daily-annualised)
-    n_days = len(daily_returns)
-    avg_d = statistics.mean(daily_returns)
-    std_d = statistics.stdev(daily_returns) if n_days >= 2 else 1.0
-    sharpe = (avg_d / std_d * PERIODS ** 0.5) if std_d > 0 else 0.0
-
-    # Sortino — QuantStats: downside = sqrt(sum(neg^2) / N), target = 0
-    neg_sq_sum = sum(r * r for r in daily_returns if r < 0)
-    downside_rms = (neg_sq_sum / n_days) ** 0.5 if n_days > 0 else 0.0
-    sortino = (avg_d / downside_rms * PERIODS ** 0.5) if downside_rms > 0 else 0.0
-
-    # Calmar — CAGR / abs(max_drawdown_pct)
-    # Years = n_days / PERIODS (same time base as Sharpe/Sortino, not trade-date span)
-    # Max drawdown is the running peak-to-trough fraction computed above.
-    final_eq = capital + cum
-    years = max(n_days / PERIODS, 1 / PERIODS)
-    cagr = (final_eq / capital) ** (1.0 / years) - 1 if capital > 0 else 0.0
-    calmar = cagr / max_dd_pct if max_dd_pct > 0 else 0.0
-
-    max_cw = max_cl = cw = cl = 0
-    for pnl in daily_returns:
-        if pnl > 0:
-            cw += 1; cl = 0
-        elif pnl < 0:
-            cl += 1; cw = 0
-        max_cw = max(max_cw, cw)
-        max_cl = max(max_cl, cl)
-
-    return {
-        "daily": cumulative,
-        "total_pnl": cum,
-        "max_drawdown": max_dd,
-        "max_dd_pct": max_dd_pct * 100,
-        "max_intraday_drawdown": max_intraday_dd,
-        "max_intraday_dd_pct": max_intraday_dd_pct * 100,
-        "profit_factor": pf,
-        "sharpe": sharpe,
-        "sortino": sortino,
-        "calmar": calmar,
-        "consec_wins": max_cw,
-        "consec_losses": max_cl,
-    }
+from backtester.results import GridResult
 
 
 # ── Heatmap helpers ──────────────────────────────────────────────
@@ -441,7 +153,7 @@ def _sparkline_svg(points, width=300, height=40):
 def _equity_chart_svg(daily_rows, capital=10000, width=860, height=260):
     """Full equity curve SVG with labelled dollar Y-axis and day-number X-axis.
 
-    daily_rows: list of (date_str, day_pnl, cum_pnl, equity)
+    daily_rows: list of (date_str, day_pnl, cum_pnl, high, low, close)
     Returns a self-contained <svg> string.
     """
     if not daily_rows or len(daily_rows) < 2:
@@ -451,12 +163,17 @@ def _equity_chart_svg(daily_rows, capital=10000, width=860, height=260):
     pw = width - ml - mr
     ph = height - mt - mb
 
-    eq_vals = [row[3] for row in daily_rows]
+    eq_vals = [row[5] for row in daily_rows]  # close (NAV at end of day)
+    hi_vals  = [row[3] for row in daily_rows]  # intraday high
+    lo_vals  = [row[4] for row in daily_rows]  # intraday low
     # Prepend Day 0 = initial capital so x-axis starts at 0
     plot_vals = [capital] + eq_vals
+    plot_hi   = [capital] + hi_vals
+    plot_lo   = [capital] + lo_vals
     n_pts = len(plot_vals)
-    # Include capital in y range so the baseline is always within the plot
-    y_min, y_max = min(plot_vals), max(plot_vals)
+    # Include full intraday range and capital baseline in y-axis bounds
+    y_min = min(min(plot_lo), capital)
+    y_max = max(max(plot_hi), capital)
     y_range = max(y_max - y_min, 1.0)
     y_lo = y_min - y_range * 0.05
     y_hi = y_max + y_range * 0.05
@@ -560,6 +277,14 @@ def _equity_chart_svg(daily_rows, capital=10000, width=860, height=260):
         f'text-anchor="middle" fill="#555" font-size="11">Day #</text>'
     )
 
+    # Intraday high/low band (shaded, clipped to plot bounds)
+    band_fwd = " ".join(f"{sx(i):.1f},{sy(v):.1f}" for i, v in enumerate(plot_hi))
+    band_rev = " ".join(f"{sx(i):.1f},{sy(v):.1f}" for i, v in reversed(list(enumerate(plot_lo))))
+    parts.append(
+        f'<polygon points="{band_fwd} {band_rev}" fill="#1565C0" fill-opacity="0.08" '
+        f'clip-path="url(#plot-clip)"/>'
+    )
+
     # Fill under curve (light blue area, clipped to plot bounds)
     fill_pts = (
         f"{sx(0):.1f},{sy(capital):.1f} "
@@ -610,49 +335,6 @@ def _rank_style(rank, n_curves):
         return _lerp_color("#fb8c00", "#ffe082", t), 0.65, 1.0
     t = (rank - 13) / max(float(n_curves - 13), 1.0)   # bottom-tier reds
     return _lerp_color("#e53935", "#ffcdd2", t), 0.45, 0.8
-
-
-def _build_fan_curves(ranked, df, keys, param_names, capital, top_n=20, nav_daily_df=None):
-    """Build equity curve vectors for the top-N combos.
-
-    Returns:
-        curves — list of (rank, total_pnl, eq_values, tooltip_label)
-        dates  — list of calendar date strings (shared x-axis)
-    """
-    key_to_idx = {k: i for i, k in enumerate(keys)}
-    top_pairs  = ranked[:top_n]
-    top_idxs   = {key_to_idx[k] for k, _ in top_pairs}
-
-    if nav_daily_df is not None and not nav_daily_df.empty:
-        sub = nav_daily_df[nav_daily_df["combo_idx"].isin(top_idxs)].copy()
-        if sub.empty:
-            return [], []
-        sub["date"] = sub["date"].astype(str)
-        pivot = sub.pivot(index="date", columns="combo_idx", values="nav_close")
-        dates = pd.date_range(sub["date"].min(), sub["date"].max(), freq="D").strftime("%Y-%m-%d").tolist()
-        equity = pivot.reindex(dates).ffill().fillna(capital)
-    else:
-        sub = df[df["combo_idx"].isin(top_idxs)]
-        daily = sub.groupby(["combo_idx", "entry_date"])["pnl"].sum()
-        pivot = daily.unstack(level=0, fill_value=0.0)
-        dates = (pd.date_range(df["entry_date"].min(),
-                               df["entry_date"].max(), freq="D")
-                 .strftime("%Y-%m-%d").tolist())
-        pivot = pivot.reindex(dates, fill_value=0.0)
-        equity = capital + pivot.cumsum()
-
-    curves = []
-    for rank, (key, stats) in enumerate(top_pairs, 1):
-        cidx  = key_to_idx[key]
-        vals  = (equity[cidx].tolist() if cidx in equity.columns
-                 else [float(capital)] * len(dates))
-        params  = dict(key)
-        label   = " | ".join(
-            f"{_param_label(p)}={_fmt_val(params[p])}" for p in param_names)
-        tooltip = f"#{rank}  {label}  \u2192  {_fmt_pnl(float(stats['total_pnl']))}"
-        curves.append((rank, float(stats["total_pnl"]), vals, tooltip))
-
-    return curves, dates
 
 
 def _fan_chart_svg(curves, capital=10000, width=920, height=340):
@@ -867,24 +549,16 @@ th:first-child, td:first-child { text-align: left; }
 
 # ── HTML Report ──────────────────────────────────────────────────
 
-def generate_html(strategy_name, param_grid, df, keys, date_range, n_intervals, runtime_s,
-                  nav_daily_df=None, final_nav_df=None,
-                  strategy_description="", account_size=10000, qty=1,
-                  heatmap_pairs=None):
+def generate_html(strategy_name, result, n_intervals, runtime_s,
+                  strategy_description="", qty=1, heatmap_pairs=None):
     """Generate a self-contained HTML backtest report.
 
     Args:
         strategy_name:        Strategy.name string
-        param_grid:           dict of param_name -> [values]
-        df:                   pandas DataFrame from run_grid_full() — one row per trade
-        keys:                 list of param tuples (keys[i] = param tuple for combo_idx i)
-        nav_daily_df:         daily NAV summary from engine (low/high/close, includes open PnL)
-        final_nav_df:         per-combo final NAV summary from engine
-        date_range:           (first_date_str, last_date_str)
+        result:               GridResult from backtester.results
         n_intervals:          number of 5-min market states processed
         runtime_s:            grid execution time in seconds
         strategy_description: Short prose description shown near the top
-        account_size:         Virtual account size in USD (default 10000)
         qty:                  Contracts per trade (default 1)
         heatmap_pairs:        Optional list of (pa, pb) tuples to pin;
                               falls back to auto-selection by PnL spread
@@ -892,31 +566,24 @@ def generate_html(strategy_name, param_grid, df, keys, date_range, n_intervals, 
     Returns:
         Complete self-contained HTML string.
     """
-    # ── Compute stats ─────────────────────────────────────────────
-    all_stats = _all_combo_stats(df, keys, capital=account_size, nav_daily_df=nav_daily_df)
-    scores    = _score_combos(all_stats)
-    ranked    = sorted(all_stats.items(), key=lambda x: scores[x[0]], reverse=True)
-    total_trades = sum(s["n"] for s in all_stats.values())
-    param_names = sorted(param_grid.keys())
-
-    # Reverse-map param tuple → combo_idx for O(1) lookup
-    key_to_idx = {k: i for i, k in enumerate(keys)}
-
-    best_key = ranked[0][0] if ranked else None
-    best_stats = ranked[0][1] if ranked else None
-    best_combo_idx = key_to_idx[best_key] if best_key is not None else None
-    df_best = df[df["combo_idx"] == best_combo_idx].sort_values("entry_time") if best_combo_idx is not None else None
-    best_nav_daily = None
-    if nav_daily_df is not None and not nav_daily_df.empty and best_combo_idx is not None:
-        best_nav_daily = nav_daily_df[nav_daily_df["combo_idx"] == best_combo_idx]
-    best_eq = equity_metrics(df_best, capital=account_size, nav_daily_combo=best_nav_daily)
-
-    best_final_nav = None
-    if final_nav_df is not None and not final_nav_df.empty and best_combo_idx is not None:
-        row = final_nav_df[final_nav_df["combo_idx"] == best_combo_idx]
-        if not row.empty:
-            best_final_nav = float(row.iloc[0]["final_nav"])
-    best_params = dict(best_key) if best_key else {}
+    # ── Unpack from GridResult ────────────────────────────────────
+    df           = result.df
+    keys         = result.keys
+    param_grid   = result.param_grid
+    account_size = result.account_size
+    date_range   = result.date_range
+    all_stats    = result.all_stats
+    scores       = result.scores
+    ranked       = result.ranked
+    total_trades = result.total_trades
+    param_names  = result.param_names
+    best_key     = result.best_key
+    best_stats   = result.best_stats
+    df_best      = result.df_best
+    best_eq      = result.best_eq
+    best_final_nav = result.best_final_nav
+    best_params  = result.best_params
+    top_n_eq     = result.top_n_eq
 
     title = strategy_name.replace("_", " ").title()
     now = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
@@ -950,16 +617,20 @@ def generate_html(strategy_name, param_grid, df, keys, date_range, n_intervals, 
     if best_eq:
         _eq = best_eq
         _pf = f'{_eq["profit_factor"]:.2f}' if _eq["profit_factor"] < 100 else "99+"
+        _bs = best_stats or {}
         parts.append(f"""<div class="grid-info">
   <b>Best Combo &mdash; Risk Summary:</b> &nbsp;
     Max DD: {_fmt_pnl(_eq["max_drawdown"])} ({_eq["max_dd_pct"]:.1f}%) &nbsp;|&nbsp;
-    Max Intraday DD: {_eq["max_intraday_dd_pct"]:.1f}% &nbsp;|&nbsp;
   Sharpe: {_eq["sharpe"]:.2f} &nbsp;|&nbsp;
   Sortino: {_eq["sortino"]:.2f} &nbsp;|&nbsp;
   Calmar: {_eq["calmar"]:.2f} &nbsp;|&nbsp;
   Profit Factor: {_pf} &nbsp;|&nbsp;
   Consec Wins: {_eq["consec_wins"]} &nbsp;|&nbsp;
-  Consec Losses: {_eq["consec_losses"]}
+  Consec Losses: {_eq["consec_losses"]} &nbsp;|&nbsp;
+  R&sup2;: {_bs.get("r_squared", 0):.2f} &nbsp;|&nbsp;
+  Omega: {_bs.get("omega", 0):.2f} &nbsp;|&nbsp;
+  Ulcer: {_bs.get("ulcer", 0):.1f} &nbsp;|&nbsp;
+  Consistency: {_bs.get("consistency", 0)*100:.0f}%
 </div>""")
 
     # ── Best combo box ───────────────────────────────────────────
@@ -985,13 +656,16 @@ def generate_html(strategy_name, param_grid, df, keys, date_range, n_intervals, 
         if best_eq:
             metrics_html.extend([
                 ("Max DD", f'{_fmt_pnl(best_eq["max_drawdown"])} ({best_eq["max_dd_pct"]:.1f}%)'),
-                ("Max Intraday DD", f'{best_eq["max_intraday_dd_pct"]:.1f}%'),
                 ("Sharpe", f'{best_eq["sharpe"]:.2f}'),
                 ("Sortino", f'{best_eq["sortino"]:.2f}'),
                 ("Calmar", f'{best_eq["calmar"]:.2f}'),
                 ("Profit Factor", f'{best_eq["profit_factor"]:.2f}'),
                 ("Consec Wins", str(best_eq["consec_wins"])),
                 ("Consec Losses", str(best_eq["consec_losses"])),
+                ("R\u00b2", f'{best_stats.get("r_squared", 0):.2f}'),
+                ("Omega", f'{best_stats.get("omega", 0):.2f}'),
+                ("Ulcer Index", f'{best_stats.get("ulcer", 0):.1f}'),
+                ("Consistency", f'{best_stats.get("consistency", 0)*100:.0f}%'),
             ])
 
         for label, val in metrics_html:
@@ -1026,10 +700,13 @@ def generate_html(strategy_name, param_grid, df, keys, date_range, n_intervals, 
     parts.append(
         f'<p style="color:#555;font-size:13px;margin:4px 0 8px">'
         f'Ranked by composite score &mdash; '
+        f'<b>R&sup2;</b> {_sc.w_r_squared*100:.0f}% &middot; '
         f'<b>Sharpe</b> {_sc.w_sharpe*100:.0f}% &middot; '
         f'<b>PnL</b> {_sc.w_pnl*100:.0f}% &middot; '
         f'<b>Max&nbsp;DD</b> {_sc.w_max_dd*100:.0f}% (&#x2193;&nbsp;better) &middot; '
-        f'<b>DD&nbsp;Days</b> {_sc.w_dd_days*100:.0f}% (&#x2193;&nbsp;better) &middot; '
+        f'<b>Omega</b> {_sc.w_omega*100:.0f}% &middot; '
+        f'<b>Ulcer</b> {_sc.w_ulcer*100:.0f}% (&#x2193;&nbsp;better) &middot; '
+        f'<b>Consistency</b> {_sc.w_consistency*100:.0f}% &middot; '
         f'<b>Profit&nbsp;Factor</b> {_sc.w_profit_factor*100:.0f}% &nbsp;|&nbsp; '
         f'min trades: {_sc.min_trades}'
         f'</p>'
@@ -1040,7 +717,9 @@ def generate_html(strategy_name, param_grid, df, keys, date_range, n_intervals, 
         hdr += f"<th>{_param_label(p)}</th>"
     hdr += ("<th>Trades</th><th>Total PnL</th><th>Avg PnL</th><th>Med PnL</th>"
             "<th>Win%</th><th>Max Win</th><th>Max Loss</th>"
-            "<th>Max DD</th><th>Max Intra DD</th><th>DD Days</th><th>Sharpe</th><th>PF</th><th>Score</th></tr>")
+            "<th>Max DD</th><th>Sharpe</th><th>Sortino</th><th>Calmar</th><th>PF</th>"
+            "<th>R&sup2;</th><th>Omega</th><th>Ulcer</th><th>Consist</th>"
+            "<th>Score</th></tr>")
     parts.append(hdr)
     for rank, (key, s) in enumerate(ranked[:top_n], 1):
         params = dict(key)
@@ -1050,6 +729,9 @@ def generate_html(strategy_name, param_grid, df, keys, date_range, n_intervals, 
         row = f'<tr><td>{rank}</td>'
         for p in param_names:
             row += f'<td>{_fmt_val(params[p])}</td>'
+        _eq_detail = top_n_eq.get(key)
+        _sortino_str = f'{_eq_detail["sortino"]:.2f}' if _eq_detail else "&mdash;"
+        _calmar_str  = f'{_eq_detail["calmar"]:.2f}'  if _eq_detail else "&mdash;"
         row += (
             f'<td>{s["n"]}</td>'
             f'<td class="{pnl_cls}">{_fmt_pnl(s["total_pnl"])}</td>'
@@ -1059,29 +741,29 @@ def generate_html(strategy_name, param_grid, df, keys, date_range, n_intervals, 
             f'<td class="pos">{_fmt_pnl(s["max_win"])}</td>'
             f'<td class="neg">{_fmt_pnl(s["max_loss"])}</td>'
             f'<td class="neg">{s["max_dd_pct"]:.1f}%</td>'
-            f'<td class="neg">{s["max_intraday_dd_pct"]:.1f}%</td>'
-            f'<td class="neg">{s["max_dd_days"]}d</td>'
             f'<td>{s["sharpe"]:.2f}</td>'
+            f'<td>{_sortino_str}</td>'
+            f'<td>{_calmar_str}</td>'
             f'<td>{pf_str}</td>'
+            f'<td>{s["r_squared"]:.2f}</td>'
+            f'<td>{s["omega"]:.2f}</td>'
+            f'<td>{s["ulcer"]:.1f}</td>'
+            f'<td>{s["consistency"]*100:.0f}%</td>'
             f'<td>{scores[key]:.3f}</td></tr>'
         )
         parts.append(row)
     parts.append("</table></div>")
 
     # ── Performance fan chart ─────────────────────────────────────
-    fan_top = min(20, len(ranked))
-    if fan_top >= 2:
-        fan_curves, _fan_dates = _build_fan_curves(
-            ranked, df, keys, param_names, account_size, top_n=fan_top,
-            nav_daily_df=nav_daily_df)
-        if fan_curves:
-            parts.append(
-                f'<h2>Top {fan_top} Equity Curves</h2>'
-                f'<p style="color:#555;font-size:13px;margin:4px 0 8px">'
-                f'Hover any curve for its parameters and PnL. '
-                f'Shaded band = full min&ndash;max range across all {fan_top} combos.</p>'
-            )
-            parts.append(_fan_chart_svg(fan_curves, capital=account_size))
+    if result.fan_curves:
+        fan_top = len(result.fan_curves)
+        parts.append(
+            f'<h2>Top {fan_top} Equity Curves</h2>'
+            f'<p style="color:#555;font-size:13px;margin:4px 0 8px">'
+            f'Hover any curve for its parameters and PnL. '
+            f'Shaded band = full min&ndash;max range across all {fan_top} combos.</p>'
+        )
+        parts.append(_fan_chart_svg(result.fan_curves, capital=account_size))
 
     # ── Parameter sensitivity heatmaps ───────────────────────────
     # Design:
@@ -1179,7 +861,7 @@ def generate_html(strategy_name, param_grid, df, keys, date_range, n_intervals, 
             '<th>Day PnL</th><th>Cumulative</th><th>Equity</th>'
             '<th style="min-width:120px">Visual</th></tr>')
         max_abs = max(abs(row[1]) for row in best_eq["daily"]) or 1
-        for ds, pnl, cum, eq in best_eq["daily"]:
+        for ds, pnl, cum, high, low, eq in best_eq["daily"]:
             pnl_cls = _pnl_class(pnl)
             cum_cls = _pnl_class(cum)
             bar_w = min(abs(pnl) / max_abs * 100, 100)
@@ -1200,7 +882,6 @@ def generate_html(strategy_name, param_grid, df, keys, date_range, n_intervals, 
         parts.append(f"""
 <div class="grid-info">
   <b>Max Drawdown:</b> {_fmt_pnl(eq["max_drawdown"])} ({eq["max_dd_pct"]:.1f}%) &nbsp;|&nbsp;
-    <b>Max Intraday DD:</b> {eq["max_intraday_dd_pct"]:.1f}% &nbsp;|&nbsp;
   <b>Sharpe:</b> {eq["sharpe"]:.2f} &nbsp;|&nbsp;
   <b>Sortino:</b> {eq["sortino"]:.2f} &nbsp;|&nbsp;
   <b>Calmar:</b> {eq["calmar"]:.2f} &nbsp;|&nbsp;

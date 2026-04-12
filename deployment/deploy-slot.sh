@@ -36,22 +36,33 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-# ── Load deploy configuration ──────────────────────────────────────────
-DEPLOY_ENV="${PROJECT_ROOT}/.deploy.slots.env"
-if [[ ! -f "$DEPLOY_ENV" ]]; then
-    echo "Error: $DEPLOY_ENV not found."
-    echo "Create it with:"
-    echo "  VPS_HOST=root@YOUR_VPS_IP"
-    echo "  SSH_KEY=~/.ssh/your_key  (optional)"
+# ── Load server configuration from servers.toml ────────────────────────
+SERVERS_TOML="${PROJECT_ROOT}/servers.toml"
+if [[ ! -f "$SERVERS_TOML" ]]; then
+    echo "Error: servers.toml not found."
+    echo "Create it with the [trading-prod] server definition."
     exit 1
 fi
-# shellcheck disable=SC1090
-source "$DEPLOY_ENV"
 
-: "${VPS_HOST:?Set VPS_HOST in .deploy.slots.env}"
-: "${SSH_KEY:=}"
+read -r _VPS_USER _VPS_IP CT_BASE < <(python3 - <<PYEOF
+try:
+    import tomllib
+except ModuleNotFoundError:
+    import tomli as tomllib  # type: ignore
+with open("${SERVERS_TOML}", "rb") as f:
+    d = tomllib.load(f)
+s = d["prod"]
+print(s["user"], s["ip"], s["base_path"])
+PYEOF
+)
+VPS_HOST="${_VPS_USER}@${_VPS_IP}"
 
-CT_BASE="/opt/ct"
+# SSH key: prefer .env, fall back to .deploy.slots.env (legacy)
+SSH_KEY=$(grep -E '^SSH_KEY=' "${PROJECT_ROOT}/.env" 2>/dev/null | head -1 | cut -d= -f2- | tr -d '"' | tr -d "'") || true
+if [[ -z "$SSH_KEY" && -f "${PROJECT_ROOT}/.deploy.slots.env" ]]; then
+    SSH_KEY=$(grep -E '^SSH_KEY=' "${PROJECT_ROOT}/.deploy.slots.env" 2>/dev/null | head -1 | cut -d= -f2- | tr -d '"' | tr -d "'") || true
+fi
+SSH_KEY="${SSH_KEY:-}"
 
 # ── SSH / rsync options ─────────────────────────────────────────────────
 SSH_OPTS="-o StrictHostKeyChecking=accept-new -o ConnectTimeout=10"

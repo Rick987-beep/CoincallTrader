@@ -41,6 +41,7 @@ class SimulationConfig:
     account_size_usd: float
     progress_interval: int
     top_n_console: int
+    top_n_report: int
 
 
 @dataclass
@@ -68,6 +69,7 @@ class FeesConfig:
     model: str
     index_rate: float
     price_cap_frac: float
+    perp_taker_rate: float
 
 
 @dataclass
@@ -76,8 +78,11 @@ class ScoringConfig:
     w_sharpe:        float
     w_pnl:           float
     w_max_dd:        float
-    w_dd_days:       float
     w_profit_factor: float
+    w_r_squared:     float
+    w_omega:         float
+    w_ulcer:         float
+    w_consistency:   float
 
 
 @dataclass
@@ -131,6 +136,7 @@ def load_config(path=_CONFIG_PATH):
             account_size_usd=float(s["account_size_usd"]),
             progress_interval=int(s["progress_interval"]),
             top_n_console=int(s["top_n_console"]),
+            top_n_report=int(s["top_n_report"]),
         ),
         pricing=PricingConfig(
             hours_per_year=float(p["hours_per_year"]),
@@ -152,14 +158,18 @@ def load_config(path=_CONFIG_PATH):
             model=str(f["model"]),
             index_rate=float(f["index_rate"]),
             price_cap_frac=float(f["price_cap_frac"]),
+            perp_taker_rate=float(f["perp_taker_rate"]),
         ),
         scoring=ScoringConfig(
             min_trades=int(sc["min_trades"]),
             w_sharpe=float(sc["w_sharpe"]),
             w_pnl=float(sc["w_pnl"]),
             w_max_dd=float(sc["w_max_dd"]),
-            w_dd_days=float(sc["w_dd_days"]),
             w_profit_factor=float(sc["w_profit_factor"]),
+            w_r_squared=float(sc["w_r_squared"]),
+            w_omega=float(sc["w_omega"]),
+            w_ulcer=float(sc["w_ulcer"]),
+            w_consistency=float(sc["w_consistency"]),
         ),
     )
 

@@ -5,6 +5,56 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.13.0] - 2026-04-12
+
+### Added — Put Sell 80 DTE Live Strategy
+
+- **`strategies/put_sell_80dte.py`** — New live strategy: sells one BTC OTM put per day near -0.15δ targeting the nearest monthly expiry ≥ 80 DTE (±15 day window); entry 13:00–14:00 UTC; TP at 95% premium captured; SL at 250% loss (price = 3.5× fill); EMA-20 filter blocks entry in downtrend; up to 90 concurrent open trades (monthly expiry clustering); phased limit execution (fair → bid+33% spread → bid)
+- **`slots/slot-01.toml`** — Reconfigured slot 01 for `put_sell_80dte` (was `daily_put_sell`): qty=0.1, delta=-0.15, dte=80, entry 13–14 UTC, SL=250%, TP=95%, max_concurrent=90
+
+### Added — Backtester: New Strategies
+
+- **`backtester/strategies/deltaswipswap.py`** — Long straddle/strangle with dynamic delta hedging via BTC-PERPETUAL (gamma scalping); opens ATM straddle or OTM strangle, neutralises delta at entry via a perp position, then re-hedges whenever |net portfolio delta| ≥ configurable threshold; closed at `close_hour` UTC
+- **`backtester/strategies/deltaswipswap1m.py`** — 1-minute candle variant of `deltaswipswap` for higher-frequency hedge testing
+- **`backtester/strategies/short_strangle_weekly_cap.py`** — Capacity-managed weekly short strangle (extends `short_strangle_weekly_tp`): caps simultaneous open positions via `target_max_open` and limits `max_daily_new` new openings per day; exits per-position via TP, SL, or `max_hold_days`
+- **`backtester/strategies/short_strangle_weekly_tp.py`** — Weekly-DTE short strangle with configurable take-profit and stop-loss
+
+### Added — Backtester: GridResult and Results Module
+
+- **`backtester/results.py`** — New `GridResult` class: self-contained container for all engine output; runs vectorised stats (Sharpe, Sortino, Calmar, Omega, Ulcer Index, monthly consistency, max drawdown), percentile-rank combo scoring (8-metric weighted formula from `config.toml`), and equity curve computation (top-N combos only); `reporting_v2.py` now reads exclusively from `GridResult` attributes
+
+### Added — Backtester: Bulk Tardis Ingest Tooling
+
+- **`backtester/ingest/bulkdownloadTardis/`** — Tardis bulk-download pipeline: `bulk_fetch.py` downloads compressed `.tar.gz` day-files from `tardis.dev/datasets/`, `stream_extract.py` streams and decodes each file into a normalised parquet per day, `clean.py` validates and repairs gaps, `fixup_midnight.py` fixes midnight-boundary timestamp issues; `run_bulk.sh` orchestrates a full date-range download
+
+### Added — Backtester: Analysis and Pricing
+
+- **`backtester/analysis/risk_worst_case.py`** — Worst-case scenario analysis for backtester output
+- **`backtester/pricing.py`** — `deribit_perp_fee()` (0.05% taker fee), `bs_call_delta()`, `bs_put_delta()` (Black-Scholes δ at r=0) for use by delta-hedging strategies
+
+### Added — Deployment and Agents
+
+- **`deployment/ssh-server.sh`** — Convenience SSH wrapper that reads `servers.toml` for connection details
+- **`.github/agents/production-health-check.agent.md`** — Copilot agent definition for automated production health checks
+- **`docs/upgrades/`** — Upgrade guides: backtester scoring/equity upgrade, exchange trade log integration, logging upgrade
+
+### Changed
+
+- **`strategies/short_strangle_delta.py`** — Added `WEEKEND_FILTER` param (default on): blocks new opens on Saturday and Sunday; uses `weekday_filter(["mon","tue","wed","thu","fri"])` entry condition
+- **`deployment/deploy-slot.sh`** — Deploy host now read from `servers.toml` `[prod]` section (`user`, `ip`, `base_path`) instead of `.deploy.slots.env`; SSH key resolution falls back: `.env` → `.deploy.slots.env` (legacy)
+- **`backtester/engine.py`** — Added `run_grid_full()` entry point returning `(df, keys, nav_daily_df, final_nav_df)`; NAV tracking uses reprice cache (`pos._last_reprice_usd` set by `strategy_base._reprice_legs`) to avoid redundant double-repricing per tick
+- **`backtester/market_replay.py`** — Significant rework of replay internals
+- **`backtester/reporting_v2.py`** — Reporting now reads exclusively from `GridResult`; no longer calls engine functions directly
+- **`backtester/strategy_base.py`** — `_reprice_legs` caches result in `pos._last_reprice_usd` for engine NAV accounting
+- **`backtester/config.py`** / **`backtester/config.toml`** — Updated for new scoring/fees/perp config
+- **`.gitignore`** — Added exclusions for `backtester/ingest/bulkdownloadTardis/data/`, `*.parquet`, and other large data directories
+
+### Removed
+
+- **`backtester/BACKTEST_V2_PLAN.md`** — Stale planning document (work is complete)
+- **`backtester/ingest/tardis/BULK_DOWNLOAD_PLAN.md`** — Superseded by `bulkdownloadTardis/` implementation
+- **`docs/MIGRATION_PLAN_DERIBIT.md`** — Stale migration plan (migration complete)
+
 ## [1.12.0] - 2026-04-03
 
 ### Added — Short Strangle Delta Strategy

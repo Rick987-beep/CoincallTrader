@@ -73,7 +73,7 @@ Rules:
 - You may add a subtitle after the section header (e.g. `### Added — Long Strangle Strategy`) if the change has a focused theme
 - Bold the filename using `**\`filename.py\`**` style, matching existing entries
 - Be concise but specific — a reader should understand what changed without reading the diff
-- Do NOT include `analysis/`, `archive/`, `logs/`, or `backtester2/snapshots/` in the entry unless explicitly asked
+- Do NOT include `analysis/`, `archive/`, `logs/`, or `backtester/snapshots/` in the entry unless explicitly asked
 
 ---
 

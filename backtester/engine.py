@@ -1,21 +1,38 @@
 #!/usr/bin/env python3
 """
-engine.py — Grid runner for backtesting strategies.
+engine.py — Single-pass grid runner for backtesting strategies.
 
-Single-pass multi-combo evaluation: iterates market data once and evaluates
-all parameter combinations simultaneously. MarketState is constructed once
-per 5-min interval; each strategy instance processes it independently.
+Iterates market data once and evaluates all parameter combinations
+simultaneously: each strategy instance receives the same MarketState
+at every 5-min tick. This avoids re-loading data for each combo and
+keeps memory usage flat regardless of grid size.
+
+Two public entry points:
+
+  run_grid()         — lightweight V1-compatible output.
+                       Returns dict[param_tuple → list[(pnl, triggered,
+                       exit_hour, entry_date)]]. Use for quick counting
+                       or when you don’t need daily NAV tracking.
+
+  run_grid_full()    — full output used by the CLI and GridResult.
+                       Returns (df, keys, nav_daily_df, final_nav_df):
+                       • df            — trade log DataFrame (one row per closed trade)
+                       • keys          — list of param tuples (index into combo_idx)
+                       • nav_daily_df  — daily NAV low/high/close per combo
+                       • final_nav_df  — final NAV + realized/open PnL per combo
+
+NAV tracking detail:
+  Every tick, _open_unrealized_pnl() marks all open positions to market.
+  It reads pos._last_reprice_usd (cached by _reprice_legs in strategy_base)
+  to avoid calling _reprice_legs twice per position per tick — once during
+  the strategy’s SL/TP exit check, and once here for NAV accounting.
+  Falls back to a fresh _reprice_legs call if the cache is absent.
 
 Usage:
-    from backtester.engine import run_grid, run_single
-    from backtester.strategies.straddle_strangle import ExtrusionStraddleStrangle
-
-    results = run_grid(
-        ExtrusionStraddleStrangle,
-        ExtrusionStraddleStrangle.PARAM_GRID,
-        replay,
+    from backtester.engine import run_grid_full
+    df, keys, nav_daily_df, final_nav_df = run_grid_full(
+        MyStrategy, MY_PARAM_GRID, replay
     )
-    # results: dict of param_tuple → list of (pnl, triggered, exit_hour, entry_date)
 """
 import itertools
 import time as _time
@@ -43,6 +60,9 @@ def _open_unrealized_pnl(strategy, state, pos_cache):
     # type: (Any, Any, Dict[int, float]) -> float
     """Mark all open positions to market.
 
+    Reads pos._last_reprice_usd if the strategy already repriced this tick
+    (set by _reprice_legs in strategy_base), avoiding a redundant second call.
+    Falls back to calling _reprice_legs directly when the cache is stale/absent.
     Uses carry-forward when a leg cannot be repriced on this tick.
     """
     positions = _iter_open_positions(strategy)
@@ -58,7 +78,15 @@ def _open_unrealized_pnl(strategy, state, pos_cache):
     total = 0.0
     for pos in positions:
         pid = id(pos)
-        current_usd = _reprice_legs(state, pos)
+        # Use reprice result cached by _reprice_legs this tick if available.
+        current_usd = pos._last_reprice_usd
+        if current_usd is None:
+            current_usd = _reprice_legs(state, pos)
+        else:
+            # Consume the cached value — reset so a stale value isn't reused
+            # on a future tick where _reprice_legs was not called (e.g. expiry
+            # check fired and bypassed the SL/TP path).
+            pos._last_reprice_usd = None
         if current_usd is None:
             pnl = pos_cache.get(pid)
             if pnl is None:

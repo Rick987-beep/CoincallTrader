@@ -131,3 +131,23 @@ def deribit_fee_per_leg(btc_price, leg_price_usd):
     base = _cfg.fees.index_rate * btc_price
     cap = _cfg.fees.price_cap_frac * max(leg_price_usd, 0)
     return min(base, cap)
+
+
+def deribit_perp_fee(notional_usd):
+    """Deribit BTC-PERPETUAL taker fee: 0.05% of |notional| per trade."""
+    return _cfg.fees.perp_taker_rate * abs(notional_usd)
+
+
+# ── Greeks ────────────────────────────────────────────────────────
+
+def bs_call_delta(S, K, T_years, sigma):
+    """BS call delta (r=0). Range [0, 1]."""
+    if T_years <= 1e-12 or sigma <= 1e-12:
+        return 1.0 if S >= K else 0.0
+    d1 = (math.log(S / K) + 0.5 * sigma * sigma * T_years) / (sigma * math.sqrt(T_years))
+    return norm_cdf(d1)
+
+
+def bs_put_delta(S, K, T_years, sigma):
+    """BS put delta (r=0). Range [-1, 0]. Equal to bs_call_delta - 1."""
+    return bs_call_delta(S, K, T_years, sigma) - 1.0

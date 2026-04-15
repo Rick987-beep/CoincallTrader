@@ -63,7 +63,25 @@ class DashboardLogHandler(logging.Handler):
             pass  # Never break application logging
 
 
-# Singleton handler — attached to root logger on first start
+class _WarningBridgeHandler(logging.Handler):
+    """Forwards WARNING+ records from the root logger into a DashboardLogHandler ring buffer.
+
+    Attached to the root logger so that errors and connectivity failures
+    appear in the dashboard log tail alongside the structured ct.strategy events.
+    The ct.strategy logger uses propagate=False so its records never reach root;
+    this bridge only captures events from plain module-level loggers.
+    """
+
+    def __init__(self, target: DashboardLogHandler) -> None:
+        super().__init__(level=logging.WARNING)
+        self._target = target
+
+    def emit(self, record: logging.LogRecord) -> None:
+        if record.levelno >= logging.WARNING:
+            self._target.emit(record)
+
+
+# Singleton handler — attached to ct.strategy on first start
 _log_handler: Optional[DashboardLogHandler] = None
 _dashboard_start_time: float = 0.0
 # Brute-force guard: maps remote IP → (consecutive_fail_count, lockout_expiry_epoch).
@@ -490,7 +508,10 @@ def start_dashboard(
         _log_handler.setFormatter(
             logging.Formatter("%(asctime)s  %(levelname)-7s  %(name)s — %(message)s", datefmt="%H:%M:%S")
         )
-        logging.getLogger().addHandler(_log_handler)
+        # Capture ct.strategy lifecycle events (INFO+)
+        logging.getLogger("ct.strategy").addHandler(_log_handler)
+        # Also capture root WARNING+ (errors, connectivity failures)
+        logging.getLogger().addHandler(_WarningBridgeHandler(_log_handler))
         password = "control-mode-unused"
         host = "127.0.0.1"
         logger.info(f"Dashboard control endpoint on http://127.0.0.1:{port}")
@@ -503,12 +524,15 @@ def start_dashboard(
             )
             return
 
-        # Attach in-memory log handler to root logger (full mode only)
+        # Attach in-memory log handler to ct.strategy (full mode only)
         _log_handler = DashboardLogHandler(maxlen=_LOG_TAIL_LINES)
         _log_handler.setFormatter(
             logging.Formatter("%(asctime)s  %(levelname)-7s  %(name)s — %(message)s", datefmt="%H:%M:%S")
         )
-        logging.getLogger().addHandler(_log_handler)
+        # Capture ct.strategy lifecycle events (INFO+)
+        logging.getLogger("ct.strategy").addHandler(_log_handler)
+        # Also capture root WARNING+ (errors, connectivity failures)
+        logging.getLogger().addHandler(_WarningBridgeHandler(_log_handler))
 
     app = _create_app(ctx, runners, password)
 

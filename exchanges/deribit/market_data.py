@@ -156,9 +156,20 @@ class DeribitMarketDataAdapter(ExchangeMarketData):
             return [{"price": price, "qty": amount} for price, amount in levels]
 
         return {
+            # bids and asks carry BTC-native prices — Deribit's fill-price denomination.
+            # These are the values to use for all order placement on this exchange.
             "bids": to_dicts(ob.get("bids", [])),
             "asks": to_dicts(ob.get("asks", [])),
-            "mark": float(ob.get("mark_price", 0)) * index_price,  # USD for notional calc
-            "_mark_btc": float(ob.get("mark_price", 0)),  # BTC-native for order pricing
+            # 'mark' is USD (mark_price_btc × index_price) — for notional display only.
+            # DO NOT use as an order price on Deribit: submitting a USD value (e.g.
+            # $7.44) as a BTC price (e.g. 7.44 BTC ≈ $550k) causes price_too_high.
+            "mark": float(ob.get("mark_price", 0)) * index_price,
+            # '_mark_btc' is the BTC-native mark from the Deribit API.
+            # This is the correct denomination for pricing Deribit limit orders.
+            # LimitFillManager always prefers this field over 'mark'.
+            "_mark_btc": float(ob.get("mark_price", 0)),
+            # '_index_price' is the BTC/USD spot rate at snapshot time.
+            # Available for USD↔BTC conversion and the BTC plausibility guard
+            # in LimitFillManager._get_phased_price().
             "_index_price": index_price,
         }

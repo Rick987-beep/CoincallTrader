@@ -1,29 +1,36 @@
 # ===========================================================================
-# Slot 02 — Short Strangle Delta (Deribit)
+# Slot 02 — Short Strangle Delta TP (Deribit)
 #
 # Sells an OTM strangle on the Deribit expiry N calendar days ahead (dte=1/2/3).
 # Legs selected by target delta rather than a fixed USD offset.
+# Extends short_strangle_delta with take-profit and min_otm_pct.
 #
 # Backtester2 param grid:
-#   dte:            [1, 2, 3]
-#   delta:          [0.10, 0.15, 0.20, 0.25, 0.30]
-#   entry_hour:     [1, 4, 8, 12, 16, 20]
-#   stop_loss_pct:  [0.75, 1.0, 1.5, 2.0, 3.0, 3.5]
-#   max_hold_hours: [0, 12, 36, 60]   (0 = hold to expiry / 08:00 UTC settlement)
+#   dte:             [1, 2, 3]
+#   delta:           [0.10, 0.15, 0.20, 0.30]
+#   entry_hour:      [8, 12, 16, 18, 22]
+#   stop_loss_pct:   [2.0, 3.0, 4.0, 5.0]
+#   take_profit_pct: [0, 0.4, 0.6, 0.8]
+#   max_hold_hours:  [0, 24, 36, 48]   (0 = hold to expiry / 08:00 UTC settlement)
+#   skip_weekends:   [0, 1]
+#   min_otm_pct:     [0, 3, 4]
 #
 # Edit params below, then deploy:
 #   ./deployment/deploy-slot.sh 02
 # ===========================================================================
 
-name = "Short Strangle Delta"
-strategy = "short_strangle_delta"
-account = "deribit-main"
+name = "Short Strangle Delta TP"
+strategy = "short_strangle_delta_tp"
+account = "deribit-big"
 
 [params]
-qty             = 0.5    # contracts per leg
-dte             = 2      # target expiry: 1, 2, or 3 calendar days ahead
-delta           = 0.15   # target absolute delta per leg (e.g. 0.25 → 25Δ call + 25Δ put)
-entry_hour      = 12     # UTC hour for entry window (one-hour: ENTRY_HOUR to ENTRY_HOUR+1)
-stop_loss_pct   = 3.0    # SL fires when combined fair ≥ premium × (1 + stop_loss_pct)
-max_hold_hours  = 0      # max hold in hours; 0 = disabled (hold to 08:00 UTC expiry)
-check_interval  = 15     # seconds between strategy ticks
+qty              = 5      # contracts per leg
+dte              = 1      # target expiry: 1, 2, or 3 calendar days ahead
+delta            = 0.15   # target absolute delta per leg (e.g. 0.25 → 25Δ call + 25Δ put)
+entry_hour       = 18     # UTC hour for entry window (4-hour: ENTRY_HOUR to ENTRY_HOUR+4)
+stop_loss_pct    = 5.0    # SL fires when combined fair ≥ premium × (1 + stop_loss_pct)
+take_profit_pct  = 0.80   # TP: close when profit ratio ≥ this (0 = disabled)
+max_hold_hours   = 0      # max hold in hours; 0 = disabled (hold to 08:00 UTC expiry)
+min_otm_pct      = 0      # min OTM distance %; 0 = disabled
+weekend_filter   = 1      # 1 = block new opens on Sat/Sun
+check_interval   = 15     # seconds between strategy ticks

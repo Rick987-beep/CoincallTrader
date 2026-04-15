@@ -74,6 +74,7 @@ def generate_env(slot_id: str, slot_config: dict, account: dict,
         f"# Deploy:      ./deployment/deploy-slot.sh {slot_id}",
         "",
         f"SLOT_NAME={name}",
+        f"SLOT_ID={slot_id}",
         f"SLOT_STRATEGY={strategy}",
         f"EXCHANGE={exchange}",
         f"TRADING_ENVIRONMENT={environment}",
@@ -92,10 +93,11 @@ def generate_env(slot_id: str, slot_config: dict, account: dict,
         lines.append(f"{key_env}={secrets['api_key']}")
         lines.append(f"{secret_env}={secrets['api_secret']}")
     elif exchange == "deribit":
-        key_env = account["api_key_env"]
-        secret_env = account["api_secret_env"]
-        lines.append(f"{key_env}={secrets['api_key']}")
-        lines.append(f"{secret_env}={secrets['api_secret']}")
+        # config.py always reads DERIBIT_CLIENT_ID_PROD / DERIBIT_CLIENT_SECRET_PROD
+        # regardless of which named account is used — write canonical names.
+        env_suffix = "TEST" if environment == "testnet" else "PROD"
+        lines.append(f"DERIBIT_CLIENT_ID_{env_suffix}={secrets['api_key']}")
+        lines.append(f"DERIBIT_CLIENT_SECRET_{env_suffix}={secrets['api_secret']}")
 
     # Telegram (if available in .env)
     tg_token = env_values.get("TELEGRAM_BOT_TOKEN")

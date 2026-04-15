@@ -38,6 +38,7 @@ from config import BASE_URL, API_KEY, API_SECRET
 from auth import CoincallAuth
 
 logger = logging.getLogger(__name__)
+_execution_logger = logging.getLogger("ct.execution")  # structured JSONL → logs/execution.jsonl
 
 
 class TradeExecutor:
@@ -379,6 +380,16 @@ class LimitFillManager:
         if self._using_phases:
             phase = self._current_phase
             phase_label = f"phase 1/{len(self._params.phases)} ({phase.pricing})"
+            if lifecycle_id and phase:
+                direction = "open" if (purpose and "open" in str(getattr(purpose, "value", str(purpose)))) else "close"
+                _execution_logger.info({
+                    "event": "PHASE_ENTERED",
+                    "trade_id": lifecycle_id,
+                    "phase_index": 1,
+                    "phase_total": len(self._params.phases),
+                    "pricing": phase.pricing,
+                    "direction": direction,
+                })
         else:
             phase_label = "aggressive (legacy)"
 
@@ -562,13 +573,29 @@ class LimitFillManager:
             next_phase = self._current_phase
             if next_phase is None:
                 logger.error("LimitFillManager: all execution phases exhausted — failed")
+                if self._lifecycle_id:
+                    _execution_logger.info({
+                        "event": "EXEC_FAILED",
+                        "trade_id": self._lifecycle_id,
+                        "reason": "all_phases_exhausted",
+                    })
                 return "failed"
 
             logger.info(
                 f"LimitFillManager: phase {self._phase_index}/{len(self._params.phases)} "
                 f"({phase.pricing}) expired after {phase_elapsed:.0f}s "
-                f"→ advancing to phase {self._phase_index + 1} ({next_phase.pricing})"
+                f"\u2192 advancing to phase {self._phase_index + 1} ({next_phase.pricing})"
             )
+            if self._lifecycle_id:
+                _execution_logger.info({
+                    "event": "PHASE_ADVANCED",
+                    "trade_id": self._lifecycle_id,
+                    "from_phase_index": self._phase_index,
+                    "to_phase_index": self._phase_index + 1,
+                    "from_pricing": phase.pricing,
+                    "to_pricing": next_phase.pricing,
+                    "elapsed_s": round(phase_elapsed, 1),
+                })
             self._phase_started_at = now
             self._last_reprice_at = now
             self._requote_unfilled(is_phase_transition=True)
@@ -831,46 +858,148 @@ class LimitFillManager:
                     return (best_bid + best_ask) / 2
 
             elif phase.pricing == "fair":
-                # Fair price: mark if between bid/ask, else mid.
-                # fair_aggression interpolates toward the aggressive side:
-                #   SELL: fair → bid  |  BUY: fair → ask
-                mark = float(ob.get('mark', 0)) or float(ob.get('_mark_btc', 0))
+                # ── Denomination contract ────────────────────────────────────────────
+                # The orderbook carries mark prices in two denominations depending on
+                # the active exchange adapter:
+                #
+                #   Deribit adapter (BTC-denominated fill prices):
+                #     ob['bids'] / ob['asks']  — BTC prices; correct for order placement.
+                #     ob['_mark_btc']          — BTC mark price (use this for pricing).
+                #     ob['mark']               — USD mark (mark_btc × index_price).
+                #                                FOR DISPLAY / NOTIONAL ONLY.
+                #                                NEVER submit to Deribit as an order price.
+                #     ob['_index_price']       — USD spot price (for sanity checks only).
+                #
+                #   Coincall adapter (USD-denominated fill prices):
+                #     ob['bids'] / ob['asks']  — USD prices.
+                #     ob['mark']               — USD mark.  Use this.
+                #     ob['_mark_btc']          — not populated (returns 0).
+                #
+                # ALWAYS prefer ob['_mark_btc'] when it is non-zero.
+                #
+                # Root cause of the 2026-04-15 price_too_high incident:
+                #   OLD: `float(ob.get('mark', 0)) or float(ob.get('_mark_btc', 0))`
+                #   This short-circuits on the non-zero USD mark (e.g. $7.44), so
+                #   _mark_btc is NEVER used.  The USD value ($7.44) is then submitted
+                #   as a BTC price (7.44 BTC ≈ $550k) → Deribit rejects price_too_high.
+                mark_btc = float(ob.get('_mark_btc', 0))
+                mark_usd = float(ob.get('mark', 0))
+                mark = mark_btc if mark_btc > 0 else mark_usd  # always correct denomination
 
+                # ob['_index_price'] is only populated by the Deribit adapter.
+                # Used exclusively in the plausibility guard below.  Zero for Coincall.
+                index_price = float(ob.get('_index_price', 0))
+
+                # ── Determine fair value ─────────────────────────────────────────────
+                # Produce a single-number fair-value estimate in the exchange's native
+                # fill denomination (BTC for Deribit, USD for Coincall).
+                # The mark selection above guarantees the correct denomination is used.
+                #
+                # Priority order (most → least data available):
+                #   1. Full book  — mark if inside [bid, ask], else midpoint.
+                #   2. Bid only   — max(mark, bid); guards against pricing below the
+                #                   best bid (would guarantee an instant fill — bad  for
+                #                   a passive open sell order).
+                #   3. Ask only   — min(mark, ask).  THIS WAS THE MISSING CASE that
+                #                   caused the 2026-04-15 incident.  Deep-OTM legs near
+                #                   expiry commonly have NO buyers (bid = None) but still
+                #                   have a Deribit-max ask (e.g. 0.022 BTC).  Without
+                #                   this branch, execution fell through to "mark only",
+                #                   and mark was the USD value — denomination mismatch.
+                #   4. Mark only  — when neither side of the book is quoted at all.
+                #   5. Nothing    — fair = None; falls through to min_floor_price below.
+                fair: Optional[float] = None
                 if best_bid is not None and best_ask is not None:
-                    if best_bid <= mark <= best_ask:
-                        fair = mark
-                    else:
-                        fair = (best_bid + best_ask) / 2
+                    # Full two-sided book.
+                    fair = mark if (best_bid <= mark <= best_ask) else (best_bid + best_ask) / 2
                 elif best_bid is not None:
+                    # Ask side empty — guard: price must not be below the tightest bid.
                     fair = max(mark, best_bid) if mark > 0 else best_bid
+                elif best_ask is not None:
+                    # Bid side empty — deep-OTM or near-expiry leg with no buyers.
+                    # Prefer the lower of mark and ask: fair_aggression will slide the
+                    # final order price toward the ask when closing aggressively.
+                    fair = min(mark, best_ask) if mark > 0 else best_ask
                 elif mark > 0:
+                    # No book at all — trust the mark price as a last resort.
                     fair = mark
-                else:
-                    return None
+                # else: fair stays None → price stays None → min_floor_price applies.
 
-                a = phase.fair_aggression
-                if side == "sell":
-                    spread = fair - best_bid if best_bid is not None else 0
-                    price = fair - a * spread
-                    if phase.min_price_pct_of_fair is not None:
-                        floor = fair * phase.min_price_pct_of_fair
-                        if price < floor:
-                            logger.warning(
-                                f"LimitFillManager: {symbol} computed price ${price:.4f} "
-                                f"< floor ${floor:.4f} "
-                                f"(fair=${fair:.4f} × {phase.min_price_pct_of_fair:.0%}) "
-                                f"— refusing to place order"
-                            )
-                            return None
+                # ── Apply fair_aggression to arrive at the order price ───────────────
+                price: Optional[float] = None
+                if fair is not None:
+                    a = phase.fair_aggression
+                    if side == "sell":
+                        # Slide from fair toward best bid as aggression increases.
+                        # spread_to_bid = 0 when best_bid is absent (one-sided book),
+                        # so the order stays at fair regardless of aggression.
+                        spread_to_bid = (fair - best_bid) if best_bid is not None else 0.0
+                        price = fair - a * spread_to_bid
+
+                        # min_price_pct_of_fair: optional hard floor for sell orders.
+                        # Refuses to open a sell leg when the spread is so wide that
+                        # the passive price would be economically unacceptable.
+                        # Returns None immediately — MUST NOT fall through to
+                        # min_floor_price below, which is only for buy-to-close legs.
+                        if phase.min_price_pct_of_fair is not None:
+                            floor = fair * phase.min_price_pct_of_fair
+                            if price < floor:
+                                logger.warning(
+                                    f"LimitFillManager: {symbol} sell price {price:.6f} "
+                                    f"< floor {floor:.6f} "
+                                    f"(fair={fair:.6f} × {phase.min_price_pct_of_fair:.0%})"
+                                    f" — refusing to place"
+                                )
+                                return None  # explicit refusal; bypass min_floor_price
+                    else:  # buy (closing a short position)
+                        if best_ask is not None:
+                            # Slide from fair toward best ask as aggression increases.
+                            spread_to_ask = best_ask - fair
+                            price = fair + a * spread_to_ask
+                        elif mark > 0:
+                            # No ask in the book (illiquid / no active sellers).
+                            # Escalate slightly above mark, scaling with aggression, so
+                            # the order is visible to any latent seller.
+                            price = mark * (1.0 + a * 0.2)
+                        else:
+                            # fair derived entirely from the bid side; no ask or mark.
+                            price = fair
+
+                # ── BTC price plausibility guard ─────────────────────────────────────
+                # A BTC option is bounded above by the value of 1 BTC (the underlying
+                # itself).  Any computed price above 1.0 almost certainly indicates a
+                # denomination error that slipped through the mark selection above.
+                # This guard is a last-resort safety net — the mark_btc preference is
+                # the real fix and should prevent this from triggering in practice.
+                #
+                # Only applied when _index_price > 0 (Deribit adapter), because Coincall
+                # prices are in USD and may legitimately be in the thousands of dollars,
+                # which is correct behaviour and must not trigger a false positive.
+                if price is not None and index_price > 0 and price > 1.0:
+                    logger.error(
+                        f"LimitFillManager [{symbol}] BTC PRICE SANITY FAIL: "
+                        f"computed {price:.6f} BTC (≈${price * index_price:,.2f}) — "
+                        f"exceeds 1 BTC which is implausible for any BTC option.  "
+                        f"Likely a denomination error.  "
+                        f"mark_btc={mark_btc:.6f}  mark_usd={mark_usd:.4f}  "
+                        f"best_bid={best_bid}  best_ask={best_ask}  "
+                        f"index=${index_price:,.0f}.  Refusing to place."
+                    )
+                    return None  # explicit refusal; bypass min_floor_price
+
+                # Return the computed price.  If no valid price could be computed
+                # (price is None or ≤ 0), apply min_floor_price as a last resort for
+                # deep-OTM near-worthless buy-to-close legs where the book is empty
+                # (e.g. an expiring OTM leg where bid = ask = mark = 0).
+                if price is not None and price > 0:
                     return price
-                else:  # buy
-                    if best_ask is not None:
-                        spread = best_ask - fair
-                        return fair + a * spread
-                    elif mark > 0:
-                        # No ask: escalate using mark (SL damage-control)
-                        return mark * (1.0 + a * 0.2)
-                    return fair
+                if phase.min_floor_price is not None:
+                    logger.info(
+                        f"LimitFillManager: no valid fair price for {symbol} ({side}) "
+                        f"— using min_floor_price {phase.min_floor_price}"
+                    )
+                    return phase.min_floor_price
+                return price  # None or ≤ 0 — best_effort close logic will skip this leg
 
             price = None
         except Exception as e:

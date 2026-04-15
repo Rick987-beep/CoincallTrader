@@ -80,6 +80,36 @@ def _select_by_delta(chain, target_delta):
     return min(candidates, key=lambda q: abs(q.delta - target_delta))
 
 
+def _apply_min_otm(chain, selected, spot, min_pct, is_call):
+    # type: (list, Any, float, float, bool) -> Optional[Any]
+    """If `selected` is within min_pct% of spot, push to the nearest strike
+    that satisfies the minimum OTM distance.  Returns None if none exists.
+
+    Call leg: strike must be >= spot * (1 + min_pct/100)
+    Put  leg: strike must be <= spot * (1 - min_pct/100)
+    """
+    factor = min_pct / 100.0
+    if is_call:
+        floor = spot * (1.0 + factor)
+        if selected.strike >= floor:
+            return selected  # already far enough out
+        # find the nearest qualifying strike (lowest call strike >= floor)
+        candidates = sorted(
+            [q for q in chain if q.strike >= floor],
+            key=lambda q: q.strike
+        )
+    else:
+        floor = spot * (1.0 - factor)
+        if selected.strike <= floor:
+            return selected  # already far enough out
+        # find the nearest qualifying strike (highest put strike <= floor)
+        candidates = sorted(
+            [q for q in chain if q.strike <= floor],
+            key=lambda q: q.strike, reverse=True
+        )
+    return candidates[0] if candidates else None
+
+
 # ------------------------------------------------------------------
 # Strategy
 # ------------------------------------------------------------------
@@ -88,7 +118,7 @@ class ShortStrangleDeltaTp:
     """Sell N-DTE OTM strangle (delta-selected); exit on TP, SL, time exit, or expiry."""
 
     name = "short_strangle_delta_tp"
-    DATE_RANGE = ("2026-03-09", "2026-03-23")
+    DATE_RANGE = ("2026-01-11", "2026-04-10")
     DESCRIPTION = (
         "Sells a strangle on a Deribit expiry N calendar days ahead (dte=1/2/3), "
         "with legs chosen by target delta (e.g. delta=0.25 → 25-delta call + put). "
@@ -100,12 +130,16 @@ class ShortStrangleDeltaTp:
     )
 
     PARAM_GRID = {
-        "dte":              [1, 2],
-        "delta":            [0.1, 0.15, 0.2, 0.25, 0.3],
-        "entry_hour":       [8, 10, 12, 14, 16, 18, 20],
-        "stop_loss_pct":    [0.75, 1.0, 1.5, 2.0, 3.0],
-        "take_profit_pct":  [0.4, 0.5, 0.6, 0.7],
-        "max_hold_hours":   [0, 6,8,10,12,18,24,36],  # 0 = hold to expiry
+        # Sensitivity grid: combo #14 centre ± 5% and ± 10% on each continuous param.
+        # 5 × 5 × 5 × 5 = 625 combos.  Fixed/binary params held at live values.
+        "dte":              [1],
+        "delta":            [0.135, 0.143, 0.15, 0.158, 0.165],   # ±10 / ±5 / centre / +5 / +10 %
+        "entry_hour":       [16, 17, 18, 19, 20],                  # ±2h / ±1h / centre / +1h / +2h
+        "stop_loss_pct":    [4.5, 4.75, 5.0, 5.25, 5.5],          # ±10 / ±5 / centre / +5 / +10 %
+        "take_profit_pct":  [0.72, 0.76, 0.80, 0.84, 0.88],       # ±10 / ±5 / centre / +5 / +10 %
+        "max_hold_hours":   [0],
+        "skip_weekends":    [1],
+        "min_otm_pct":      [0],
     }
 
     def __init__(self):
@@ -117,6 +151,8 @@ class ShortStrangleDeltaTp:
         self._tp_pct = 0.50
         self._entry_hour = 10
         self._max_hold_hours = 0
+        self._skip_weekends = 0
+        self._min_otm_pct = 0
         self._last_trade_date = None  # type: Optional[Any]
         self._entry_conditions = []
         self._exit_conditions = []
@@ -129,6 +165,8 @@ class ShortStrangleDeltaTp:
         self._tp_pct = params["take_profit_pct"]
         self._entry_hour = params.get("entry_hour", 10)
         self._max_hold_hours = params.get("max_hold_hours", 0)
+        self._skip_weekends = params.get("skip_weekends", 0)
+        self._min_otm_pct = params.get("min_otm_pct", 0)
         self._max_concurrent = self._dte + 1
         self._positions = []
         self._last_trade_date = None
@@ -170,7 +208,9 @@ class ShortStrangleDeltaTp:
         if len(self._positions) < self._max_concurrent:
             today = state.dt.date()
             if self._last_trade_date != today:
-                if all(cond(state) for cond in self._entry_conditions):
+                if self._skip_weekends and state.dt.weekday() >= 5:  # 5=Sat, 6=Sun
+                    pass
+                elif all(cond(state) for cond in self._entry_conditions):
                     self._try_open(state)
 
         return trades
@@ -197,6 +237,8 @@ class ShortStrangleDeltaTp:
             "take_profit_pct":  self._tp_pct,
             "entry_hour":       self._entry_hour,
             "max_hold_hours":   self._max_hold_hours,
+            "skip_weekends":    self._skip_weekends,
+            "min_otm_pct":     self._min_otm_pct,
         }
 
     # ------------------------------------------------------------------
@@ -253,6 +295,12 @@ class ShortStrangleDeltaTp:
 
         if call is None or put is None:
             return
+
+        if self._min_otm_pct > 0:
+            call = _apply_min_otm(calls, call, state.spot, self._min_otm_pct, is_call=True)
+            put  = _apply_min_otm(puts,  put,  state.spot, self._min_otm_pct, is_call=False)
+            if call is None or put is None:
+                return  # no qualifying strike this tick — skip entry
 
         if call.bid <= 0 or put.bid <= 0:
             return

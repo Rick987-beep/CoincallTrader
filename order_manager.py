@@ -48,6 +48,7 @@ from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
+_execution_logger = logging.getLogger("ct.execution")  # structured JSONL → logs/execution.jsonl
 
 LOGS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
 
@@ -335,6 +336,16 @@ class OrderManager:
             f"{symbol} {side} {qty} @ {price} "
             f"({purpose.value}, lifecycle={lifecycle_id}, leg={leg_index})"
         )
+        _execution_logger.info({
+            "event": "ORDER_PLACED",
+            "trade_id": lifecycle_id,
+            "order_id": order_id,
+            "symbol": symbol,
+            "side": side,
+            "qty": qty,
+            "price": price,
+            "purpose": purpose.value,
+        })
         return record
 
     # ── Cancellation ─────────────────────────────────────────────────────
@@ -452,6 +463,15 @@ class OrderManager:
             f"OrderManager: requoted {order_id} → {replacement.order_id} "
             f"@ {new_price} (remaining {replacement.qty})"
         )
+        _execution_logger.info({
+            "event": "ORDER_REQUOTED",
+            "trade_id": record.lifecycle_id,
+            "old_order_id": order_id,
+            "new_order_id": replacement.order_id,
+            "symbol": record.symbol,
+            "old_price": record.price,
+            "new_price": new_price,
+        })
         return replacement
 
     # ── Status Polling ───────────────────────────────────────────────────
@@ -726,6 +746,23 @@ class OrderManager:
         record.status = status
         record.terminal_at = time.time()
         record.updated_at = record.terminal_at
+
+        if status == OrderStatus.FILLED:
+            _execution_logger.info({
+                "event": "ORDER_FILLED",
+                "trade_id": record.lifecycle_id,
+                "order_id": record.order_id,
+                "symbol": record.symbol,
+                "fill_price": record.avg_fill_price,
+                "fill_qty": record.filled_qty,
+            })
+        elif status == OrderStatus.CANCELLED:
+            _execution_logger.info({
+                "event": "ORDER_CANCELLED",
+                "trade_id": record.lifecycle_id,
+                "order_id": record.order_id,
+                "symbol": record.symbol,
+            })
 
         # Clear the active slot so a replacement can be placed
         key = (record.lifecycle_id, record.leg_index, record.purpose.value)

@@ -47,35 +47,71 @@ Note for each service: active/inactive/failed, uptime, number of restarts.
 
 ## Step 4 — Slot Logs (last 24 h)
 
-For each slot directory found on the server, pull its journald logs:
+### 4a — Strategy events (structured JSONL — preferred source)
+
+Read `strategy.jsonl` for all lifecycle events. This is the authoritative source for trading activity.
 
 ```bash
-ssh <SSH_OPTS> <VPS_HOST> "journalctl -u ct-slot@<NN> --since '24 hours ago' --no-pager 2>&1 | tail -600"
+ssh <SSH_OPTS> <VPS_HOST> "jq -r '[.ts, .event, (.symbol // (.legs // [\"\"]) [0] // \"\"), (.pnl_usd // \"\"|tostring), (.trigger // .reason // \"\"), (.phase // \"\")] | @tsv' /opt/ct/slot-<NN>/logs/strategy.jsonl 2>/dev/null | tail -100"
 ```
 
-Scan for and extract:
+Extract and report:
+- `DEPLOY_STARTED` — when was the current version deployed? What strategy/version?
+- `ENTRY_TRIGGERED` / `ENTRY_BLOCKED` — did the entry window fire? If blocked, why (reason field)?
+- `TRADE_OPENING` → `TRADE_OPENED` — successful open; note symbol, open_premium
+- `TRADE_OPEN_FAILED` — failed to open; flag explicitly with reason
+- `EXIT_TRIGGERED` — what condition fired? (condition + reason fields)
+- `TRADE_CLOSED` — PnL, trigger, duration_s
+- `TRADE_CANCELLED` — flag explicitly
+- `RECONCILE_WARN` — flag explicitly
 
-**Trading activity:**
-- Trade open events: lines with `OPEN`, `opening`, `entry`, `placed`, `filled`
-- Trade close events: lines with `CLOSE`, `closing`, `exit`, `expired`, `SL`, `stop loss`
-- Note timestamps and contract symbols for each
+If `strategy.jsonl` does not exist (slot running pre-upgrade code), fall back to journalctl text scan:
+```bash
+ssh <SSH_OPTS> <VPS_HOST> "journalctl -u ct-slot@<NN> --since '24 hours ago' --no-pager 2>&1 | grep -iE 'OPEN|CLOSE|entry|exit|filled|ERROR|WARN|failed|timeout|liquidity' | tail -200"
+```
 
-**Unusual activity (flag explicitly):**
-- Multiple open or close attempts within a short window (>2 retries for the same trade)
-- Phase escalation signals (Phase 2.1 / 2.2 / 2.3 / aggressive close)
-- Trades left open at end of window, or failed to open during entry window
-- Unexpected mid-day close events (outside normal SL/expiry)
+### 4b — Execution trace (structured JSONL)
 
-**Errors and warnings:**
-- Lines with `ERROR`, `Exception`, `Traceback`, `failed`, `WARN`
-- Exchange connectivity: `unreachable`, `disconnect`, `reconnect`, `session refresh`, `WebSocket`
-- Timeout events: `timeout`, `RFQ timeout`, `order timeout`
-- Liquidity guard triggers: `liquidity guard`, `bid discount`
-- Health check warnings: `high margin`, `low equity`
+Check for slow fills, phase escalations, and requote storms:
+
+```bash
+ssh <SSH_OPTS> <VPS_HOST> "jq -r 'select(.event == \"PHASE_ENTERED\" or .event == \"PHASE_TIMEOUT\" or .event == \"ORDER_REQUOTED\") | [.ts, .event, (.phase // \"\"), (.trade_id // \"\")] | @tsv' /opt/ct/slot-<NN>/logs/execution.jsonl 2>/dev/null | tail -50"
+```
+
+Flag explicitly:
+- `PHASE_TIMEOUT` — execution phase timed out (slow fill)
+- `ORDER_REQUOTED` — more than 2 requotes on the same trade (stuck fill)
+- Absence of `PHASE_ENTERED` during a window where `TRADE_OPENING` appeared (execution never started)
+
+### 4c — Account health snapshots
+
+Pull the last 3 health snapshots (~15 min of data) for the most recent account state:
+
+```bash
+ssh <SSH_OPTS> <VPS_HOST> "tail -3 /opt/ct/slot-<NN>/logs/health.jsonl 2>/dev/null | jq '{ts, equity, avail_margin, margin_pct, net_delta, positions, btc_price, level}'"
+```
+
+Flag if: `level` is `"warn"` or `"critical"`, `margin_pct` > 80, `equity` < 500.
+
+If `health.jsonl` does not exist (pre-upgrade slot), scan journalctl for health warnings:
+```bash
+ssh <SSH_OPTS> <VPS_HOST> "journalctl -u ct-slot@<NN> --since '24 hours ago' --no-pager 2>&1 | grep -iE 'high margin|low equity|health check' | tail -20"
+```
+
+### 4d — Crash recovery snapshot
 
 Pull the trade snapshot file if the slot is active:
+
 ```bash
 ssh <SSH_OPTS> <VPS_HOST> "cat /opt/ct/slot-<NN>/logs/trades_snapshot.json 2>/dev/null || echo 'none'"
+```
+
+### 4e — Hard errors (journalctl — always run)
+
+Unstructured Python tracebacks never appear in the JSONL files. Always scan journalctl for these:
+
+```bash
+ssh <SSH_OPTS> <VPS_HOST> "journalctl -u ct-slot@<NN> --since '24 hours ago' --no-pager 2>&1 | grep -iE 'ERROR|Exception|Traceback|unreachable|disconnect|reconnect|session refresh' | tail -50"
 ```
 
 ## Step 5 — Recorder Health and Logs (last 24 h)
@@ -145,10 +181,12 @@ Write a single structured report. Formal, short, matter-of-fact. No fluff, no pa
 | ct-recorder    | active   | Xh Ym      | 0        |                    |
 
 ### Slot 01 — daily_put_sell (last 24 h)
+**Deployed:** vX.Y.Z at HH:MM UTC (from DEPLOY_STARTED event)  
 **Trades:** 1 open, 1 close  (or "no activity")
 - HH:MM — OPEN  BTC-DDMMMYY-NNNNN-P  @ $X.XX  (Phase 1 / RFQ)
 - HH:MM — CLOSE BTC-DDMMMYY-NNNNN-P  @ $X.XX  (SL trigger, Phase 2.1, PnL −$X)
 
+**Account (last snapshot):** equity $X, margin X%, net delta X  
 **Warnings:** [none / bullet list]
 **Errors:** [none / bullet list]
 

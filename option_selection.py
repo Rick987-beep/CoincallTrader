@@ -338,7 +338,46 @@ def _select_by_strike_criteria(options_list, strike_criteria, market_data):
 
     elif criteria_type == 'delta':
         target_delta = strike_criteria['value']
-        return min(options_list, key=lambda x: abs(x.get('delta', 0) - target_delta))
+        selected = min(options_list, key=lambda x: abs(x.get('delta', 0) - target_delta))
+
+        # Optional: enforce minimum OTM distance from ATM
+        min_otm = strike_criteria.get('min_otm_pct', 0)
+        if min_otm and selected and market_data:
+            spot = market_data.get_index_price()
+            if spot and spot > 0:
+                strike_val = float(selected['strike'])
+                # Determine if this is a call or put from the option symbol
+                sym = selected.get('symbolName', '')
+                is_call = sym.endswith('-C')
+                factor = min_otm / 100.0
+                if is_call:
+                    floor = spot * (1.0 + factor)
+                    if strike_val < floor:
+                        candidates = sorted(
+                            [o for o in options_list if float(o['strike']) >= floor],
+                            key=lambda o: float(o['strike']),
+                        )
+                        selected = candidates[0] if candidates else None
+                        if selected:
+                            logger.info(
+                                f"delta+min_otm: call pushed from {strike_val:.0f} "
+                                f"to {float(selected['strike']):.0f} (min_otm={min_otm}%, floor={floor:.0f})"
+                            )
+                else:
+                    ceil = spot * (1.0 - factor)
+                    if strike_val > ceil:
+                        candidates = sorted(
+                            [o for o in options_list if float(o['strike']) <= ceil],
+                            key=lambda o: float(o['strike']),
+                            reverse=True,
+                        )
+                        selected = candidates[0] if candidates else None
+                        if selected:
+                            logger.info(
+                                f"delta+min_otm: put pushed from {strike_val:.0f} "
+                                f"to {float(selected['strike']):.0f} (min_otm={min_otm}%, ceil={ceil:.0f})"
+                            )
+        return selected
 
     elif criteria_type == 'spotdistance %':
         spot_price = market_data.get_index_price()
@@ -832,6 +871,7 @@ def strangle(
     dte = "next",
     side: str = "sell",
     underlying: str = "BTC",
+    min_otm_pct: float = 0,
 ) -> List[LegSpec]:
     """
     OTM strangle — sell (or buy) an OTM call and an OTM put.
@@ -843,17 +883,25 @@ def strangle(
         dte: Days to expiry (0 = today / 0DTE).
         side: "buy" or "sell".
         underlying: Underlying asset.
+        min_otm_pct: Minimum OTM distance (%). If delta-selected strike
+            is closer to ATM than this, push to the nearest qualifying
+            strike. 0 = disabled.
 
     Returns:
         List of two LegSpec objects [OTM call, OTM put].
     """
     expiry = {"dte": dte}
+    call_strike = {"type": "delta", "value": call_delta}
+    put_strike  = {"type": "delta", "value": put_delta}
+    if min_otm_pct:
+        call_strike["min_otm_pct"] = min_otm_pct
+        put_strike["min_otm_pct"]  = min_otm_pct
     return [
         LegSpec(
             option_type="C",
             side=side,
             qty=qty,
-            strike_criteria={"type": "delta", "value": call_delta},
+            strike_criteria=call_strike,
             expiry_criteria=expiry,
             underlying=underlying,
         ),
@@ -861,7 +909,7 @@ def strangle(
             option_type="P",
             side=side,
             qty=qty,
-            strike_criteria={"type": "delta", "value": put_delta},
+            strike_criteria=put_strike,
             expiry_criteria=expiry,
             underlying=underlying,
         ),

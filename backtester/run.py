@@ -60,6 +60,10 @@ def main():
     parser.add_argument("--options", default=DEFAULT_OPTIONS)
     parser.add_argument("--spot", default=DEFAULT_SPOT)
     parser.add_argument("--output", default=None)
+    parser.add_argument("--robustness", action="store_true",
+                        help="Include robustness analysis section in report (distribution, "
+                             "marginal charts, all-combos table). Off by default for "
+                             "fast discovery runs.")
     args = parser.parse_args()
 
     strategy_cls = STRATEGIES[args.strategy]
@@ -122,6 +126,7 @@ def main():
         n_intervals=len(replay._timestamps),
         runtime_s=grid_time,
         strategy_description=getattr(strategy_cls, "DESCRIPTION", ""),
+        robustness=args.robustness,
     )
 
     reports_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "reports")

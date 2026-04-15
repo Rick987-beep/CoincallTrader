@@ -38,6 +38,9 @@ if _DEV_MODE:
         "logs/trades_snapshot.json",
         "logs/active_orders.json",
         "logs/trading.log",
+        "logs/health.jsonl",
+        "logs/strategy.jsonl",
+        "logs/execution.jsonl",
     ]
     for _f in _stale:
         if os.path.exists(_f):
@@ -48,27 +51,10 @@ if _DEV_MODE:
 # Logging
 # =============================================================================
 
-os.makedirs("logs", exist_ok=True)
-logging.basicConfig(
-    level=logging.DEBUG if _DEV_MODE else logging.WARNING,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    handlers=[
-        logging.FileHandler("logs/trading.log"),
-        logging.StreamHandler(),
-    ],
-)
-logging.getLogger("werkzeug").setLevel(logging.ERROR)
-
-if not _DEV_MODE:
-    # Production: promote only key modules to INFO, keep root at WARNING.
-    for _name in ("__main__", "strategy", "trade_lifecycle", "trade_execution",
-                  "rfq", "account_manager", "dashboard", "persistence",
-                  "strategies.daily_put_sell", "strategies.atm_straddle",
-                  "strategies.blueprint_strangle", "strategies.long_strangle_index_move",
-                  "order_manager", "ema_filter", "telegram_notifier", "health_check",
-                  "execution_router"):
-        logging.getLogger(_name).setLevel(logging.INFO)
+from logging_setup import setup_logging
+setup_logging(dev_mode=_DEV_MODE)
 logger = logging.getLogger(__name__)
+logging.getLogger("ct.strategy").info({"event": "DEPLOY_STARTED", "pid": os.getpid()})
 
 
 # =============================================================================

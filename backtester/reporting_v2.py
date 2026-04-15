@@ -65,33 +65,21 @@ def _build_heatmap_data(df, keys, pa, pb):
     return grid_pnl, grid_wr, grid_n, a_vals, b_vals
 
 
-def _pair_spread(grid_pnl):
-    vals = list(grid_pnl.values())
-    return (max(vals) - min(vals)) if vals else 0
 
+def _select_pairs(result, heatmap_pairs_override=None):
+    """Return (pa, pb) pairs to render in heatmaps.
 
-def _select_pairs(param_names, df, keys, heatmap_pairs=None, max_pairs=3):
-    """Return (pa, pb) pairs to render.
-
-    Uses strategy HEATMAP_PAIRS override if provided, otherwise auto-ranks
-    all pairs by PnL spread (most informative = largest spread first).
+    Priority:
+      1. Caller-supplied override (e.g. strategy HEATMAP_PAIRS)
+      2. result.heatmap_pairs — pre-ranked by PnL spread in results.py
     """
-    all_pairs = list(combinations(sorted(param_names), 2))
-    if not all_pairs:
-        return []
-
-    if heatmap_pairs:
-        valid = [tuple(p) for p in heatmap_pairs
+    if heatmap_pairs_override:
+        all_pairs = list(combinations(sorted(result.param_names), 2))
+        valid = [tuple(p) for p in heatmap_pairs_override
                  if tuple(sorted(p)) in [tuple(sorted(x)) for x in all_pairs]]
         if valid:
             return valid
-
-    scored = []
-    for pa, pb in all_pairs:
-        grid_pnl, _, _, _, _ = _build_heatmap_data(df, keys, pa, pb)
-        scored.append((_pair_spread(grid_pnl), pa, pb))
-    scored.sort(reverse=True)
-    return [(pa, pb) for _, pa, pb in scored[:max_pairs]]
+    return list(result.heatmap_pairs)
 
 
 # ── Formatting helpers ───────────────────────────────────────────
@@ -503,6 +491,349 @@ def _fan_chart_svg(curves, capital=10000, width=920, height=340):
     return "\n".join(p)
 
 
+# ── Robustness SVG helpers ───────────────────────────────────────
+
+def _histogram_svg(pnl_values, highlight_pnl=None, n_bins=20, width=700, height=200):
+    """Bar histogram of all combo PnLs with an optional vertical highlight marker.
+
+    pnl_values   — list of floats (one per combo)
+    highlight_pnl — if given, draw a vertical marker at this PnL (the live combo)
+    """
+    if not pnl_values:
+        return ""
+
+    pnl_min = min(pnl_values)
+    pnl_max = max(pnl_values)
+    if pnl_max == pnl_min:
+        pnl_max = pnl_min + 1
+
+    bin_w = (pnl_max - pnl_min) / n_bins
+    bins = [0] * n_bins
+    for v in pnl_values:
+        idx = min(int((v - pnl_min) / bin_w), n_bins - 1)
+        bins[idx] += 1
+
+    max_count = max(bins) if bins else 1
+
+    ml, mr, mt, mb = 50, 20, 14, 36
+    pw = width - ml - mr
+    ph = height - mt - mb
+    bar_gap = 1
+    bar_w = pw / n_bins
+
+    parts = [
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" '
+        f'style="display:block;font-family:-apple-system,BlinkMacSystemFont,sans-serif;font-size:11px">'
+    ]
+
+    # Background
+    parts.append(f'<rect x="{ml}" y="{mt}" width="{pw}" height="{ph}" fill="#fafafa" stroke="#ddd" stroke-width="1"/>')
+
+    # Bars
+    for i, count in enumerate(bins):
+        x = ml + i * bar_w
+        bar_h = (count / max_count) * ph if max_count else 0
+        bin_centre = pnl_min + (i + 0.5) * bin_w
+        color = "#4caf50" if bin_centre >= 0 else "#e53935"
+        if bar_h > 0:
+            parts.append(
+                f'<rect x="{x + bar_gap:.1f}" y="{mt + ph - bar_h:.1f}" '
+                f'width="{bar_w - bar_gap * 2:.1f}" height="{bar_h:.1f}" '
+                f'fill="{color}" fill-opacity="0.75">'
+                f'<title>{count} combos  ~${bin_centre:,.0f}</title></rect>'
+            )
+
+    # Y-axis count labels (just 0 and max)
+    parts.append(f'<text x="{ml - 4}" y="{mt + ph}" text-anchor="end" fill="#888">0</text>')
+    parts.append(f'<text x="{ml - 4}" y="{mt + 8}" text-anchor="end" fill="#888">{max_count}</text>')
+
+    # X-axis ticks (min, 0 if in range, max)
+    def _sx(v):
+        return ml + (v - pnl_min) / (pnl_max - pnl_min) * pw
+
+    for label_v in [pnl_min, pnl_max]:
+        px = _sx(label_v)
+        parts.append(f'<line x1="{px:.1f}" y1="{mt+ph}" x2="{px:.1f}" y2="{mt+ph+4}" stroke="#aaa" stroke-width="1"/>')
+        parts.append(f'<text x="{px:.1f}" y="{mt+ph+16}" text-anchor="middle" fill="#666">${label_v:,.0f}</text>')
+    if pnl_min < 0 < pnl_max:
+        px0 = _sx(0)
+        parts.append(f'<line x1="{px0:.1f}" y1="{mt}" x2="{px0:.1f}" y2="{mt+ph}" stroke="#999" stroke-width="1" stroke-dasharray="4,3"/>')
+        parts.append(f'<text x="{px0:.1f}" y="{mt+ph+16}" text-anchor="middle" fill="#666">$0</text>')
+
+    # Highlight marker (live combo)
+    if highlight_pnl is not None and pnl_min <= highlight_pnl <= pnl_max:
+        hx = _sx(highlight_pnl)
+        parts.append(f'<line x1="{hx:.1f}" y1="{mt}" x2="{hx:.1f}" y2="{mt+ph}" stroke="#1565C0" stroke-width="2" stroke-dasharray="5,3"/>')
+        parts.append(f'<text x="{hx:.1f}" y="{mt - 2}" text-anchor="middle" fill="#1565C0" font-weight="bold" font-size="10">live: ${highlight_pnl:,.0f}</text>')
+
+    # Axis lines
+    parts.append(f'<line x1="{ml}" y1="{mt}" x2="{ml}" y2="{mt+ph}" stroke="#aaa" stroke-width="1"/>')
+    parts.append(f'<line x1="{ml}" y1="{mt+ph}" x2="{ml+pw}" y2="{mt+ph}" stroke="#aaa" stroke-width="1"/>')
+    parts.append(f'<text transform="rotate(-90)" x="-{mt+ph//2}" y="14" text-anchor="middle" fill="#555" font-size="11">Combos</text>')
+    parts.append(f'<text x="{ml+pw//2}" y="{height-2}" text-anchor="middle" fill="#555" font-size="11">Total PnL</text>')
+
+    parts.append("</svg>")
+    return "\n".join(parts)
+
+
+def _marginal_bar_chart_svg(sensitivity_rows, param_name, width=340, height=180):
+    """Horizontal bar chart for one parameter's marginal PnL.
+
+    sensitivity_rows — list of (value, mean_pnl, p10, p90) for each param value
+    Shows mean PnL as a bar, with a p10–p90 error band.
+    """
+    if not sensitivity_rows:
+        return ""
+
+    ml, mr, mt, mb = 80, 30, 14, 20
+    pw = width - ml - mr
+    ph = height - mt - mb
+
+    all_lo = [r[2] for r in sensitivity_rows]  # p10
+    all_hi = [r[3] for r in sensitivity_rows]  # p90
+    all_mean = [r[1] for r in sensitivity_rows]
+
+    y_lo = min(min(all_lo), 0) * 1.1 if min(all_lo) < 0 else 0
+    y_hi = max(max(all_hi), 0) * 1.1 if max(all_hi) > 0 else 1
+    if y_hi == y_lo:
+        y_hi = y_lo + 1
+
+    n = len(sensitivity_rows)
+    bar_h_px = ph / n * 0.6
+    gap_h_px = ph / n
+
+    def _sx(v):  # value → pixel x
+        return ml + (v - y_lo) / (y_hi - y_lo) * pw
+
+    def _sy(i):  # row index → pixel y centre
+        return mt + (i + 0.5) * gap_h_px
+
+    parts = [
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" '
+        f'style="display:block;font-family:-apple-system,BlinkMacSystemFont,sans-serif;font-size:10px">'
+    ]
+    parts.append(f'<rect x="{ml}" y="{mt}" width="{pw}" height="{ph}" fill="#fafafa" stroke="#ddd" stroke-width="1"/>')
+
+    # Zero line
+    x0 = _sx(0)
+    if ml <= x0 <= ml + pw:
+        parts.append(f'<line x1="{x0:.1f}" y1="{mt}" x2="{x0:.1f}" y2="{mt+ph}" stroke="#bbb" stroke-width="1" stroke-dasharray="4,3"/>')
+
+    for i, (val, mean_v, p10_v, p90_v) in enumerate(sensitivity_rows):
+        cy = _sy(i)
+        x_mean = _sx(mean_v)
+        x_zero = _sx(0)
+        color = "#4caf50" if mean_v >= 0 else "#e53935"
+
+        # Bar from 0 to mean
+        bar_x = min(x_zero, x_mean)
+        bar_w_px = abs(x_mean - x_zero)
+        parts.append(
+            f'<rect x="{bar_x:.1f}" y="{cy - bar_h_px/2:.1f}" '
+            f'width="{bar_w_px:.1f}" height="{bar_h_px:.1f}" '
+            f'fill="{color}" fill-opacity="0.72"/>'
+        )
+
+        # p10-p90 error band
+        x_p10 = _sx(p10_v)
+        x_p90 = _sx(p90_v)
+        parts.append(
+            f'<line x1="{x_p10:.1f}" y1="{cy:.1f}" x2="{x_p90:.1f}" y2="{cy:.1f}" '
+            f'stroke="#555" stroke-width="1.5" opacity="0.5"/>'
+        )
+        parts.append(f'<line x1="{x_p10:.1f}" y1="{cy-4:.1f}" x2="{x_p10:.1f}" y2="{cy+4:.1f}" stroke="#555" stroke-width="1" opacity="0.5"/>')
+        parts.append(f'<line x1="{x_p90:.1f}" y1="{cy-4:.1f}" x2="{x_p90:.1f}" y2="{cy+4:.1f}" stroke="#555" stroke-width="1" opacity="0.5"/>')
+
+        # Y-axis label (param value)
+        parts.append(f'<text x="{ml-4}" y="{cy+3:.1f}" text-anchor="end" fill="#444">{_fmt_val(val)}</text>')
+
+        # Mean value label at end of bar
+        lbl_x = x_mean + (5 if mean_v >= 0 else -5)
+        anchor = "start" if mean_v >= 0 else "end"
+        parts.append(f'<text x="{lbl_x:.1f}" y="{cy+3:.1f}" text-anchor="{anchor}" fill="{color}" font-weight="600">${mean_v:,.0f}</text>')
+
+    # Axis
+    parts.append(f'<line x1="{ml}" y1="{mt}" x2="{ml}" y2="{mt+ph}" stroke="#aaa" stroke-width="1"/>')
+    parts.append(f'<line x1="{ml}" y1="{mt+ph}" x2="{ml+pw}" y2="{mt+ph}" stroke="#aaa" stroke-width="1"/>')
+
+    # Title
+    label = param_name.replace("_", " ").title()
+    parts.append(f'<text x="{ml+pw//2}" y="{mt-2}" text-anchor="middle" fill="#333" font-size="11" font-weight="600">{label}</text>')
+
+    parts.append("</svg>")
+    return "\n".join(parts)
+
+
+def _robustness_section_html(result, highlight_key=None):
+    """Render the full Robustness section as an HTML string.
+
+    highlight_key — param tuple for the 'live' combo to mark in charts/table.
+                    If None, no highlight is applied.
+    """
+    parts = []
+    parts.append("<h2>Robustness Analysis</h2>")
+    parts.append(
+        "<p>Distribution of results across <em>all</em> parameter combinations tested. "
+        "A flat plateau (low fragility, high % profitable) indicates the edge is real "
+        "across the region — not an isolated in-sample spike.</p>"
+    )
+
+    # ── Summary card ─────────────────────────────────────────────
+    n_combos = len(result.pnl_all)
+    pct_pos = result.pct_profitable * 100
+    frag = result.fragility_score
+    frag_color = "#2e7d32" if frag < 1.5 else ("#fb8c00" if frag < 3.0 else "#c62828")
+    pct_color = "#2e7d32" if pct_pos >= 90 else ("#fb8c00" if pct_pos >= 70 else "#c62828")
+
+    # Monotonicity summary: average |ρ| across continuous params
+    mono_vals = list(result.monotonicity.values())
+    avg_mono = sum(abs(v) for v in mono_vals) / len(mono_vals) if mono_vals else 0.0
+    mono_color = "#2e7d32" if avg_mono >= 0.7 else ("#fb8c00" if avg_mono >= 0.4 else "#c62828")
+    mono_tip = "smoothly monotone" if avg_mono >= 0.7 else ("mixed" if avg_mono >= 0.4 else "non-monotone / noisy")
+
+    parts.append(f"""<div class="grid-info" style="display:flex;gap:36px;flex-wrap:wrap;align-items:flex-start">
+  <div>
+    <div class="metric-label">Combos tested</div>
+    <div class="metric-value">{n_combos:,}</div>
+  </div>
+  <div>
+    <div class="metric-label">% Profitable</div>
+    <div class="metric-value" style="color:{pct_color}">{pct_pos:.0f}%</div>
+  </div>
+  <div>
+    <div class="metric-label">Median PnL</div>
+    <div class="metric-value">{_fmt_pnl(result.median_pnl)}</div>
+  </div>
+  <div>
+    <div class="metric-label">P10 PnL</div>
+    <div class="metric-value {_pnl_class(result.p10_pnl)}">{_fmt_pnl(result.p10_pnl)}</div>
+  </div>
+  <div>
+    <div class="metric-label">P90 PnL</div>
+    <div class="metric-value {_pnl_class(result.p90_pnl)}">{_fmt_pnl(result.p90_pnl)}</div>
+  </div>
+  <div>
+    <div class="metric-label">IQR (P25&ndash;P75)</div>
+    <div class="metric-value">{_fmt_pnl(result.pnl_iqr)}</div>
+  </div>
+  <div title="(max PnL − min PnL) / |median PnL|. Lower = flatter plateau = more robust.">
+    <div class="metric-label">Fragility score &#9432;</div>
+    <div class="metric-value" style="color:{frag_color}">{frag:.2f}</div>
+  </div>
+  <div title="Mean |Spearman ρ| across marginal param curves. Higher = smoother hill.">
+    <div class="metric-label">Avg monotonicity &#9432;</div>
+    <div class="metric-value" style="color:{mono_color}">{avg_mono:.2f} <span style="font-size:12px;color:#888">({mono_tip})</span></div>
+  </div>
+</div>""")
+
+    # ── PnL distribution histogram ───────────────────────────────
+    pnl_values = [pnl for _, pnl in result.pnl_all]
+    highlight_pnl = None
+    if highlight_key is not None and highlight_key in dict(result.pnl_all):
+        highlight_pnl = dict(result.pnl_all)[highlight_key]
+
+    parts.append("<h3>PnL Distribution — All Combos</h3>")
+    parts.append(
+        "<p style=\"color:#555;font-size:13px;margin:4px 0 8px\">"
+        "Green bars = profitable combos. Red = losing. "
+        "Blue dashed line = live/target combo (if applicable).</p>"
+    )
+    parts.append(_histogram_svg(pnl_values, highlight_pnl=highlight_pnl))
+
+    # ── Per-parameter marginal charts ────────────────────────────
+    if result.param_sensitivity:
+        parts.append("<h3>Per-Parameter Marginal Sensitivity</h3>")
+        parts.append(
+            "<p style=\"color:#555;font-size:13px;margin:4px 0 12px\">"
+            "Average PnL (bar) across all combos sharing each parameter value. "
+            "Whiskers show P10&ndash;P90 range. Spearman &rho; measures smoothness of the hill.</p>"
+        )
+        parts.append('<div style="display:flex;flex-wrap:wrap;gap:24px;margin-bottom:16px">')
+        for param, rows in sorted(result.param_sensitivity.items()):
+            rho = result.monotonicity.get(param, 0.0)
+            rho_color = "#2e7d32" if abs(rho) >= 0.7 else ("#fb8c00" if abs(rho) >= 0.4 else "#c62828")
+            parts.append('<div>')
+            parts.append(_marginal_bar_chart_svg(rows, param))
+            parts.append(
+                f'<div style="text-align:center;font-size:11px;color:{rho_color};margin-top:2px">'
+                f'Spearman &rho; = {rho:+.2f}</div>'
+            )
+            parts.append('</div>')
+        parts.append('</div>')
+
+    # ── Compact all-combos sortable table ────────────────────────
+    parts.append("<h3>All Combos</h3>")
+    parts.append(
+        "<p style=\"color:#555;font-size:13px;margin:4px 0 8px\">"
+        "Click any column header to sort. "
+        + (f"Highlighted row = live/target combo." if highlight_key is not None else "")
+        + "</p>"
+    )
+
+    # Inline JS for sort
+    parts.append("""<script>
+function sortRobTable(col, th) {
+  var tbl = document.getElementById('rob-table');
+  var tbody = tbl.querySelector('tbody');
+  var rows = Array.from(tbody.querySelectorAll('tr'));
+  var asc = th.dataset.asc === '1';
+  rows.sort(function(a, b) {
+    var av = a.cells[col].dataset.v || a.cells[col].textContent.replace(/[$,%]/g,'').trim();
+    var bv = b.cells[col].dataset.v || b.cells[col].textContent.replace(/[$,%]/g,'').trim();
+    var an = parseFloat(av), bn = parseFloat(bv);
+    if (!isNaN(an) && !isNaN(bn)) return asc ? an - bn : bn - an;
+    return asc ? av.localeCompare(bv) : bv.localeCompare(av);
+  });
+  rows.forEach(function(r){ tbody.appendChild(r); });
+  th.dataset.asc = asc ? '0' : '1';
+}
+</script>""")
+
+    # Build header
+    param_names = result.param_names
+    all_items = sorted(result.all_stats.items(),
+                       key=lambda kv: result.scores.get(kv[0], 0.0), reverse=True)
+
+    hdr = '<thead><tr>'
+    hdr += f'<th onclick="sortRobTable(0,this)" data-asc="0" style="cursor:pointer">#</th>'
+    col = 1
+    for p in param_names:
+        hdr += f'<th onclick="sortRobTable({col},this)" data-asc="0" style="cursor:pointer">{_param_label(p)}</th>'
+        col += 1
+    for lbl in ["PnL", "Win%", "Sharpe", "MaxDD%", "PF", "Score"]:
+        hdr += f'<th onclick="sortRobTable({col},this)" data-asc="0" style="cursor:pointer">{lbl}</th>'
+        col += 1
+    hdr += '</tr></thead>'
+
+    parts.append('<div class="hm-wrap"><table id="rob-table" style="font-size:12px">')
+    parts.append(hdr)
+    parts.append('<tbody>')
+    for rank, (key, s) in enumerate(all_items, 1):
+        params = dict(key)
+        score = result.scores.get(key, 0.0)
+        pnl_cls = _pnl_class(s["total_pnl"])
+        pf_str = f'{s["profit_factor"]:.2f}' if s["profit_factor"] < 100 else "99+"
+        is_highlight = (key == highlight_key)
+        row_style = ' style="background:#e3f2fd;font-weight:600"' if is_highlight else ''
+        row = f'<tr{row_style}>'
+        row += f'<td data-v="{rank}">{rank}</td>'
+        for p in param_names:
+            row += f'<td data-v="{params[p]}">{_fmt_val(params[p])}</td>'
+        row += (
+            f'<td class="{pnl_cls}" data-v="{s["total_pnl"]:.0f}">{_fmt_pnl(s["total_pnl"])}</td>'
+            f'<td data-v="{s["win_rate"]*100:.0f}">{s["win_rate"]*100:.0f}%</td>'
+            f'<td data-v="{s["sharpe"]:.2f}">{s["sharpe"]:.2f}</td>'
+            f'<td data-v="{s["max_dd_pct"]:.1f}">{s["max_dd_pct"]:.1f}%</td>'
+            f'<td data-v="{s["profit_factor"]:.2f}">{pf_str}</td>'
+            f'<td data-v="{score:.3f}">{score:.3f}</td>'
+        )
+        row += '</tr>'
+        parts.append(row)
+    parts.append('</tbody></table></div>')
+
+    return "\n".join(parts)
+
+
 # ── CSS ──────────────────────────────────────────────────────────
 
 CSS = """
@@ -550,7 +881,8 @@ th:first-child, td:first-child { text-align: left; }
 # ── HTML Report ──────────────────────────────────────────────────
 
 def generate_html(strategy_name, result, n_intervals, runtime_s,
-                  strategy_description="", qty=1, heatmap_pairs=None):
+                  strategy_description="", qty=1, heatmap_pairs=None,
+                  robustness=False):
     """Generate a self-contained HTML backtest report.
 
     Args:
@@ -562,6 +894,9 @@ def generate_html(strategy_name, result, n_intervals, runtime_s,
         qty:                  Contracts per trade (default 1)
         heatmap_pairs:        Optional list of (pa, pb) tuples to pin;
                               falls back to auto-selection by PnL spread
+        robustness:           If True, include the robustness analysis section
+                              (distribution histogram, marginal charts, all-combos
+                              table). Off by default for fast discovery runs.
 
     Returns:
         Complete self-contained HTML string.
@@ -754,6 +1089,50 @@ def generate_html(strategy_name, result, n_intervals, runtime_s,
         parts.append(row)
     parts.append("</table></div>")
 
+    # ── Top 5 absolute PnL combos ────────────────────────────────
+    top_abs = sorted(all_stats.items(), key=lambda kv: kv[1]["total_pnl"], reverse=True)[:5]
+    parts.append('<h2>Top 5 Absolute PnL Combos</h2>')
+    parts.append(
+        '<p style="color:#555;font-size:13px;margin:4px 0 8px">'
+        'Ranked by total PnL only &mdash; no scoring applied.</p>'
+    )
+    parts.append('<div class="hm-wrap"><table>')
+    hdr2 = "<tr><th>#</th>"
+    for p in param_names:
+        hdr2 += f"<th>{_param_label(p)}</th>"
+    hdr2 += ("<th>Trades</th><th>Total PnL</th><th>Avg PnL</th><th>Med PnL</th>"
+             "<th>Win%</th><th>Max Win</th><th>Max Loss</th>"
+             "<th>Max DD</th><th>Sharpe</th><th>PF</th><th>Score</th></tr>")
+    parts.append(hdr2)
+    for rank, (key, s) in enumerate(top_abs, 1):
+        params = dict(key)
+        pnl_cls = _pnl_class(s["total_pnl"])
+        avg_cls = _pnl_class(s["avg_pnl"])
+        pf_str = f'{s["profit_factor"]:.2f}' if s["profit_factor"] < 100 else "99+"
+        score_str = f'{scores[key]:.3f}' if key in scores else "&mdash;"
+        row = f'<tr><td>{rank}</td>'
+        for p in param_names:
+            row += f'<td>{_fmt_val(params[p])}</td>'
+        row += (
+            f'<td>{s["n"]}</td>'
+            f'<td class="{pnl_cls}">{_fmt_pnl(s["total_pnl"])}</td>'
+            f'<td class="{avg_cls}">{_fmt_pnl(s["avg_pnl"])}</td>'
+            f'<td>{_fmt_pnl(s["median_pnl"])}</td>'
+            f'<td>{s["win_rate"]*100:.0f}%</td>'
+            f'<td class="pos">{_fmt_pnl(s["max_win"])}</td>'
+            f'<td class="neg">{_fmt_pnl(s["max_loss"])}</td>'
+            f'<td class="neg">{s["max_dd_pct"]:.1f}%</td>'
+            f'<td>{s["sharpe"]:.2f}</td>'
+            f'<td>{pf_str}</td>'
+            f'<td>{score_str}</td></tr>'
+        )
+        parts.append(row)
+    parts.append("</table></div>")
+
+    # ── Robustness section (opt-in via --robustness flag) ─────────
+    if robustness:
+        parts.append(_robustness_section_html(result, highlight_key=best_key))
+
     # ── Performance fan chart ─────────────────────────────────────
     if result.fan_curves:
         fan_top = len(result.fan_curves)
@@ -781,9 +1160,7 @@ def generate_html(strategy_name, result, n_intervals, runtime_s,
             "Pairs ranked by PnL spread — most informative first.</p>"
         )
 
-        selected_pairs = _select_pairs(
-            param_names, df, keys,
-            heatmap_pairs=heatmap_pairs, max_pairs=3)
+        selected_pairs = _select_pairs(result, heatmap_pairs_override=heatmap_pairs)
 
         for pa, pb in selected_pairs:
             grid_pnl, grid_wr, grid_n, a_vals, b_vals = _build_heatmap_data(

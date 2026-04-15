@@ -52,6 +52,7 @@ from trade_lifecycle import (
 )
 
 logger = logging.getLogger(__name__)
+_strategy_logger = logging.getLogger("ct.strategy")  # structured JSONL → logs/strategy.jsonl
 
 
 class LifecycleEngine:
@@ -183,6 +184,11 @@ class LifecycleEngine:
         if trade.state != TradeState.PENDING_OPEN:
             logger.error(f"Trade {trade_id} not in PENDING_OPEN (is {trade.state.value})")
             return False
+        _strategy_logger.info({
+            "event": "TRADE_OPENING",
+            "trade_id": trade.id,
+            "legs": [{"symbol": l.symbol, "qty": l.qty, "side": l.side} for l in trade.open_legs],
+        })
         return self._router.open(trade)
 
     def close(self, trade_id: str) -> bool:
@@ -215,7 +221,14 @@ class LifecycleEngine:
             trade.state = TradeState.OPEN
             trade.opened_at = time.time()
             logger.info(f"Trade {trade.id}: all open legs filled → OPEN")
-
+            _strategy_logger.info({
+                "event": "TRADE_OPENED",
+                "trade_id": trade.id,
+                "legs": [
+                    {"symbol": l.symbol, "fill_price": l.fill_price, "filled_qty": l.filled_qty}
+                    for l in trade.open_legs
+                ],
+            })
         elif result == "failed":
             logger.error(f"Trade {trade.id}: fill manager exhausted requote rounds")
             for ls, leg in zip(mgr.filled_legs, trade.open_legs):
@@ -233,7 +246,11 @@ class LifecycleEngine:
             else:
                 trade.state = TradeState.FAILED
                 trade.error = "Fill timeout exhausted, no fills"
-
+                _strategy_logger.info({
+                    "event": "TRADE_OPEN_FAILED",
+                    "trade_id": trade.id,
+                    "reason": "fill_manager_exhausted",
+                })
         elif result == "requoted":
             for ls, leg in zip(mgr.filled_legs, trade.open_legs):
                 leg.order_id = ls.order_id
@@ -281,6 +298,14 @@ class LifecycleEngine:
                 trade.closed_at = time.time()
                 trade._finalize_close()
                 logger.info(f"Trade {trade.id}: all close legs filled \u2192 CLOSED (PnL={trade.realized_pnl:+.4f})")
+                duration_s = int(trade.closed_at - (trade.opened_at or getattr(trade, 'created_at', None) or trade.closed_at))
+                _strategy_logger.info({
+                    "event": "TRADE_CLOSED",
+                    "trade_id": trade.id,
+                    "trigger": trade.metadata.get("close_trigger", ""),
+                    "realized_pnl": trade.realized_pnl,
+                    "duration_s": duration_s,
+                })
 
         elif result == "failed":
             logger.error(f"Trade {trade.id}: close fill manager exhausted requote rounds")
@@ -344,6 +369,14 @@ class LifecycleEngine:
             f"Trade {trade.id}: expired at settlement — {symbols} "
             f"→ CLOSED (PnL={trade.realized_pnl:+.4f})"
         )
+        duration_s = int((trade.closed_at or time.time()) - (trade.opened_at or getattr(trade, 'created_at', None) or time.time()))
+        _strategy_logger.info({
+            "event": "TRADE_CLOSED",
+            "trade_id": trade.id,
+            "trigger": "expiry",
+            "realized_pnl": trade.realized_pnl,
+            "duration_s": max(0, duration_s),
+        })
         # Notification handled by strategy on_trade_closed callback
 
     def _evaluate_exits(self, trade: TradeLifecycle, account: AccountSnapshot) -> None:
@@ -355,6 +388,11 @@ class LifecycleEngine:
                     logger.info(
                         f"Trade {trade.id}: exit condition '{cond_name}' triggered → PENDING_CLOSE"
                     )
+                    _strategy_logger.info({
+                        "event": "EXIT_TRIGGERED",
+                        "trade_id": trade.id,
+                        "condition": cond_name,
+                    })
                     trade.state = TradeState.PENDING_CLOSE
                     return
             except Exception as e:
@@ -537,6 +575,7 @@ class LifecycleEngine:
         trade.state = TradeState.FAILED
         trade.error = "Cancelled by user"
         logger.info(f"Trade {trade.id}: cancelled (no fills)")
+        _strategy_logger.info({"event": "TRADE_CANCELLED", "trade_id": trade.id, "reason": "cancelled_by_user"})
         return True
 
     # ── Reconciliation ────────────────────────────────────────────────────
@@ -574,6 +613,7 @@ class LifecycleEngine:
             return
 
         logger.warning(f"Reconciliation: {len(warnings)} issue(s) found")
+        _strategy_logger.info({"event": "RECONCILE_WARN", "issues": warnings[:10]})
 
         # Handle stale ledger entries — poll them to discover true state
         stale_warnings = [w for w in warnings if "not found on exchange" in w]

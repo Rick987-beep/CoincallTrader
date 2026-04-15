@@ -5,6 +5,39 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.14.0] - 2026-04-15
+
+### Added — Structured Logging Infrastructure
+
+- **`logging_setup.py`** — New module extracted from `main.py`; initialises three structured JSONL tracks: `ct.health → logs/health.jsonl`, `ct.strategy → logs/strategy.jsonl`, `ct.execution → logs/execution.jsonl`; each uses a `TimedRotatingFileHandler` with independent retention; root logger continues writing human-readable text to `trading.log`
+- **`lifecycle_engine.py`** — Emits structured `ct.strategy` JSONL events for every trade lifecycle transition: `TRADE_OPENING`, `TRADE_OPENED`, `TRADE_OPEN_FAILED`, `TRADE_CLOSED`, `EXIT_TRIGGERED`, `TRADE_CANCELLED`, `RECONCILE_WARN`
+- **`order_manager.py`** — Emits structured `ct.execution` JSONL events for `ORDER_PLACED`, `ORDER_REQUOTED`, `ORDER_FILLED`, `ORDER_CANCELLED`
+- **`health_check.py`** — Health checker now emits a single structured `ct.health` record per cycle (JSON dict with equity, margin, BTC price, uptime); WARNING escalations go to the root logger instead of being embedded in the health record
+- **`dashboard.py`** — Added `_WarningBridgeHandler`: attaches to root logger and forwards `WARNING+` records into the dashboard log ring buffer alongside `ct.strategy` `INFO+` events; fixes gap where exchange errors were invisible in the dashboard log tail
+- **`main.py`** — Logging initialisation delegated to `logging_setup.setup_logging()`; emits `DEPLOY_STARTED` event to `ct.strategy` on startup
+
+### Added — Live Strategy: Short Strangle Delta TP
+
+- **`strategies/short_strangle_delta_tp.py`** — New live strategy extending `ShortStrangleDelta` with: (1) take-profit exit when combined ask cost falls enough that `(premium − ask) / premium ≥ TAKE_PROFIT_PCT`; (2) `min_otm_pct` minimum OTM distance guard that pushes delta-selected strikes further OTM when they are too close to ATM
+
+### Added — Option Selection: min_otm_pct Guard
+
+- **`option_selection.py`** — Delta selection now respects an optional `min_otm_pct` strike criterion; if the delta-selected strike is closer to ATM than the configured percentage, it is pushed to the nearest qualifying OTM strike; wired into the `strangle()` helper
+
+### Fixed
+
+- **`slot_config.py`** — Deribit `generate_env()` now always writes the canonical `DERIBIT_CLIENT_ID_PROD` / `DERIBIT_CLIENT_SECRET_PROD` names (or `_TEST` for testnet) regardless of the named account in `accounts.toml`; previously wrote arbitrary env-var names that `config.py` did not read
+
+### Changed
+
+- **`exchanges/deribit/market_data.py`** — Added clarifying comments on all three orderbook fields (`bids`/`asks`, `mark`, `_mark_btc`, `_index_price`) explaining BTC vs USD denomination and when each should be used
+
+### Added — Backtester Improvements
+
+- **`backtester/reporting_v2.py`** — Robustness section now renders a PnL histogram SVG (`_histogram_svg`) showing the distribution of all parameter-combo results with a vertical marker at the live combo's PnL; `_select_pairs` refactored to read pre-ranked pairs from `GridResult.heatmap_pairs` (computed once in `results.py`) instead of re-scoring on every report render
+- **`backtester/config.toml`** — `options_parquet` and `spot_parquet` now accept a directory path; `MarketReplay` loads all per-day parquet files (`options_YYYY-MM-DD.parquet` / `spot_YYYY-MM-DD.parquet`) from that directory, as produced by the Tardis bulk-download pipeline
+- **`backtester/strategies/short_strangle_delta_tp.py`** — Backtester variant of `ShortStrangleDeltaTP` with configurable `take_profit_pct` and `min_otm_pct`
+
 ## [1.13.0] - 2026-04-12
 
 ### Added — Put Sell 80 DTE Live Strategy

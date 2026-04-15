@@ -20,6 +20,7 @@ from datetime import datetime, timezone
 from typing import Optional, Callable
 
 logger = logging.getLogger(__name__)
+_health_logger = logging.getLogger("ct.health")  # structured JSONL → logs/health.jsonl
 
 
 class HealthChecker:
@@ -84,49 +85,41 @@ class HealthChecker:
                 time.sleep(0.1)
 
     def _log_health_status(self) -> None:
-        """Log current health status. Uses DEBUG for normal checks, WARNING for problems."""
+        """Emit one structured record to ct.health and escalate warnings to trading.log."""
         uptime_secs = int(time.time() - self._start_time)
-        uptime_str = self._format_uptime(uptime_secs)
 
-        status_lines = [
-            f"═══════════════════════════════════════════════════════════════════",
-            f"HEALTH CHECK — {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')} UTC",
-            f"═══════════════════════════════════════════════════════════════════",
-            f"Uptime: {uptime_str}",
-        ]
+        record: dict = {
+            "event": "health_check",
+            "uptime_s": uptime_secs,
+        }
+        level = "ok"
 
-        log_level = logging.INFO  # default: visible in production
-
-        # Try to get account snapshot
+        # Account snapshot
         if self.account_snapshot_fn:
             try:
                 snapshot = self.account_snapshot_fn()
                 if snapshot:
-                    status_lines.extend([
-                        f"Equity: ${snapshot.equity:,.2f}",
-                        f"Available Margin: ${snapshot.available_margin:,.2f}",
-                        f"Margin Utilization: {snapshot.margin_utilization:.1f}%",
-                        f"Net Delta: {snapshot.net_delta:+.4f}",
-                        f"Open Positions: {snapshot.position_count}",
-                    ])
-                    # Escalate to WARNING if margin is high or equity is very low
+                    record.update({
+                        "equity": round(snapshot.equity, 2),
+                        "avail_margin": round(snapshot.available_margin, 2),
+                        "margin_pct": round(snapshot.margin_utilization, 1),
+                        "net_delta": round(snapshot.net_delta, 4),
+                        "positions": snapshot.position_count,
+                    })
                     if snapshot.margin_utilization > 80:
-                        log_level = logging.WARNING
-                        status_lines.append("⚠ HIGH MARGIN UTILIZATION")
+                        level = "warn"
+                        logger.warning(f"HIGH MARGIN UTILIZATION: {snapshot.margin_utilization:.1f}%")
                     if snapshot.equity < 100:
-                        log_level = logging.WARNING
-                        status_lines.append("⚠ LOW EQUITY")
-
+                        level = "warn"
+                        logger.warning(f"LOW EQUITY: ${snapshot.equity:,.2f}")
                 else:
-                    log_level = logging.WARNING
-                    status_lines.append("⚠ Account snapshot returned None")
+                    level = "warn"
+                    logger.warning("Health check: account snapshot returned None")
             except Exception as e:
-                log_level = logging.WARNING
-                status_lines.append(f"⚠ Account snapshot failed: {e}")
-        else:
-            status_lines.append("Account snapshot: (not configured)")
+                level = "warn"
+                logger.warning(f"Health check: account snapshot failed: {e}")
 
-        # Check BTC index price freshness
+        # BTC index price
         try:
             if self._market_data:
                 idx_price = self._market_data.get_index_price()
@@ -134,18 +127,16 @@ class HealthChecker:
                 from market_data import get_btc_index_price
                 idx_price = get_btc_index_price(use_cache=False)
             if idx_price is not None:
-                status_lines.append(f"BTC Index Price: ${idx_price:,.2f}")
+                record["btc_price"] = idx_price
             else:
-                log_level = logging.WARNING
-                status_lines.append("⚠ BTC INDEX PRICE UNAVAILABLE")
+                level = "warn"
+                logger.warning("Health check: BTC index price unavailable")
         except Exception as e:
-            log_level = logging.WARNING
-            status_lines.append(f"⚠ BTC index price check failed: {e}")
+            level = "warn"
+            logger.warning(f"Health check: BTC index price failed: {e}")
 
-        status_lines.append(f"═══════════════════════════════════════════════════════════════════")
-
-        # Log at DEBUG normally, WARNING only when something looks wrong
-        logger.log(log_level, "\n" + "\n".join(status_lines))
+        record["level"] = level
+        _health_logger.info(record)
 
     @staticmethod
     def _format_uptime(seconds: int) -> str:

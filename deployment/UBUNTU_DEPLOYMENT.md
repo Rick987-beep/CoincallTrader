@@ -1,4 +1,4 @@
-# CoincallTrader — Ubuntu Deployment Guide
+# CryoTrader — Ubuntu Deployment Guide
 
 ## Philosophy: Single Source of Truth
 

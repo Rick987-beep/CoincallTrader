@@ -1,6 +1,6 @@
 # Logging Upgrade Plan
 
-**Status:** Planned  
+**Status:** IMPLEMENTED. DONE. 12 April 2026
 **Target:** Live trading application only (not backtester)  
 **New dependencies:** None — stdlib only
 
@@ -155,6 +155,81 @@ Three named loggers, all in the `ct.*` namespace, all with `propagate=False`:
 | `ct.execution` | `TimedRotatingFileHandler` + `JsonlFormatter` | `logs/execution.jsonl` |
 
 The `JsonlFormatter` is a small custom `logging.Formatter` subclass (~20 lines) that serialises the `LogRecord` `msg` dict to a JSON line. Module-level loggers (`logger = logging.getLogger(__name__)`) continue writing human-readable text to `trading.log` via the root logger — no changes to those call sites.
+
+---
+
+## Blast Radius
+
+### Startup safety — `logging_setup.py`
+`setup_logging()` is called at the top of `main.py` before any strategy code runs. If it raises (e.g. `logs/` directory can't be created), the process won't start. Mitigation: `setup_logging()` must call `os.makedirs(logs_dir, exist_ok=True)` as its first line and wrap handler construction in a try/except that falls back to `basicConfig`. This is the only critical path.
+
+### Dashboard handler re-wiring
+The `DashboardLogHandler` moves off the root logger onto `ct.strategy`. If `setup_logging()` is called after `start_dashboard()`, the dashboard would capture nothing. The call order in `main.py` today is correct (`logging.basicConfig` before `start_dashboard()`), and it stays correct. No ordering change needed — just verify during implementation.
+
+`test_dashboard.py` tests the Flask routes, not log contents, so no test changes are expected. Worth a quick grep during implementation to confirm.
+
+### Things that disappear from journalctl
+The multi-line health banner currently appears in journalctl (because `trading.log` is also streamed to stdout via `StreamHandler`). After the upgrade, health status goes to `health.jsonl` only — it will no longer appear in `journalctl` or `trading.log`. This is intentional but has one knock-on effect: see "Health Check Agent" below.
+
+### Additive changes only
+Every call added to `lifecycle_engine.py`, `order_manager.py`, and `trade_execution.py` is a new `ct.strategy` / `ct.execution` log call alongside the existing text `logger.*` calls. No existing call sites are removed or modified. If the new track file handlers fail silently (the `JsonlFormatter` catches exceptions internally), human-readable logging is completely unaffected.
+
+---
+
+## Deployment Implications
+
+### rsync — no changes needed
+`logs/` is already in `rsync-exclude-slot.txt`. All JSONL track files survive deploys untouched. The `DEPLOY_STARTED` marker written on process startup is the boundary between versions within the same running file.
+
+### `--clean` flag
+`cmd_slot_clean` runs `rm -rf $dir/logs/*`, which will wipe the new JSONL files along with `trading.log` and the crash-recovery snapshots. This is correct behaviour — `--clean` means "full reset". Document it as expected.
+
+### `--setup` flag
+Creates `$dir/logs` via `mkdir -p`. No changes needed — the directory is the same.
+
+### `logging_setup.py` is a regular Python file
+It gets rsynced to the slot like any other module. No deploy-script changes needed.
+
+### Dev-mode startup cleanup in `main.py`
+The `_stale` list currently clears `trading.log`, `trades_snapshot.json`, `active_orders.json`. Add the three new JSONL files to this list so dev runs always start clean:
+```python
+_stale = [
+    "logs/trades_snapshot.json",
+    "logs/active_orders.json",
+    "logs/trading.log",
+    "logs/health.jsonl",       # ADD
+    "logs/strategy.jsonl",     # ADD
+    "logs/execution.jsonl",    # ADD
+]
+```
+Rotated backups (`.jsonl.YYYY-MM-DD`) are not touched by this — only the current active file is deleted.
+
+---
+
+## Health Check Agent
+
+The agent (`/.github/agents/production-health-check.agent.md`) currently reconstructs trading activity by scanning raw `journalctl` text output for keywords (`OPEN`, `CLOSE`, `ERROR`, etc.). After this upgrade, `strategy.jsonl` and `execution.jsonl` on the server are the authoritative structured source.
+
+**What breaks without an agent update:**  
+The health banner no longer appears in journalctl, so the agent's current "Health check warnings" scan (looking for `high margin`, `low equity` in text logs) will stop finding anything. Everything else still works because `trading.log` text logs are unchanged apart from the health banner.
+
+**Agent updates required (in the agent file itself):**
+
+1. **Step 4 — Trading activity** — replace text keyword scanning with `jq` queries on `strategy.jsonl`:
+   ```bash
+   ssh ... "jq -r '[.ts,.event,.symbol//"",.pnl//"",.trigger//""] | @tsv' /opt/ct/slot-NN/logs/strategy.jsonl 2>/dev/null | tail -50"
+   ```
+   Keep journalctl as the fallback for errors/exceptions (unstructured Python tracebacks never appear in the JSONL files).
+
+2. **Add Step 4b — Execution trace for active/stuck trades** — pull `execution.jsonl` for PHASE_TIMEOUT and ORDER_REQUOTED events to detect slow fills.
+
+3. **Step 4 health check** — replace text-scan for health warnings with `health.jsonl`:
+   ```bash
+   ssh ... "tail -3 /opt/ct/slot-NN/logs/health.jsonl 2>/dev/null | jq '{ts,equity,margin_pct,level}'"
+   ```
+   This gives the last three account snapshots (last 15 min) in structured form.
+
+The agent file will be updated as part of this upgrade implementation.
 
 ---
 

@@ -9,7 +9,7 @@ tools:
   - create_file
 ---
 
-You are a release agent for the CoincallTrader project. When invoked, execute all steps below **immediately and autonomously** — do not ask for confirmation at any point.
+You are a release agent for the CryoTrader project. When invoked, execute all steps below **immediately and autonomously** — do not ask for confirmation at any point.
 
 ## Your job
 

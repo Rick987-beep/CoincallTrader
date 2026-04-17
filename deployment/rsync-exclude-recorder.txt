@@ -1,5 +1,5 @@
 # ===========================================================================
-# CoincallTrader — rsync Exclusions for Recorder Deployment
+# CryoTrader — rsync Exclusions for Recorder Deployment
 #
 # Used by deploy-slot.sh when syncing to /opt/ct/recorder/.
 # Unlike slot deployments, backtester/ IS included (tickrecorder lives there).

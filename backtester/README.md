@@ -1,5 +1,5 @@
 # Backtester
-
+75
 BTC options backtester using real historic Deribit prices. Replays 5-minute
 option snapshots + 1-minute BTC spot OHLC bars, evaluates parameter grids
 across strategies in a single data pass, and generates self-contained HTML
@@ -18,11 +18,15 @@ backtester/
 ├── market_replay.py       # Snapshot loader → MarketState iterator
 ├── strategy_base.py       # Trade/OpenPosition dataclasses, Strategy protocol,
 │                          # composable entry/exit condition factories
-├── results.py             # GridResult: per-combo stats, scoring, equity metrics
+├── results.py             # GridResult: per-combo stats, scoring, DSR, equity metrics
+├── robustness.py          # deflated_sharpe_ratio(), _robustness_stats()
 ├── reporting_v2.py        # Self-contained HTML report generator (render only)
+├── reporting_charts.py    # SVG chart helpers extracted from reporting_v2
+├── walk_forward.py        # WFOWindow/WFOResult dataclasses + run_walk_forward()
+├── experiment.py          # Load experiment TOMLs; build sensitivity grids
 ├── pricing.py             # Deribit fee model, Black-Scholes helpers
 ├── config.py / config.toml  # Runtime config: paths, scoring weights, simulation params
-├── run.py                 # CLI entry point
+├── run.py                 # CLI entry point (--strategy, --experiment, --mode, --wfo)
 ├── check_parquet.py       # Dev utility: data quality checks on snapshot files
 │
 ├── strategies/            # One file per strategy (implement Strategy protocol)
@@ -30,7 +34,14 @@ backtester/
 │   ├── short_straddle_strangle.py
 │   ├── short_strangle_delta.py
 │   ├── short_strangle_delta_tp.py
+│   ├── short_strangle_weekly_tp.py
+│   ├── short_strangle_weekly_cap.py
+│   ├── deltaswipswap.py
+│   ├── deltaswipswap1m.py
 │   └── straddle_strangle.py
+│
+├── experiments/           # Per-experiment TOML files (sensitivity params + WFO config)
+│   └── delta_strangle_tp_v1.toml
 │
 ├── ingest/                # Everything that produces input data
 │   ├── snapshot_builder.py      # Converts raw tick parquets → backtester snapshots
@@ -40,6 +51,43 @@ backtester/
 │
 └── data/                  # Processed snapshots ready for the engine (gitignored)
 ```
+
+---
+
+## The Three-Step Research Pipeline
+
+Running a parameter grid and picking the best result is statistically dangerous —
+with enough combos you will find a "winner" by pure chance. The backtester is
+structured around three distinct steps to combat this:
+
+```
+Step 1 — Discovery
+  python -m backtester.run --strategy delta_strangle_tp
+  Wide PARAM_GRID (hundreds of combos), full date range.
+  Goal: find which region of parameter space is profitable at all.
+  Output: discovery report with heatmaps, best-combo stats, DSR.
+
+Step 2 — Sensitivity
+  python -m backtester.run --experiment delta_strangle_tp_v1 --mode sensitivity
+  Narrow grid centred on the candidate from Step 1 (±10%/±2h, 5 points per param).
+  Goal: is the candidate on a smooth hill or a spike?
+  Output: sensitivity report (--robustness auto-enabled), heatmaps around best params.
+
+Step 3 — Walk-Forward Validation
+  python -m backtester.run --experiment delta_strangle_tp_v1 --mode wfo
+  IS uses the wide PARAM_GRID (honest search space); OOS is truly unseen.
+  Goal: does the general region stay profitable on future data?
+  Output: WFO report with per-window table, stitched OOS equity, IS/OOS scatter.
+```
+
+**Why this separation matters:**
+
+- Strategy files contain one `PARAM_GRID` = a wide, unbiased discovery grid.
+  It is never narrowed post-hoc.
+- Experiment files capture "what we think is good and why" separately.
+  They don't pollute the strategy definition.
+- WFO uses the wide discovery grid for its IS runs, so the IS optimiser has a
+  real search problem — not a trivially narrow space around a known-good point.
 
 ---
 
@@ -62,16 +110,17 @@ Tardis raw ticks          Live tick recorder (VPS)
                     engine.py
               (single-pass grid run)
               run_grid_full() returns:
-               df, keys, nav_daily_df
+               df, keys, nav_daily_df, final_nav_df
                          │
                   results.py
               GridResult.__init__:
                 Step 1: _all_combo_stats()  ← vectorised, all combos
                 Step 2: _score_combos()     ← percentile-rank + weights
                 Step 3: equity_metrics()    ← top-20 only
+                Step 4: deflated_sharpe_ratio()  ← DSR for best combo
                          │
                reporting_v2.py
-              generate_html(result, ...)
+              generate_html(result, robustness=, wfo_result=)
                          │
                report.html  (self-contained)
 ```
@@ -110,6 +159,10 @@ differentiation on short backtests.
 | `short_straddle` | `ShortStraddleStrangle` | Sell 1DTE ATM straddle / OTM strangle; SL + time/expiry exit |
 | `delta_strangle` | `ShortStrangleDelta` | Sell N-DTE strangle, delta-selected; SL + time/expiry exit |
 | `delta_strangle_tp` | `ShortStrangleDeltaTp` | Same + take-profit: close when combined ask drops to (1−tp_pct) × entry premium |
+| `weekly_strangle_tp` | `ShortStrangleWeeklyTp` | Weekly-expiry strangle with take-profit |
+| `weekly_strangle_cap` | `ShortStrangleWeeklyCap` | Weekly-expiry strangle with premium cap at entry |
+| `deltaswipswap` | `DeltaSwipSwap` | Delta-selected swap entry; 5-min snapshot data |
+| `deltaswipswap1m` | `DeltaSwipSwap1m` | Same at 1-min resolution |
 | `straddle` | `ExtrusionStraddleStrangle` | Buy nearest-expiry straddle/strangle; exit on BTC index move |
 
 ---
@@ -139,10 +192,25 @@ Update the two path keys in `config.toml` to point to the new files.
 
 ### 3. Run a backtest
 
+**Discovery (full grid, all combos):**
 ```bash
-python -m backtester.run --strategy put_sell
 python -m backtester.run --strategy delta_strangle_tp
-python -m backtester.run --strategy short_straddle --output my_report.html
+python -m backtester.run --strategy delta_strangle_tp --robustness   # + sensitivity charts
+```
+
+**Sensitivity (experiment TOML, ±N% around best):**
+```bash
+python -m backtester.run --experiment delta_strangle_tp_v1 --mode sensitivity
+```
+
+**Walk-forward (IS optimise on wide grid, honest OOS evaluation):**
+```bash
+python -m backtester.run --experiment delta_strangle_tp_v1 --mode wfo
+```
+
+**Legacy flags still work:**
+```bash
+python -m backtester.run --strategy delta_strangle_tp --wfo --is-days 45 --oos-days 15
 ```
 
 ### 4. View the report
@@ -150,11 +218,64 @@ python -m backtester.run --strategy short_straddle --output my_report.html
 Open the generated HTML in a browser. Each report contains:
 
 - **Risk summary bar** — best combo's key metrics at a glance (Sharpe, R², Omega, Ulcer, max DD)
-- **Best-combo box** — all parameters + all scoring metrics + Sortino, Calmar
+- **Best-combo box** — all parameters + all scoring metrics + Sortino, Calmar, DSR
 - **Fan chart** — equity curves for the top-20 combos with intraday high/low shading
-- **Leaderboard** — top-20 ranked by composite score; Sortino and Calmar where available
+- **Leaderboard** — top-20 ranked by composite score
 - **Heatmaps** — auto-generated for every 2D parameter pair
+- **Robustness section** — (with `--robustness` or `--mode sensitivity`) distribution chart,
+  marginal PnL charts, all-combos table
+- **WFO section** — (with `--wfo` or `--mode wfo`) per-window table, OOS equity, IS/OOS scatter
 - **Trade log** — every entry/exit for the best combo
+
+---
+
+## Experiment files
+
+`backtester/experiments/<name>.toml` captures a research step against a specific
+strategy candidate. It is the bridge between Step 1 (discovery) and Steps 2–3.
+
+```toml
+# backtester/experiments/delta_strangle_tp_v1.toml
+strategy = "delta_strangle_tp"
+
+[sensitivity]
+steps = 5   # points per parameter
+
+[sensitivity.best]
+delta            = 0.15
+entry_hour       = 18
+stop_loss_pct    = 5.0
+take_profit_pct  = 0.80
+# Fixed params (held constant in sensitivity run):
+dte              = 1
+max_hold_hours   = 0
+skip_weekends    = 1
+min_otm_pct      = 0
+
+# Per-param deviation rules:
+[sensitivity.deviation.delta]
+type   = "pct"   # ±10% of 0.15 → [0.135, 0.143, 0.15, 0.158, 0.165]
+amount = 10
+
+[sensitivity.deviation.entry_hour]
+type   = "abs"   # ±2 hours → [16, 17, 18, 19, 20]
+amount = 2
+
+[sensitivity.deviation.stop_loss_pct]
+type   = "pct"
+amount = 10      # ±10% of 5.0 → [4.5, 4.75, 5.0, 5.25, 5.5]
+
+[sensitivity.deviation.take_profit_pct]
+type   = "pct"
+amount = 10      # → [0.72, 0.76, 0.80, 0.84, 0.88]
+
+[wfo]
+is_days   = 45
+oos_days  = 15
+step_days = 15
+```
+
+Deviation types: `"pct"` (±N% of best), `"abs"` (±N in natural units), `"fixed"` (constant).
 
 ---
 
@@ -168,7 +289,6 @@ Open the generated HTML in a browser. Each report contains:
 ### Drawdown: one measure, intraday
 - `max_dd_pct` is the **intraday** peak-to-trough measure: daily low vs running NAV high watermark.
 - This is strictly ≥ EOD-close-based drawdown and is more conservative and realistic.
-- No EOD drawdown measure exists; `max_dd_pct` is unambiguous.
 - Ulcer Index captures the *duration* dimension: it squares every underwater day, so a
   prolonged recovery costs far more than a brief spike to the same depth.
 
@@ -183,8 +303,6 @@ Open the generated HTML in a browser. Each report contains:
 - The engine's `_open_unrealized_pnl()` reads this cached value instead of calling
   `_reprice_legs` again, eliminating one full reprice per open position per tick.
   The cache is cleared after each read to prevent stale reuse.
-- Without this, every tick with an open position would reprice legs twice: once during
-  the strategy's SL/TP exit check and once during NAV accounting.
 
 ### Intra-bar trigger detection
 - `index_move_trigger()` checks both the 5-min close and every 1-min high/low within
@@ -203,8 +321,8 @@ On M1 Mac, 15 days of data (4,027 × 5-min intervals):
 
 | Strategy | Combos | Time |
 |---|---|---|
-| `delta_strangle_tp` (large grid) | 10,500 | ~3.5 min |
-| `delta_strangle_tp` (default grid) | 11,200 | ~3.7 min |
+| `delta_strangle_tp` (discovery grid, 600 combos) | 600 | ~1.5 min |
+| `delta_strangle_tp` (sensitivity grid, 5-step) | 25 | ~5 s |
 | `short_straddle` | 4,860 | ~2 min |
 | `straddle` | 4,800 | ~33 s |
 | `put_sell` | 770 | ~10 s |
@@ -228,7 +346,7 @@ Key engine optimisations:
 1. Create `strategies/my_strategy.py` implementing the `Strategy` protocol
    (see `strategy_base.py` for the full protocol definition):
    - `name: str` — CLI-safe identifier
-   - `PARAM_GRID: dict` — `{param: [values]}` for grid search
+   - `PARAM_GRID: dict` — `{param: [values]}` for grid search. Keep this **wide and unbiased** (discovery grid). Do not narrow it post-hoc.
    - `configure(params)` — apply one combo's parameters, reset all state
    - `on_market_state(state) → List[Trade]` — called every 5-min tick
    - `on_end(state) → List[Trade]` — force-close any open position at data end
@@ -241,7 +359,10 @@ Key engine optimisations:
    STRATEGIES["my_strat"] = MyStrategy
    ```
 
-3. Run: `python -m backtester.run --strategy my_strat`
+3. Run discovery: `python -m backtester.run --strategy my_strat`
+
+4. Once you have a candidate, create `experiments/my_strat_v1.toml` and run
+   sensitivity + WFO.
 
 ---
 
@@ -258,4 +379,3 @@ python backtester/ingest/tardis/_validate.py path/to/file.parquet
 python -m backtester.ingest.tardis.quality_check
 ```
 
----

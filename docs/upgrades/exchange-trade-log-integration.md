@@ -168,7 +168,13 @@ class TradeLogReconciler:
     def __init__(self, trade_log: ExchangeTradeLog): ...
 
     def enqueue(self, trade: TradeLifecycle) -> None:
-        """Enqueue a CLOSED trade for reconciliation."""
+        """Enqueue a CLOSED trade for reconciliation.
+
+        Expiry-settled trades (metadata["expiry_settled"] = True) are handled
+        immediately and synchronously: close legs are marked skipped (the exchange
+        never executed a close order), and only open legs are queued for async
+        reconciliation.
+        """
 
     def tick(self) -> None:
         """Called on every lifecycle tick. Processes the pending queue."""
@@ -177,16 +183,20 @@ class TradeLogReconciler:
 **Retry schedule:** 5 attempts, delays `[5, 10, 20, 40, 60]` seconds between attempts. After 5 failures, mark `reconciliation_state = "failed"` and log a warning. The original estimated PnL remains intact as a fallback.
 
 **Processing per trade:**
-1. For each leg (open + close), call `get_fills_for_order(leg.order_id, fill_time_hint=leg_fill_time)`.
-2. If the list is empty for any leg, abort and schedule retry.
-3. Compute `confirmed_fill_price` = qty-weighted average of all partial fills.
-4. Sum `fee_usd` across all fills for the leg.
-5. Once all legs are reconciled, compute:
+1. **Expiry check (in `enqueue`):** If `trade.metadata.get("expiry_settled")` is True, immediately mark all close legs as `reconciliation_state = "skipped"` — no exchange fill record exists for them. Enqueue only the open legs for async reconciliation.
+2. For each leg to reconcile, call `get_fills_for_order(leg.order_id, fill_time_hint=leg_fill_time)`.
+3. If the list is empty for any leg, abort and schedule retry.
+4. Compute `confirmed_fill_price` = qty-weighted average of all partial fills.
+5. Sum `fee_usd` across all fills for the leg.
+6. Once all legs are reconciled, compute:
    ```
+   # Normal close:
    exchange_confirmed_pnl = -(confirmed_entry_cost + confirmed_exit_cost) - total_fees_usd
+   # Expiry close (exit_cost = 0, close fees = 0):
+   exchange_confirmed_pnl = -confirmed_entry_cost - open_fees_usd
    ```
-6. Update `TradeLifecycle` fields, set `reconciliation_state = "complete"`.
-7. Call persistence + notification hooks.
+7. Update `TradeLifecycle` fields, set `reconciliation_state = "complete"`.
+8. Call persistence + notification hooks.
 
 ---
 
@@ -282,7 +292,7 @@ Coincall has no orderId filter; the adapter implements the time-window pattern i
 }
 ```
 
-**Reconciliation update (new appended line):**
+**Reconciliation update — normal close (new appended line):**
 ```json
 {
   "event": "reconciled",
@@ -299,6 +309,28 @@ Coincall has no orderId filter; the adapter implements the time-window pattern i
 }
 ```
 
+**Reconciliation update — expiry close (close legs skipped; open-leg fees captured):**
+```json
+{
+  "event": "reconciled",
+  "id": "def456",
+  "reconciliation_state": "complete",
+  "expiry_settled": true,
+  "total_fees_usd": 4.12,
+  "exchange_confirmed_pnl": 239.77,
+  "estimated_pnl": 243.89,
+  "pnl_delta": -4.12,
+  "open_legs": [
+    {"symbol": "BTC-11APR26-78000-C", "confirmed_fill_price": 121.50, "fee_usd": 2.06, ...},
+    {"symbol": "BTC-11APR26-72000-P", "confirmed_fill_price": 122.44, "fee_usd": 2.06, ...}
+  ],
+  "close_legs": "skipped — expiry, no exchange fill record",
+  "timestamp": "2026-04-11T08:00:14Z"
+}
+```
+
+> **Note:** For expiry closes, `pnl_delta` equals the open-leg fees only (no close fees, no price slippage). This is expected and correct.
+
 ---
 
 ## Implementation Phases
@@ -312,9 +344,10 @@ Coincall has no orderId filter; the adapter implements the time-window pattern i
 5. Write `trade_log_reconciler.py` with retry logic — depends only on `ExchangeTradeLog` ABC
 6. Add new fields to `TradeLeg` and `TradeLifecycle`
 7. Wire reconciler into `lifecycle_engine.py`
-8. Update `persistence.py` — close record + reconciliation update record
-9. Update `telegram_notifier.py` — provisional close message + reconciled update
-10. Tests: unit tests for `TradeLogReconciler` with `MockTradeLog` — no exchange knowledge in tests
+8. Handle expiry-settled trades in `TradeLogReconciler.enqueue()` — skip close legs, enqueue open legs only
+9. Update `persistence.py` — close record + reconciliation update record
+10. Update `telegram_notifier.py` — provisional close message + reconciled update
+11. Tests: unit tests for `TradeLogReconciler` with `MockTradeLog` — no exchange knowledge in tests; include expiry-settled test case
 
 ### Phase 2 — Open fill reconciliation (optional, lower priority)
 

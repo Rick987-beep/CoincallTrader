@@ -1,5 +1,5 @@
 # ===========================================================================
-# CoincallTrader — Hub Dashboard Systemd Service
+# CryoTrader — Hub Dashboard Systemd Service
 #
 # Runs the unified hub dashboard that aggregates all slot data.
 # Publicly accessible on port 8080 (the only public-facing dashboard).
@@ -15,7 +15,7 @@
 # ===========================================================================
 
 [Unit]
-Description=CoincallTrader — Hub Dashboard
+Description=CryoTrader — Hub Dashboard
 After=network-online.target
 Wants=network-online.target
 

@@ -119,9 +119,10 @@ class ShortStrangleWeeklyCap:
     """
 
     name = "short_strangle_weekly_cap"
-    DATE_RANGE = ("2026-03-09", "2026-03-23")
+    DATE_RANGE = ("2025-12-16", "2026-04-15")
     DESCRIPTION = (
-        "Sells delta-selected OTM strangles targeting a week-bucket expiry. "
+        "Sells delta-selected OTM options targeting a week-bucket expiry. "
+        "leg_mode controls whether a strangle (call+put), single put, or single call is sold. "
         "Capacity book: at most target_max_open positions open simultaneously; "
         "at most max_daily_new new positions per calendar day. "
         "Exits per-position on TP, SL, max-hold-days, expiry settlement, "
@@ -129,14 +130,15 @@ class ShortStrangleWeeklyCap:
     )
 
     PARAM_GRID = {
-        "target_weeks":    [1, 2, 3],
-        "delta":           [0.10, 0.15, 0.20],
-        "entry_hour":      [10, 16 ],
-        "stop_loss_pct":   [2.0, 3.0],
-        "take_profit_pct": [0.40, 0.55, 0.75],
-        "max_hold_days":   [0, 7],
-        "target_max_open": [3, 5, 7],
-        "max_daily_new":   [1, 2, 3],
+        "leg_mode":        ["put"],
+        "target_weeks":    [1,2,3],
+        "delta":           [0.05, 0.10, 0.15, 0.20],
+        "entry_hour":      [9],
+        "stop_loss_pct":   [3.0, 5.0, 7.0],
+        "take_profit_pct": [0.33, 0.5, 0.75],
+        "max_hold_days":   [0, 7, 14 ],
+        "target_max_open": [10],
+        "max_daily_new":   [1],
     }
 
     def __init__(self):
@@ -149,6 +151,7 @@ class ShortStrangleWeeklyCap:
         self._max_hold_days = 0
         self._target_max_open = 5
         self._max_daily_new = 1
+        self._leg_mode = "strangle"
         self._last_trade_date = None  # type: Optional[Any]
         self._entry_conditions = []
         self._exit_conditions = []
@@ -163,6 +166,7 @@ class ShortStrangleWeeklyCap:
         self._max_hold_days = params.get("max_hold_days", 0)
         self._target_max_open = params.get("target_max_open", 5)
         self._max_daily_new = params.get("max_daily_new", 1)
+        self._leg_mode = params.get("leg_mode", "strangle")
         self._positions = []
         self._last_trade_date = None
 
@@ -193,8 +197,12 @@ class ShortStrangleWeeklyCap:
             # Guard: skip tick if option data missing (data gap), except expiry settlement
             if reason and reason != "expiry":
                 expiry = pos.metadata["expiry"]
-                if (state.get_option(expiry, pos.metadata["call_strike"], True) is None
-                        or state.get_option(expiry, pos.metadata["put_strike"], False) is None):
+                _lm = pos.metadata.get("leg_mode", "strangle")
+                _call_ok = (_lm == "put") or (
+                    state.get_option(expiry, pos.metadata["call_strike"], True) is not None)
+                _put_ok  = (_lm == "call") or (
+                    state.get_option(expiry, pos.metadata["put_strike"], False) is not None)
+                if not (_call_ok and _put_ok):
                     reason = None
             if reason:
                 trades.append(self._close(state, pos, reason))
@@ -235,6 +243,7 @@ class ShortStrangleWeeklyCap:
     def describe_params(self):
         # type: () -> Dict[str, Any]
         return {
+            "leg_mode":        self._leg_mode,
             "target_weeks":    self._target_weeks,
             "delta":           self._delta,
             "stop_loss_pct":   self._sl_pct,
@@ -260,21 +269,33 @@ class ShortStrangleWeeklyCap:
 
     def _check_take_profit(self, state, pos):
         # type: (Any, OpenPosition) -> Optional[str]
-        """Close when combined ask drops to (1 - tp_pct) × entry premium.
+        """Close when ask drops to (1 - tp_pct) × entry premium.
 
-        Uses raw ask prices — no mark/fair floor.
-        Returns None if ask data is missing for either leg (skip tick).
+        Single-leg mode prices only the relevant leg.
+        Returns None if ask data is missing (skip tick).
         """
         if self._tp_pct <= 0:
             return None
-        expiry = pos.metadata["expiry"]
-        call_q = state.get_option(expiry, pos.metadata["call_strike"], True)
-        put_q  = state.get_option(expiry, pos.metadata["put_strike"], False)
-        if call_q is None or put_q is None:
-            return None
-        if call_q.ask <= 0 or put_q.ask <= 0:
-            return None
-        current_usd = call_q.ask_usd + put_q.ask_usd
+        expiry   = pos.metadata["expiry"]
+        leg_mode = pos.metadata.get("leg_mode", "strangle")
+        if leg_mode == "strangle":
+            call_q = state.get_option(expiry, pos.metadata["call_strike"], True)
+            put_q  = state.get_option(expiry, pos.metadata["put_strike"], False)
+            if call_q is None or put_q is None:
+                return None
+            if call_q.ask <= 0 or put_q.ask <= 0:
+                return None
+            current_usd = call_q.ask_usd + put_q.ask_usd
+        elif leg_mode == "put":
+            put_q = state.get_option(expiry, pos.metadata["put_strike"], False)
+            if put_q is None or put_q.ask <= 0:
+                return None
+            current_usd = put_q.ask_usd
+        else:  # call
+            call_q = state.get_option(expiry, pos.metadata["call_strike"], True)
+            if call_q is None or call_q.ask <= 0:
+                return None
+            current_usd = call_q.ask_usd
         profit_ratio = (pos.entry_price_usd - current_usd) / max(pos.entry_price_usd, 0.01)
         if profit_ratio >= self._tp_pct:
             return "take_profit"
@@ -290,86 +311,126 @@ class ShortStrangleWeeklyCap:
         if not chain:
             return
 
-        calls = [q for q in chain if q.is_call]
-        puts  = [q for q in chain if not q.is_call]
-
-        call = _select_by_delta(calls, +self._delta)
-        put  = _select_by_delta(puts,  -self._delta)
-
-        if call is None or put is None:
-            return
-        if call.bid <= 0 or put.bid <= 0:
-            return
-
-        call_entry_usd = call.bid_usd
-        put_entry_usd  = put.bid_usd
-        entry_usd = call_entry_usd + put_entry_usd
-        if entry_usd <= 0:
-            return
-
-        fee_call = deribit_fee_per_leg(state.spot, call_entry_usd)
-        fee_put  = deribit_fee_per_leg(state.spot, put_entry_usd)
         exp_dt   = _expiry_dt_utc(expiry, state.dt.tzinfo)
-
-        today = state.dt.date()
+        today    = state.dt.date()
         exp_date = _parse_expiry_date(expiry)
-        dte = (exp_date.date() - today).days if exp_date else None
+        dte      = (exp_date.date() - today).days if exp_date else None
+
+        if self._leg_mode == "strangle":
+            calls = [q for q in chain if q.is_call]
+            puts  = [q for q in chain if not q.is_call]
+            call  = _select_by_delta(calls, +self._delta)
+            put   = _select_by_delta(puts,  -self._delta)
+            if call is None or put is None:
+                return
+            if call.bid <= 0 or put.bid <= 0:
+                return
+            call_entry_usd = call.bid_usd
+            put_entry_usd  = put.bid_usd
+            entry_usd = call_entry_usd + put_entry_usd
+            if entry_usd <= 0:
+                return
+            fee  = deribit_fee_per_leg(state.spot, call_entry_usd) + deribit_fee_per_leg(state.spot, put_entry_usd)
+            legs = [
+                {"strike": call.strike, "is_call": True,  "expiry": expiry, "side": "sell",
+                 "entry_price": call.bid, "entry_price_usd": call_entry_usd, "entry_delta": call.delta},
+                {"strike": put.strike,  "is_call": False, "expiry": expiry, "side": "sell",
+                 "entry_price": put.bid,  "entry_price_usd": put_entry_usd,  "entry_delta": put.delta},
+            ]
+            meta = {
+                "target_delta": self._delta, "expiry": expiry, "expiry_dt": exp_dt,
+                "direction": "sell", "leg_mode": "strangle",
+                "call_strike": call.strike, "put_strike": put.strike,
+                "call_delta": call.delta, "put_delta": put.delta, "dte_at_entry": dte,
+            }
+        elif self._leg_mode == "put":
+            puts = [q for q in chain if not q.is_call]
+            put  = _select_by_delta(puts, -self._delta)
+            if put is None or put.bid <= 0:
+                return
+            entry_usd = put.bid_usd
+            if entry_usd <= 0:
+                return
+            fee  = deribit_fee_per_leg(state.spot, entry_usd)
+            legs = [
+                {"strike": put.strike, "is_call": False, "expiry": expiry, "side": "sell",
+                 "entry_price": put.bid, "entry_price_usd": entry_usd, "entry_delta": put.delta},
+            ]
+            meta = {
+                "target_delta": self._delta, "expiry": expiry, "expiry_dt": exp_dt,
+                "direction": "sell", "leg_mode": "put",
+                "put_strike": put.strike, "put_delta": put.delta, "dte_at_entry": dte,
+            }
+        else:  # call
+            calls = [q for q in chain if q.is_call]
+            call  = _select_by_delta(calls, +self._delta)
+            if call is None or call.bid <= 0:
+                return
+            entry_usd = call.bid_usd
+            if entry_usd <= 0:
+                return
+            fee  = deribit_fee_per_leg(state.spot, entry_usd)
+            legs = [
+                {"strike": call.strike, "is_call": True, "expiry": expiry, "side": "sell",
+                 "entry_price": call.bid, "entry_price_usd": entry_usd, "entry_delta": call.delta},
+            ]
+            meta = {
+                "target_delta": self._delta, "expiry": expiry, "expiry_dt": exp_dt,
+                "direction": "sell", "leg_mode": "call",
+                "call_strike": call.strike, "call_delta": call.delta, "dte_at_entry": dte,
+            }
 
         pos = OpenPosition(
             entry_time=state.dt,
             entry_spot=state.spot,
-            legs=[
-                {
-                    "strike": call.strike, "is_call": True,
-                    "expiry": expiry, "side": "sell",
-                    "entry_price": call.bid, "entry_price_usd": call_entry_usd,
-                    "entry_delta": call.delta,
-                },
-                {
-                    "strike": put.strike, "is_call": False,
-                    "expiry": expiry, "side": "sell",
-                    "entry_price": put.bid, "entry_price_usd": put_entry_usd,
-                    "entry_delta": put.delta,
-                },
-            ],
+            legs=legs,
             entry_price_usd=entry_usd,
-            fees_open=fee_call + fee_put,
-            metadata={
-                "target_delta":  self._delta,
-                "expiry":        expiry,
-                "expiry_dt":     exp_dt,
-                "direction":     "sell",
-                "call_strike":   call.strike,
-                "put_strike":    put.strike,
-                "call_delta":    call.delta,
-                "put_delta":     put.delta,
-                "dte_at_entry":  dte,
-            },
+            fees_open=fee,
+            metadata=meta,
         )
         self._positions.append(pos)
 
     def _close(self, state, pos, reason):
         # type: (Any, OpenPosition, str) -> Trade
-        expiry      = pos.metadata["expiry"]
-        call_strike = pos.metadata["call_strike"]
-        put_strike  = pos.metadata["put_strike"]
+        expiry   = pos.metadata["expiry"]
+        leg_mode = pos.metadata.get("leg_mode", "strangle")
 
-        if reason == "expiry":
-            call_exit_usd = max(0.0, state.spot - call_strike)
-            put_exit_usd  = max(0.0, put_strike  - state.spot)
-        else:
-            call_q = state.get_option(expiry, call_strike, True)
-            put_q  = state.get_option(expiry, put_strike,  False)
-            call_exit_usd = (call_q.ask_usd if call_q and call_q.ask > 0
-                             else pos.legs[0]["entry_price_usd"])
-            put_exit_usd  = (put_q.ask_usd if put_q and put_q.ask > 0
-                             else pos.legs[1]["entry_price_usd"])
-
-        exit_usd   = call_exit_usd + put_exit_usd
-        fees_close = 0.0 if reason == "expiry" else (
-            deribit_fee_per_leg(state.spot, call_exit_usd) +
-            deribit_fee_per_leg(state.spot, put_exit_usd)
-        )
+        if leg_mode == "strangle":
+            call_strike = pos.metadata["call_strike"]
+            put_strike  = pos.metadata["put_strike"]
+            if reason == "expiry":
+                call_exit_usd = max(0.0, state.spot - call_strike)
+                put_exit_usd  = max(0.0, put_strike - state.spot)
+            else:
+                call_q = state.get_option(expiry, call_strike, True)
+                put_q  = state.get_option(expiry, put_strike, False)
+                call_exit_usd = (call_q.ask_usd if call_q and call_q.ask > 0
+                                 else pos.legs[0]["entry_price_usd"])
+                put_exit_usd  = (put_q.ask_usd if put_q and put_q.ask > 0
+                                 else pos.legs[1]["entry_price_usd"])
+            exit_usd   = call_exit_usd + put_exit_usd
+            fees_close = 0.0 if reason == "expiry" else (
+                deribit_fee_per_leg(state.spot, call_exit_usd) +
+                deribit_fee_per_leg(state.spot, put_exit_usd)
+            )
+        elif leg_mode == "put":
+            put_strike = pos.metadata["put_strike"]
+            if reason == "expiry":
+                exit_usd = max(0.0, put_strike - state.spot)
+            else:
+                put_q    = state.get_option(expiry, put_strike, False)
+                exit_usd = (put_q.ask_usd if put_q and put_q.ask > 0
+                            else pos.legs[0]["entry_price_usd"])
+            fees_close = 0.0 if reason == "expiry" else deribit_fee_per_leg(state.spot, exit_usd)
+        else:  # call
+            call_strike = pos.metadata["call_strike"]
+            if reason == "expiry":
+                exit_usd = max(0.0, state.spot - call_strike)
+            else:
+                call_q   = state.get_option(expiry, call_strike, True)
+                exit_usd = (call_q.ask_usd if call_q and call_q.ask > 0
+                            else pos.legs[0]["entry_price_usd"])
+            fees_close = 0.0 if reason == "expiry" else deribit_fee_per_leg(state.spot, exit_usd)
 
         trade = close_trade(state, pos, reason, exit_usd, fees_close)
         trade.metadata["target_weeks"]    = self._target_weeks

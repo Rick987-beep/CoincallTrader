@@ -1,8 +1,8 @@
-# CoincallTrader — Module Reference
+# CryoTrader — Module Reference
 
 **Last Updated:** March 23, 2026
 
-Internal documentation for the CoincallTrader application modules.
+Internal documentation for the CryoTrader application modules.
 For Coincall exchange API endpoints, see [API_REFERENCE.md](API_REFERENCE.md).
 For the Deribit migration plan and API field reference, see [MIGRATION_PLAN_DERIBIT.md](MIGRATION_PLAN_DERIBIT.md).
 

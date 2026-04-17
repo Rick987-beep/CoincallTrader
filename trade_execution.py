@@ -330,6 +330,11 @@ class LimitFillManager:
         self._lifecycle_id: Optional[str] = None
         self._purpose: Optional[Any] = None
 
+        # Grace flag: when all phases exhaust, allow one extra tick before failing.
+        # Catches fills that arrived at the exchange between the last poll and
+        # the phase-expiry decision (exchange reporting lag at phase boundary).
+        self._grace_exhausted: bool = False
+
     # -- Public API -----------------------------------------------------------
 
     @property
@@ -479,9 +484,31 @@ class LimitFillManager:
 
         # 3. Timeout / phase advancement
         if self._using_phases:
-            return self._check_phased()
+            result = self._check_phased()
         else:
-            return self._check_legacy()
+            result = self._check_legacy()
+
+        # 4. Grace period on failure: exchange fill reporting can lag behind
+        #    phase expiry by a tick.  On first "failed", park in "pending" for
+        #    one more tick (~10s) so the exchange has time to propagate the fill.
+        #    On the second "failed", do a final fresh poll before giving up.
+        if result == "failed":
+            if not self._grace_exhausted:
+                self._grace_exhausted = True
+                logger.info(
+                    "LimitFillManager: phases exhausted — grace tick before failing "
+                    "(exchange fill reporting lag protection)"
+                )
+                return "pending"
+            # Grace tick has elapsed — one final poll, then commit to failed
+            self._poll_fills()
+            if all(ls.is_filled for ls in self._legs):
+                logger.info(
+                    "LimitFillManager: last-chance poll caught late fill(s) — returning 'filled'"
+                )
+                return "filled"
+
+        return result
 
     def _poll_fills(self) -> None:
         """Poll order status for all unfilled legs.

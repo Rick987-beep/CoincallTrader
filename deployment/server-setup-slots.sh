@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ===========================================================================
-# CoincallTrader — One-Time Server Setup for Slot Architecture
+# CryoTrader — One-Time Server Setup for Slot Architecture
 #
 # Run once on a fresh Hetzner VPS to prepare /opt/ct/ for slot deployments.
 # Executed remotely via: ./deployment/deploy-slot.sh hub --setup
@@ -21,7 +21,7 @@ CT_BASE="/opt/ct"
 HUB_PORT=8080
 
 echo "═══════════════════════════════════════════════════════"
-echo " CoincallTrader — Slot Architecture Server Setup"
+echo " CryoTrader — Slot Architecture Server Setup"
 echo "═══════════════════════════════════════════════════════"
 
 # ── 1) System update ────────────────────────────────────────────────────

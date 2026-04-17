@@ -1,4 +1,4 @@
-# CoincallTrader Dependencies
+# CryoTrader Dependencies
 # Install with: pip install -r requirements.txt
 
 # Core dependencies
@@ -12,6 +12,7 @@ numpy>=1.24               # Tick recorder — array ops in snapshotter
 pandas>=2.0               # Tick recorder — DataFrame / parquet writes
 pyarrow>=14.0             # Tick recorder — parquet backend
 python-dotenv>=1.0        # Tick recorder — load .env in recorder.py
+scipy>=1.11               # Backtester — Deflated Sharpe Ratio (DSR) normal CDF/PPF
 
 # Development dependencies (optional)
 # pytest>=7.0.0           # Testing framework

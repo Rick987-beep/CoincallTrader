@@ -4,7 +4,7 @@
 **Last Updated:** March 3, 2026
 
 Reference for the Coincall exchange REST and WebSocket APIs.
-For CoincallTrader internal module documentation, see [MODULE_REFERENCE.md](MODULE_REFERENCE.md).
+For CryoTrader internal module documentation, see [MODULE_REFERENCE.md](MODULE_REFERENCE.md).
 
 ---
 

@@ -1,4 +1,4 @@
-# CoincallTrader Architecture & Development Plan
+# CryoTrader Architecture & Development Plan
 
 **Version:** 6.0  
 **Date:** March 17, 2026  
@@ -8,7 +8,7 @@
 
 ## Executive Summary
 
-This document outlines the transformation of CoincallTrader from a simple options trading bot into a comprehensive, multi-instrument trading management system capable of running complex, time-aware strategies while maintaining code elegance and manageability.
+This document outlines the transformation of CryoTrader from a simple options trading bot into a comprehensive, multi-instrument trading management system capable of running complex, time-aware strategies while maintaining code elegance and manageability.
 
 ---
 
@@ -75,7 +75,7 @@ Key facts:
 
 ### Current Directory Structure
 ```
-CoincallTrader/
+CryoTrader/
 ├── main.py                 # Entry point — wires TradingContext, registers runners, crash recovery
 ├── strategy.py             # Strategy framework (TradingContext, StrategyConfig, StrategyRunner)
 ├── config.py               # Environment config (.env loading)
@@ -733,4 +733,4 @@ See [MIGRATION_PLAN_DERIBIT.md](MIGRATION_PLAN_DERIBIT.md) for the full migratio
 
 ---
 
-*Document maintained by the CoincallTrader development team.*
+*Document maintained by the CryoTrader development team.*

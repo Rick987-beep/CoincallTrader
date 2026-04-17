@@ -8,9 +8,6 @@ EMA Filter:
   Entry is blocked when BTC's most recent daily close is below the EMA-20.
   This avoids selling puts into a sustained downtrend.
 
-Fair Price Model:
-  Same as daily_put_sell — see that module for full description.
-
 Open Execution (sell put — limit only, up to ~2.5 min total):
   Phase 1 — Limit at fair (45s).
   Phase 2 — Limit at bid + 33% of spread (45s).
@@ -20,13 +17,13 @@ Open Execution (sell put — limit only, up to ~2.5 min total):
 
 Take Profit (95% of premium captured):
   TP threshold = fill_price × 0.05.
-  Each tick, we recompute fair price.  If fair_price <= TP threshold, close
+  Each tick, we compute mid price (bid+ask)/2.  If mid <= TP threshold, close
   via phased limit buy-to-close: 15s at fair → 15s stepping toward ask →
   aggressive at ask.
 
-Stop Loss (fair-price based, 250% of premium):
+Stop Loss (mid-price based, 250% of premium):
   SL threshold = fill_price × 3.50 (250% loss).
-  If fair_price >= SL threshold, close via same phased limit buy-to-close.
+  If mid >= SL threshold, close via same phased limit buy-to-close.
 
 Expiry Selection:
   Target DTE is 80, but exact-day matching would miss most days since monthly
@@ -112,48 +109,38 @@ CHECK_INTERVAL  = _p("CHECK_INTERVAL",  30, int)   # 30s — safe up to ~80 conc
 MAX_CONCURRENT  = _p("MAX_CONCURRENT",  90, int)   # Monthly expiry clustering
 
 
-# ─── Fair Price Calculation ─────────────────────────────────────────────────
+# ─── Option Price Snapshot ──────────────────────────────────────────────────
 
-def compute_fair_price(symbol: str) -> Optional[dict]:
+def get_option_prices(symbol: str) -> Optional[dict]:
     """
-    Compute fair price, bid, ask, and spreads for an option symbol.
+    Fetch bid, ask, mid, and mark for an option symbol.
 
-    Returns dict with keys: fair, bid, ask, mark, fairspread, fairspread_ask.
-    Returns None if no market data is available at all.
+    Mid price hierarchy (never falls back to mark price):
+      - Two-sided quote: mid = (bid + ask) / 2
+      - Ask only (no bids — common for near-worthless deep OTM options):
+        mid = ask  (the executable buy price)
+      - No ask: returns None — TP/SL check is skipped this tick.
+
+    Returns dict with keys: bid, ask, mid, mark.
     """
     mkt = get_option_market_data(symbol)
     if not mkt:
         return None
 
-    bid  = float(mkt.get('bid', 0) or 0)
-    ask  = float(mkt.get('ask', 0) or 0)
+    bid  = float(mkt.get('bid',  0) or 0)
+    ask  = float(mkt.get('ask',  0) or 0)
     mark = float(mkt.get('mark_price', 0) or 0)
 
-    if bid > 0 and ask > 0:
-        if bid <= mark <= ask:
-            fair = mark
-        else:
-            fair = (bid + ask) / 2
-        fairspread     = fair - bid
-        fairspread_ask = ask - fair
-    elif bid > 0:
-        fair           = max(mark, bid) if mark > 0 else bid
-        fairspread     = fair - bid
-        fairspread_ask = 0.0
-    elif mark > 0:
-        fair           = mark
-        fairspread     = 0.0
-        fairspread_ask = 0.0
-    else:
-        return None
+    if ask <= 0:
+        return None  # no executable price available
+
+    mid = (bid + ask) / 2.0 if bid > 0 else ask
 
     return {
-        'fair':          fair,
-        'bid':           bid if bid > 0 else None,
-        'ask':           ask if ask > 0 else None,
-        'mark':          mark,
-        'fairspread':    fairspread,
-        'fairspread_ask': fairspread_ask,
+        'bid':  bid if bid > 0 else None,
+        'ask':  ask,
+        'mid':  mid,
+        'mark': mark,
     }
 
 
@@ -182,18 +169,18 @@ def _phased_close_params(fair_s: int, step_s: int, agg_s: int) -> ExecutionParam
 
 # ─── Exit Condition: Take Profit ────────────────────────────────────────────
 # For a short put, we profit when the option price falls (time decay / BTC rises).
-# TP fires when fair price drops to fill_price × (1 - TAKE_PROFIT_PCT/100),
+# TP fires when mid price drops to fill_price × (1 - TAKE_PROFIT_PCT/100),
 # meaning we have captured TAKE_PROFIT_PCT% of the premium sold.
 
-def _fair_price_tp():
+def _mid_price_tp():
     """
-    Exit condition: fair-price based take profit.
+    Exit condition: mid-price based take profit.
 
     TP threshold = fill_price × (1 - TAKE_PROFIT_PCT/100).
-    Triggers when fair_price <= TP threshold.
+    Triggers when mid price (bid+ask)/2 <= TP threshold.
     On trigger, configures phased limit buy-to-close.
     """
-    label = f"fair_price_tp({TAKE_PROFIT_PCT}%)"
+    label = f"mid_price_tp({TAKE_PROFIT_PCT}%)"
 
     def _check(account, trade) -> bool:
         leg = trade.open_legs[0] if trade.open_legs else None
@@ -205,15 +192,16 @@ def _fair_price_tp():
             tp_threshold = float(leg.fill_price) * (1.0 - TAKE_PROFIT_PCT / 100.0)
             trade.metadata["tp_threshold"] = tp_threshold
 
-        fp = compute_fair_price(leg.symbol)
-        if not fp or fp['fair'] <= 0:
+        px = get_option_prices(leg.symbol)
+        if not px:
             return False
 
-        triggered = fp['fair'] <= tp_threshold
+        triggered = px['mid'] <= tp_threshold
         if triggered:
-            captured_pct = (float(leg.fill_price) - fp['fair']) / float(leg.fill_price) * 100
+            captured_pct = (float(leg.fill_price) - px['mid']) / float(leg.fill_price) * 100
+            mid_source = "ask-only" if not px['bid'] else "mid"
             logger.info(
-                f"[{trade.id}] {label} TRIGGERED: fair=${fp['fair']:.4f} "
+                f"[{trade.id}] {label} TRIGGERED: {mid_source}=${px['mid']:.4f} "
                 f"<= threshold=${tp_threshold:.4f} "
                 f"(fill=${leg.fill_price:.4f}, captured={captured_pct:.1f}%)"
             )
@@ -231,18 +219,18 @@ def _fair_price_tp():
 
 
 # ─── Exit Condition: Stop Loss ───────────────────────────────────────────────
-# SL fires when the current fair price reaches fill_price × (1 + STOP_LOSS_PCT/100),
+# SL fires when mid price reaches fill_price × (1 + STOP_LOSS_PCT/100),
 # meaning we'd lose STOP_LOSS_PCT% of the premium we collected.
 
-def _fair_price_sl():
+def _mid_price_sl():
     """
-    Exit condition: fair-price based stop loss.
+    Exit condition: mid-price based stop loss.
 
     SL threshold = fill_price × (1 + STOP_LOSS_PCT/100).
-    Triggers when fair_price >= SL threshold.
+    Triggers when mid price (bid+ask)/2 >= SL threshold.
     On trigger, configures phased limit buy-to-close.
     """
-    label = f"fair_price_sl({STOP_LOSS_PCT}%)"
+    label = f"mid_price_sl({STOP_LOSS_PCT}%)"
 
     def _check(account, trade) -> bool:
         leg = trade.open_legs[0] if trade.open_legs else None
@@ -254,22 +242,22 @@ def _fair_price_sl():
             sl_threshold = float(leg.fill_price) * (1.0 + STOP_LOSS_PCT / 100.0)
             trade.metadata["sl_threshold"] = sl_threshold
 
-        fp = compute_fair_price(leg.symbol)
-        if not fp or fp['fair'] <= 0:
+        px = get_option_prices(leg.symbol)
+        if not px:
             return False
 
-        triggered = fp['fair'] >= sl_threshold
+        triggered = px['mid'] >= sl_threshold
         if triggered:
-            loss_pct = (fp['fair'] - float(leg.fill_price)) / float(leg.fill_price) * 100
+            loss_pct = (px['mid'] - float(leg.fill_price)) / float(leg.fill_price) * 100
             logger.info(
-                f"[{trade.id}] {label} TRIGGERED: fair=${fp['fair']:.4f} "
+                f"[{trade.id}] {label} TRIGGERED: mid=${px['mid']:.4f} "
                 f">= threshold=${sl_threshold:.4f} "
                 f"(fill=${leg.fill_price:.4f}, loss={loss_pct:.1f}%)"
             )
             logger.info(
                 f"[{trade.id}] SL prices: "
-                f"bid=${fp['bid'] or 0:.4f}  ask=${fp['ask'] or 0:.4f}  "
-                f"fair=${fp['fair']:.4f}  mark=${fp['mark']:.4f}"
+                f"bid=${px['bid']:.4f}  ask=${px['ask']:.4f}  "
+                f"mid=${px['mid']:.4f}  mark=${px['mark']:.4f}"
             )
             trade.execution_mode = "limit"
             trade.metadata["sl_triggered"]    = True
@@ -295,44 +283,37 @@ def _on_trade_opened(trade, account) -> None:
     leg     = trade.open_legs[0] if trade.open_legs else None
     premium = leg.fill_price if leg and leg.fill_price else 0
 
-    fp = compute_fair_price(leg.symbol) if leg else None
-    fair_at_open = None
-    if fp:
-        fair_at_open = fp['fair']
-        trade.metadata["fair_at_open"]      = fair_at_open
-        trade.metadata["bid_at_open"]       = fp['bid']
-        trade.metadata["ask_at_open"]       = fp['ask']
-        trade.metadata["fairspread_at_open"] = fp['fairspread']
+    px = get_option_prices(leg.symbol) if leg else None
+    mid_at_open = None
+    if px:
+        mid_at_open = px['mid']
+        trade.metadata["mid_at_open"] = mid_at_open
+        trade.metadata["bid_at_open"] = px['bid']
+        trade.metadata["ask_at_open"] = px['ask']
 
     if premium and premium > 0:
         trade.metadata["sl_threshold"] = float(premium) * (1.0 + STOP_LOSS_PCT / 100.0)
         trade.metadata["tp_threshold"] = float(premium) * (1.0 - TAKE_PROFIT_PCT / 100.0)
 
-    mark_at_open = None
-    if leg:
-        mark_at_open = trade.metadata.get(f"mark_at_open_{leg.symbol}")
-        if not mark_at_open:
-            mkt = get_option_market_data(leg.symbol)
-            if mkt:
-                mark_at_open = mkt.get('mark_price', 0)
-                trade.metadata[f"mark_at_open_{leg.symbol}"] = mark_at_open
+    mark_at_open = px['mark'] if px else None
+    if mark_at_open:
+        trade.metadata[f"mark_at_open_{leg.symbol}"] = mark_at_open
 
     sl_threshold = trade.metadata.get("sl_threshold")
     tp_threshold = trade.metadata.get("tp_threshold")
 
     logger.info(
         f"[PutSell80DTE] Opened: SELL {leg.symbol if leg else '?'} "
-        f"@ ${premium:.4f}  |  fair=${fair_at_open:.4f}  |  "
+        f"@ ${premium:.4f}  |  mid=${mid_at_open:.4f}  |  "
         f"mark=${mark_at_open:.4f}  |  "
         f"TP@=${tp_threshold:.4f}  SL@=${sl_threshold:.4f}  |  "
         f"BTC=${index_price:,.0f}"
     )
-    if fp:
+    if px:
         logger.info(
             f"[PutSell80DTE] Entry prices: "
-            f"bid=${fp['bid'] or 0:.4f}  ask=${fp['ask'] or 0:.4f}  "
-            f"fair=${fp['fair']:.4f}  mark=${fp['mark']:.4f}  "
-            f"fairspread=${fp['fairspread']:.4f}"
+            f"bid=${px['bid']:.4f}  ask=${px['ask']:.4f}  "
+            f"mid=${px['mid']:.4f}  mark=${px['mark']:.4f}"
         )
 
     # Telegram notification
@@ -346,14 +327,14 @@ def _on_trade_opened(trade, account) -> None:
     else:
         phase_label = "Phase 3 (at bid)"
 
-    bid = fp['bid'] or 0 if fp else 0
-    ask = fp['ask'] or 0 if fp else 0
-    mid = (bid + ask) / 2 if (bid and ask) else 0
+    bid = px['bid'] if px else 0
+    ask = px['ask'] if px else 0
+    mid = px['mid'] if px else 0
 
     collected  = float(premium) * float(leg.filled_qty) if leg and leg.filled_qty else 0.0
-    vs_fair    = f"vs fair {(premium - fair_at_open) / fair_at_open * 100:+.1f}%" if fair_at_open else ""
+    vs_mid     = f"vs mid {(premium - mid_at_open) / mid_at_open * 100:+.1f}%" if mid_at_open else ""
     vs_bid     = f"vs bid {(premium - bid) / bid * 100:+.1f}%" if bid else ""
-    distances  = "  ·  ".join(x for x in [vs_fair, vs_bid] if x)
+    distances  = "  ·  ".join(x for x in [vs_mid, vs_bid] if x)
 
     try:
         get_notifier().send(
@@ -364,7 +345,7 @@ def _on_trade_opened(trade, account) -> None:
             f"Collected: <b>${collected:.2f}</b>  ({leg.filled_qty}\u00d7 ${premium:.4f})\n"
             f"{phase_label}  ·  {duration_s}s  ·  {distances}\n\n"
             f"Prices at open:\n"
-            f"  mark=${mark_at_open or 0:.4f}  mid=${mid:.4f}  fair=${fair_at_open or 0:.4f}\n"
+            f"  mark=${mark_at_open or 0:.4f}  mid=${mid:.4f}\n"
             f"  bid=${bid:.4f}  ask=${ask:.4f}\n\n"
             f"TP @ ${tp_threshold:.4f}  |  SL @ ${sl_threshold:.4f}\n\n"
             f"BTC index: ${index_price:,.0f}" if index_price else "BTC index: N/A"
@@ -382,9 +363,9 @@ def _on_trade_closed(trade, account) -> None:
 
     exit_reason = "unknown"
     if trade.metadata.get("tp_triggered"):
-        exit_reason = f"TP ({TAKE_PROFIT_PCT}% captured, fair-price)"
+        exit_reason = f"TP ({TAKE_PROFIT_PCT}% captured, mid-price)"
     elif trade.metadata.get("sl_triggered"):
-        exit_reason = f"SL ({STOP_LOSS_PCT}% loss, fair-price)"
+        exit_reason = f"SL ({STOP_LOSS_PCT}% loss, mid-price)"
     elif pnl <= -(abs(entry_cost) * STOP_LOSS_PCT / 100):
         exit_reason = f"SL ({STOP_LOSS_PCT}% loss)"
     elif trade.metadata.get("expiry_settled"):
@@ -431,23 +412,20 @@ def _on_trade_closed(trade, account) -> None:
     elif leg:
         close_symbol = leg.symbol
 
-    fp         = compute_fair_price(close_symbol) if close_symbol else None
+    px         = get_option_prices(close_symbol) if close_symbol else None
     price_text = ""
-    if fp:
-        c_bid = fp['bid'] or 0
-        c_ask = fp['ask'] or 0
-        c_mid = (c_bid + c_ask) / 2 if (c_bid and c_ask) else 0
+    if px:
         price_text = (
             f"\nPrices at close:\n"
-            f"  mark=${fp['mark']:.4f}  mid=${c_mid:.4f}  fair=${fp['fair']:.4f}\n"
-            f"  bid=${c_bid:.4f}  ask=${c_ask:.4f}"
+            f"  mark=${px['mark']:.4f}  mid=${px['mid']:.4f}\n"
+            f"  bid=${px['bid']:.4f}  ask=${px['ask']:.4f}"
         )
 
-    fill_vs_fair = ""
-    if close_fill and fp and fp['fair'] > 0:
-        diff     = close_fill - fp['fair']
-        diff_pct = diff / fp['fair'] * 100
-        fill_vs_fair = f"\nFill vs fair: ${close_fill:.4f} vs ${fp['fair']:.4f} ({diff_pct:+.1f}%)"
+    fill_vs_mid = ""
+    if close_fill and px and px['mid'] > 0:
+        diff     = close_fill - px['mid']
+        diff_pct = diff / px['mid'] * 100
+        fill_vs_mid = f"\nFill vs mid: ${close_fill:.4f} vs ${px['mid']:.4f} ({diff_pct:+.1f}%)"
 
     close_qty = (
         (trade.close_legs[0].filled_qty if (trade.close_legs and trade.close_legs[0].filled_qty) else None)
@@ -497,7 +475,7 @@ def _on_trade_closed(trade, account) -> None:
             f"\nPnL: <b>${pnl:+.2f}</b> ({roi:+.1f}%)\n"
             f"Hold: {hold_seconds/3600:.1f}h\n"
             f"{price_text}"
-            f"{fill_vs_fair}\n\n"
+            f"{fill_vs_mid}\n\n"
             f"{idx_text}"
         )
     except Exception:
@@ -539,12 +517,12 @@ def put_sell_80dte() -> StrategyConfig:
         ],
 
         # ── When to exit ─────────────────────────────────────────────
-        # TP: 95% of premium captured (fair price drops to 5% of entry).
-        # SL: 250% loss (fair price rises to 3.5× entry).
+        # TP: 95% of premium captured (mid price drops to 5% of entry).
+        # SL: 250% loss (mid price rises to 3.5× entry).
         # Expiry: option expires worthless → full premium captured.
         exit_conditions=[
-            _fair_price_tp(),
-            _fair_price_sl(),
+            _mid_price_tp(),
+            _mid_price_sl(),
         ],
 
         # ── How to execute ───────────────────────────────────────────

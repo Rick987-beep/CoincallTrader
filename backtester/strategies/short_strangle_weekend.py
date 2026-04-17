@@ -1,20 +1,17 @@
 #!/usr/bin/env python3
 """
-short_strangle_delta_tp.py — Short N-DTE strangle (delta-selected) with SL + TP + time/expiry exit.
+short_strangle_weekend.py — Short N-DTE strangle (delta-selected) sold on weekends only.
 
-Identical to short_strangle_delta.py but adds a take-profit exit:
+Based on short_strangle_delta_tp.py, with one key difference:
 
-    take_profit_pct — close when the cost to buy back both legs (at ask)
-                      has fallen to  entry_premium × (1 - take_profit_pct).
+    open_days — controls which weekend days entries are allowed:
+        "saturday"  → only Saturday  (weekday == 5)
+        "sunday"    → only Sunday    (weekday == 6)
+        "both"      → Saturday OR Sunday
 
-    Example: take_profit_pct=0.60 → close when combined ask drops to 40 %
-             of the premium collected at entry.
-
-TP repricing uses raw ask prices (no mark/fair floor) — simple bid/ask only.
-SL repricing is unchanged from the original strategy.
-
-All other behaviour (delta selection, entry window, SL, max-hold, expiry
-settlement) is identical to ShortStrangleDelta.
+The weekday filter replaces skip_weekends entirely.  All other behaviour
+(delta selection, entry window, SL, TP, max-hold, expiry settlement) is
+identical to ShortStrangleDeltaTp.
 """
 import re
 from datetime import datetime, timedelta
@@ -29,7 +26,7 @@ from backtester.strategy_base import (
 
 
 # ------------------------------------------------------------------
-# Helpers (identical to short_strangle_delta.py)
+# Helpers (shared with short_strangle_delta_tp.py)
 # ------------------------------------------------------------------
 
 @lru_cache(maxsize=64)
@@ -92,8 +89,7 @@ def _apply_min_otm(chain, selected, spot, min_pct, is_call):
     if is_call:
         floor = spot * (1.0 + factor)
         if selected.strike >= floor:
-            return selected  # already far enough out
-        # find the nearest qualifying strike (lowest call strike >= floor)
+            return selected
         candidates = sorted(
             [q for q in chain if q.strike >= floor],
             key=lambda q: q.strike
@@ -101,8 +97,7 @@ def _apply_min_otm(chain, selected, spot, min_pct, is_call):
     else:
         floor = spot * (1.0 - factor)
         if selected.strike <= floor:
-            return selected  # already far enough out
-        # find the nearest qualifying strike (highest put strike <= floor)
+            return selected
         candidates = sorted(
             [q for q in chain if q.strike <= floor],
             key=lambda q: q.strike, reverse=True
@@ -114,32 +109,35 @@ def _apply_min_otm(chain, selected, spot, min_pct, is_call):
 # Strategy
 # ------------------------------------------------------------------
 
-class ShortStrangleDeltaTp:
-    """Sell N-DTE OTM strangle (delta-selected); exit on TP, SL, time exit, or expiry."""
+_OPEN_DAYS_MAP = {
+    "saturday": frozenset([5]),
+    "sunday":   frozenset([6]),
+    "both":     frozenset([5, 6]),
+}
 
-    name = "short_strangle_delta_tp"
-    DATE_RANGE = ("2025-12-11", "2026-04-10")
+
+class ShortStrangleWeekend:
+    """Sell N-DTE OTM strangle on weekend days only; exit on TP, SL, time exit, or expiry."""
+
+    name = "short_strangle_weekend"
+    DATE_RANGE = ("2025-12-11", "2026-04-15")
     DESCRIPTION = (
-        "Sells a strangle on a Deribit expiry N calendar days ahead (dte=1/2/3), "
-        "with legs chosen by target delta (e.g. delta=0.25 → 25-delta call + put). "
-        "Adds a take-profit: close when combined ask drops to (1-tp_pct) × entry premium. "
-        "TP uses raw ask prices. SL uses the same repricing as the base strategy. "
-        "One entry per day; up to dte+1 positions open concurrently. "
-        "Entries allowed 01:00–23:00 UTC. "
-        "Exits on take-profit, stop-loss, optional max hold duration, or expiry settlement."
+        "Sells a strangle on a Deribit expiry N calendar days ahead (dte=1/2), "
+        "with legs chosen by target delta, but entries are restricted to weekend days. "
+        "open_days controls which days are allowed: 'saturday', 'sunday', or 'both'. "
+        "Take-profit closes when combined ask drops to (1-tp_pct) × entry premium. "
+        "TP uses raw ask prices. SL uses mark/fair prices. "
+        "One entry per day; up to dte+1 positions open concurrently."
     )
 
     PARAM_GRID = {
-        # Discovery grid: broad, sparse — find candidate regions.
-        # Sensitivity analysis and WFO use experiment files in backtester/experiments/.
-        # 1 × 6 × 5 × 5 × 4 = 600 combos.
-        "dte":              [1],
-        "delta":            [0.05, 0.075, 0.10, 0.125, 0.15, 0.20, 0.25, 0.30],
-        "entry_hour":       [12, 14, 16, 18, 20, 22],
-        "stop_loss_pct":    [3.0, 4.0, 5.0, 6.0, 7.0],
-        "take_profit_pct":  [0.50, 0.6, 0.8, 0.80, 0.90],
-        "max_hold_hours":   [0],
-        "skip_weekends":    [1],
+        "dte":              [1,2],
+        "delta":            [0.05, 0.10, 0.15, 0.20, 0.25, 0.30],
+        "entry_hour":       [1,4,8],
+        "stop_loss_pct":    [0, 3.0, 5.0, 7.0],
+        "take_profit_pct":  [0, 0.5, 0.8],
+        "max_hold_hours":   [36],
+        "open_days":        ["sunday"],
         "min_otm_pct":      [0],
     }
 
@@ -148,11 +146,11 @@ class ShortStrangleDeltaTp:
         self._dte = 1
         self._max_concurrent = 1
         self._delta = 0.25
-        self._sl_pct = 1.0
-        self._tp_pct = 0.50
-        self._entry_hour = 10
+        self._sl_pct = 5.0
+        self._tp_pct = 0.65
+        self._entry_hour = 16
         self._max_hold_hours = 0
-        self._skip_weekends = 0
+        self._open_days = frozenset([5, 6])   # "both" by default
         self._min_otm_pct = 0
         self._last_trade_date = None  # type: Optional[Any]
         self._entry_conditions = []
@@ -164,20 +162,22 @@ class ShortStrangleDeltaTp:
         self._delta = params["delta"]
         self._sl_pct = params["stop_loss_pct"]
         self._tp_pct = params["take_profit_pct"]
-        self._entry_hour = params.get("entry_hour", 10)
+        self._entry_hour = params.get("entry_hour", 16)
         self._max_hold_hours = params.get("max_hold_hours", 0)
-        self._skip_weekends = params.get("skip_weekends", 0)
         self._min_otm_pct = params.get("min_otm_pct", 0)
         self._max_concurrent = self._dte + 1
         self._positions = []
         self._last_trade_date = None
 
+        open_days_key = params.get("open_days", "both")
+        self._open_days = _OPEN_DAYS_MAP.get(open_days_key, frozenset([5, 6]))
+
         self._entry_conditions = [
             time_window(self._entry_hour, self._entry_hour + 1),
         ]
-        self._exit_conditions = [
-            stop_loss_pct(self._sl_pct),
-        ]
+        self._exit_conditions = []
+        if self._sl_pct > 0:
+            self._exit_conditions.append(stop_loss_pct(self._sl_pct))
         if self._max_hold_hours > 0:
             self._exit_conditions.append(max_hold_hours(self._max_hold_hours))
 
@@ -209,10 +209,9 @@ class ShortStrangleDeltaTp:
         if len(self._positions) < self._max_concurrent:
             today = state.dt.date()
             if self._last_trade_date != today:
-                if self._skip_weekends and state.dt.weekday() >= 5:  # 5=Sat, 6=Sun
-                    pass
-                elif all(cond(state) for cond in self._entry_conditions):
-                    self._try_open(state)
+                if state.dt.weekday() in self._open_days:
+                    if all(cond(state) for cond in self._entry_conditions):
+                        self._try_open(state)
 
         return trades
 
@@ -231,6 +230,9 @@ class ShortStrangleDeltaTp:
 
     def describe_params(self):
         # type: () -> Dict[str, Any]
+        # Recover string label from frozenset for serialisation.
+        reverse_map = {v: k for k, v in _OPEN_DAYS_MAP.items()}
+        open_days_label = reverse_map.get(self._open_days, str(self._open_days))
         return {
             "dte":              self._dte,
             "delta":            self._delta,
@@ -238,8 +240,8 @@ class ShortStrangleDeltaTp:
             "take_profit_pct":  self._tp_pct,
             "entry_hour":       self._entry_hour,
             "max_hold_hours":   self._max_hold_hours,
-            "skip_weekends":    self._skip_weekends,
-            "min_otm_pct":     self._min_otm_pct,
+            "open_days":        open_days_label,
+            "min_otm_pct":      self._min_otm_pct,
         }
 
     # ------------------------------------------------------------------
@@ -257,11 +259,7 @@ class ShortStrangleDeltaTp:
 
     def _check_take_profit(self, state, pos):
         # type: (Any, OpenPosition) -> Optional[str]
-        """Close when combined ask cost drops to (1 - tp_pct) × entry premium.
-
-        Uses raw ask prices — no mark/fair floor.
-        Returns None if ask data is missing for either leg (skip tick).
-        """
+        """Close when combined ask cost drops to (1 - tp_pct) × entry premium."""
         if self._tp_pct <= 0:
             return None
         expiry = pos.metadata["expiry"]
@@ -270,7 +268,7 @@ class ShortStrangleDeltaTp:
         if call_q is None or put_q is None:
             return None
         if call_q.ask <= 0 or put_q.ask <= 0:
-            return None  # missing ask — skip tick
+            return None
         current_usd = call_q.ask_usd + put_q.ask_usd
         _ep = pos.entry_price_usd
         profit_ratio = (_ep - current_usd) / (_ep if _ep > 0.01 else 0.01)
@@ -301,7 +299,7 @@ class ShortStrangleDeltaTp:
             call = _apply_min_otm(calls, call, state.spot, self._min_otm_pct, is_call=True)
             put  = _apply_min_otm(puts,  put,  state.spot, self._min_otm_pct, is_call=False)
             if call is None or put is None:
-                return  # no qualifying strike this tick — skip entry
+                return
 
         if call.bid <= 0 or put.bid <= 0:
             return
@@ -359,7 +357,6 @@ class ShortStrangleDeltaTp:
             call_exit_usd = max(0.0, state.spot - call_strike)
             put_exit_usd  = max(0.0, put_strike  - state.spot)
         else:
-            # Buy back at ask; fall back to entry price on missing data.
             call_q = state.get_option(expiry, call_strike, True)
             put_q  = state.get_option(expiry, put_strike,  False)
             call_exit_usd = (call_q.ask_usd if call_q and call_q.ask > 0

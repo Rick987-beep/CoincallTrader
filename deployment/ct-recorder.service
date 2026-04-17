@@ -1,5 +1,5 @@
 # ===========================================================================
-# CoincallTrader — Deribit BTC Options Tick Recorder
+# CryoTrader — Deribit BTC Options Tick Recorder
 #
 # Runs as a persistent daemon at /opt/ct/recorder/.
 # Data written to /opt/ct/recorder/data/ (set via RECORDER_DATA_DIR in .env).
@@ -16,7 +16,7 @@
 # ===========================================================================
 
 [Unit]
-Description=CoincallTrader — Deribit Tick Recorder
+Description=CryoTrader — Deribit Tick Recorder
 After=network-online.target
 Wants=network-online.target
 

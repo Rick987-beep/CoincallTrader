@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ===========================================================================
-# CoincallTrader — Slot Deployment Script
+# CryoTrader — Slot Deployment Script
 #
 # Deploys the trading bot to named slots on the production server,
 # or deploys the hub dashboard.
@@ -483,7 +483,7 @@ cmd_recorder_status()  { check_connection; remote "sudo systemctl status ct-reco
 cmd_status_all() {
     check_connection
 
-    echo -e "${CYAN}═══ CoincallTrader — Slot Overview ═══${NC}"
+    echo -e "${CYAN}═══ CryoTrader — Slot Overview ═══${NC}"
     echo ""
 
     # Hub

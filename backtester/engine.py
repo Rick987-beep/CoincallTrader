@@ -204,6 +204,9 @@ def run_grid(
     t0 = _time.time()
     n_states = 0
     last_state = None
+    total_states = len(replay)
+    _last_print = t0
+    _print_interval = 10.0  # seconds between progress lines
 
     for state in replay:
         n_states += 1
@@ -213,10 +216,13 @@ def run_grid(
                 results[keys[i]].append(_trade_to_tuple(trade))
         last_state = state
 
-        # Progress every N states (configured in config.toml)
-        if progress and n_states % _progress_interval == 0:
-            elapsed = _time.time() - t0
-            print(f"  {n_states} states processed ({elapsed:.1f}s)...")
+        if progress:
+            _now = _time.time()
+            if _now - _last_print >= _print_interval:
+                elapsed = _now - t0
+                pct = 100.0 * n_states / total_states if total_states else 0.0
+                print(f"  {n_states}/{total_states} states ({pct:.0f}%) — {elapsed:.1f}s elapsed...")
+                _last_print = _now
 
     # Force-close any remaining positions
     if last_state is not None:
@@ -333,6 +339,9 @@ def run_grid_full(
     t0 = _time.time()
     n_states = 0
     last_state = None
+    total_states = len(replay)
+    _last_print = t0
+    _print_interval = 10.0  # seconds between progress lines
 
     for state in replay:
         n_states += 1
@@ -365,9 +374,13 @@ def run_grid_full(
                 day_close[i] = nav
         last_state = state
 
-        if progress and n_states % _progress_interval == 0:
-            elapsed = _time.time() - t0
-            print(f"  {n_states} states processed ({elapsed:.1f}s)...")
+        if progress:
+            _now = _time.time()
+            if _now - _last_print >= _print_interval:
+                elapsed = _now - t0
+                pct = 100.0 * n_states / total_states if total_states else 0.0
+                print(f"  {n_states}/{total_states} states ({pct:.0f}%) — {elapsed:.1f}s elapsed...")
+                _last_print = _now
 
     if last_state is not None:
         for i, strategy in enumerate(instances):

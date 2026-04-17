@@ -2,7 +2,7 @@
 Blueprint Strangle — Starting Template for New Strategies
 
 Copy this file and adapt it to build your own strategy.  It demonstrates
-the recommended way to use the CoincallTrader framework: declarative
+the recommended way to use the CryoTrader framework: declarative
 configuration via StrategyConfig, framework-provided entry/exit conditions,
 and the on_trade_closed callback for logging results.
 

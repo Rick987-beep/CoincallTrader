@@ -1,5 +1,5 @@
 """
-Shared test fixtures for the CoincallTrader test suite.
+Shared test fixtures for the CryoTrader test suite.
 
 Provides mock implementations of exchange adapters so the entire
 engine stack can be tested without network calls.

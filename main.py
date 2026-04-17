@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-CoincallTrader — Main Entry Point (Launcher)
+CryoTrader — Main Entry Point (Launcher)
 
 Wires all services via TradingContext, registers strategies, and runs
 the position monitor loop.  Strategy definitions live in strategies/.
@@ -413,7 +413,7 @@ def _recover_trades(ctx, runners):
 def main():
     """Start the trading system with error isolation and graceful recovery."""
     logger.info("=" * 60)
-    logger.info("CoincallTrader starting")
+    logger.info("CryoTrader starting")
     logger.info("=" * 60)
 
     try:

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-CoincallTrader — Hub Dashboard
+CryoTrader — Hub Dashboard
 
 Unified dashboard that aggregates all trading slots into a single view.
 Reads slot state from the filesystem (logs/) and sends control commands

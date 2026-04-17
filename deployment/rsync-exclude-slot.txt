@@ -1,5 +1,5 @@
 # ===========================================================================
-# CoincallTrader — rsync Exclusions for Slot Deployments
+# CryoTrader — rsync Exclusions for Slot Deployments
 #
 # Used by deploy-slot.sh when syncing the trading app to a slot.
 # Similar to rsync-exclude.txt but also excludes the hub/ directory.

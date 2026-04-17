@@ -132,7 +132,7 @@ class TelegramNotifier:
         """Send a system startup notification."""
         ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
         self.send(
-            f"🟢 <b>CoincallTrader started</b>\n"
+            f"🟢 <b>CryoTrader started</b>\n"
             f"Environment: {environment}\n"
             f"Time: {ts}"
         )
@@ -140,7 +140,7 @@ class TelegramNotifier:
     def notify_shutdown(self) -> None:
         """Send a system shutdown notification."""
         ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-        self.send(f"🔴 <b>CoincallTrader stopped</b>\nTime: {ts}")
+        self.send(f"🔴 <b>CryoTrader stopped</b>\nTime: {ts}")
 
     def notify_trade_opened(
         self,

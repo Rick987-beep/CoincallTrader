@@ -5,6 +5,55 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.15.0] - 2026-04-17
+
+### Changed — Project Renamed: CoincallTrader → CryoTrader
+
+- **All files** — Project renamed from CoincallTrader to CryoTrader throughout: module docstrings, comments, deployment scripts, service files, templates, docs, agent definitions, and `requirements.txt` header; GitHub repository renamed to match
+- **`.copilot-instructions.md`** — Updated project name and description
+
+### Added — Backtester: Walk-Forward Optimisation
+
+- **`backtester/walk_forward.py`** — `run_walk_forward()` produces a `WFOResult` with per-window `WFOWindow` records; each window slices IS/OOS periods, runs the full `PARAM_GRID` on IS, selects the best-scoring combo, then freezes that combo for an OOS evaluation; reports `oos_win_rate`, `oos_total_pnl`, `oos_avg_sharpe`, and a stitched daily OOS equity curve across all windows
+- **`backtester/run.py`** — `--wfo` flag triggers walk-forward validation and appends a WFO section to the HTML report; `--is-days`, `--oos-days`, `--step-days` control window sizes (defaults: 45/15/15)
+
+### Added — Backtester: Experiment System
+
+- **`backtester/experiment.py`** — `Experiment` dataclass loaded from TOML; `build_sensitivity_grid()` perturbs named parameters around best-known values using `DeviationSpec` (type: `pct`, `abs`, or `fixed`); WFO window params (`wfo_is_days`, `wfo_oos_days`, `wfo_step_days`) also stored per experiment
+- **`backtester/experiments/delta_strangle_tp_v1.toml`** — First experiment definition: sensitivity grid + WFO config for `ShortStrangleDeltaTp`
+- **`backtester/run.py`** — `--experiment <name>` loads a TOML experiment; `--mode sensitivity` builds the sensitivity grid (forces `--robustness`); `--mode wfo` uses experiment WFO windows
+
+### Added — Backtester: Statistical Robustness
+
+- **`backtester/robustness.py`** — `deflated_sharpe_ratio()` implements Bailey & López de Prado (2014) DSR: corrects the observed best-combo Sharpe for the number of tested combinations and for non-normality (skew + kurtosis) of trade returns; DSR ≥ 0.95 indicates strong evidence of edge; `_robustness_stats()` computes grid-wide PnL distribution and per-parameter sensitivity stats
+- **`requirements.txt`** — Added `scipy>=1.11` (required for DSR normal CDF/PPF)
+
+### Added — Backtester: Chart Module
+
+- **`backtester/reporting_charts.py`** — Pure SVG chart generators extracted from `reporting_v2.py`: `equity_chart_svg`, `fan_chart_svg`, `histogram_svg`, `marginal_bar_chart_svg`, `sparkline_svg`; all functions are stateless and return self-contained SVG strings with no external dependencies
+- **`backtester/reporting_v2.py`** — Now imports all chart functions from `reporting_charts.py`; report generation logic unchanged
+
+### Added — Backtester: Weekend Strangle Strategy
+
+- **`backtester/strategies/short_strangle_weekend.py`** (`ShortStrangleWeekend`) — Short N-DTE delta-selected strangle opened only on weekend days; `open_days` param selects `"saturday"`, `"sunday"`, or `"both"`; all other behaviour (delta selection, SL, TP, max-hold, expiry settlement) mirrors `ShortStrangleDeltaTp`; registered in CLI as `weekend_strangle`
+
+### Changed — Backtester: Short Strangle Weekly Cap
+
+- **`backtester/strategies/short_strangle_weekly_cap.py`** — Added `leg_mode` parameter: `"strangle"` (default), `"put"`, or `"call"` — allows capacity-managed single-leg selling; updated `PARAM_GRID` for broader delta/SL/TP/hold sweep focused on put-sell; extended `DATE_RANGE` to `2025-12-16 – 2026-04-15`
+
+### Fixed — LimitFillManager Grace Tick
+
+- **`trade_execution.py`** — `LimitFillManager.check()` now parks in `"pending"` for one extra tick when all phases exhaust before immediately returning `"failed"`; on the grace tick it does a final fresh poll; protects against exchange fill-reporting lag at the phase boundary where a fill arrives just after the timeout decision; field `_grace_exhausted` tracks whether the grace has been consumed
+
+### Changed — `put_sell_80dte` Mid-Price SL/TP
+
+- **`strategies/put_sell_80dte.py`** — Stop-loss and take-profit evaluation switched from fair-price to mid-price `(bid + ask) / 2`; fair-price model description removed from module docstring; behaviour is otherwise identical
+
+### Removed — Legacy Tardis Ingest Module
+
+- **`backtester/ingest/tardis/`** — Deleted (`chain.py`, `download.py`, `extract.py`, `fetch.py`, `quality_check.py`, `_validate.py`, `run_fetch.sh`); superseded by `backtester/ingest/bulkdownloadTardis/` (added in v1.13.0)
+- **`backtester/ingest/snapshot_builder.py`** — Removed from ingest subpackage; snapshot building is handled by `backtester/ingest/tickrecorder/snapshotter.py`
+
 ## [1.14.0] - 2026-04-15
 
 ### Added — Structured Logging Infrastructure
@@ -503,8 +552,8 @@ single server, each in an isolated "slot" with a centralised hub dashboard.
 
 ### Multi-Instance Deployment
 - **Separate directory pattern** — Deribit instance deploys to
-  `/opt/coincalltrader-deribit` alongside the existing Coincall instance at
-  `/opt/coincalltrader`. Each has its own systemd service, venv, and logs.
+  `/opt/cryotrader-deribit` alongside the existing Coincall instance at
+  `/opt/cryotrader`. Each has its own systemd service, venv, and logs.
 - **Dashboard port separation** — Coincall on `:8080`, Deribit on `:8081`
   (configured via `Environment=DASHBOARD_PORT=8081` in the Deribit systemd unit).
 - **Parameterized deploy script** — `deploy.sh` now reads `DEPLOY_ENV` from
@@ -520,7 +569,7 @@ single server, each in an isolated "slot" with a centralised hub dashboard.
 
 ### Added
 - `deployment/deploy-deribit.sh` — One-command deploy wrapper for Deribit
-- `deployment/coincalltrader-deribit.service` — systemd unit for Deribit instance
+- `deployment/cryotrader-deribit.service` — systemd unit for Deribit instance
 - `deployment/server-setup-deribit.sh` — VPS setup for Deribit (dir, venv, port 8081)
 - `smoke_test_deribit.py` — Production readiness check (auth, index price,
   account, instruments, strategy config) without placing orders

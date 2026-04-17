@@ -1,5 +1,5 @@
 # ===========================================================================
-# CoincallTrader — Systemd Template Unit (Slot Architecture)
+# CryoTrader — Systemd Template Unit (Slot Architecture)
 #
 # A single template that manages any slot via the %i instance specifier.
 #
@@ -18,7 +18,7 @@
 # ===========================================================================
 
 [Unit]
-Description=CoincallTrader — Slot %i
+Description=CryoTrader — Slot %i
 After=network-online.target
 Wants=network-online.target
 

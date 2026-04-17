@@ -2,7 +2,7 @@
 """
 Web Dashboard Module
 
-Lightweight Flask + htmx dashboard for CoincallTrader.
+Lightweight Flask + htmx dashboard for CryoTrader.
 Runs on a daemon thread inside the existing process — reads TradingContext
 and StrategyRunner state directly, no IPC needed.
 

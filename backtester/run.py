@@ -22,6 +22,8 @@ from backtester.market_replay import MarketReplay
 from backtester.engine import run_grid_full
 from backtester.results import GridResult
 from backtester.reporting_v2 import generate_html
+from backtester.walk_forward import run_walk_forward
+from backtester.experiment import load_experiment
 from backtester.strategies.straddle_strangle import ExtrusionStraddleStrangle
 from backtester.strategies.daily_put_sell import DailyPutSell
 from backtester.strategies.short_straddle_strangle import ShortStraddleStrangle
@@ -31,6 +33,7 @@ from backtester.strategies.deltaswipswap import DeltaSwipSwap
 from backtester.strategies.deltaswipswap1m import DeltaSwipSwap1m
 from backtester.strategies.short_strangle_weekly_tp import ShortStrangleWeeklyTp
 from backtester.strategies.short_strangle_weekly_cap import ShortStrangleWeeklyCap
+from backtester.strategies.short_strangle_weekend import ShortStrangleWeekend
 from backtester.config import cfg as _cfg
 
 # ── Strategy Registry ────────────────────────────────────────────
@@ -45,6 +48,7 @@ STRATEGIES = {
     "deltaswipswap1m": DeltaSwipSwap1m,
     "weekly_strangle_tp": ShortStrangleWeeklyTp,
     "weekly_strangle_cap": ShortStrangleWeeklyCap,
+    "weekend_strangle": ShortStrangleWeekend,
 }
 
 DEFAULT_OPTIONS = _cfg.data.options_parquet
@@ -64,9 +68,42 @@ def main():
                         help="Include robustness analysis section in report (distribution, "
                              "marginal charts, all-combos table). Off by default for "
                              "fast discovery runs.")
+    parser.add_argument("--wfo", action="store_true",
+                        help="Run walk-forward validation and append a WFO section to the "
+                             "report.  Uses DATE_RANGE from the strategy class.")
+    parser.add_argument("--is-days", type=int, default=45, metavar="N",
+                        help="In-sample window length in calendar days (default: 45).")
+    parser.add_argument("--oos-days", type=int, default=15, metavar="N",
+                        help="Out-of-sample window length in calendar days (default: 15).")
+    parser.add_argument("--step-days", type=int, default=15, metavar="N",
+                        help="Window shift per step in calendar days (default: 15).")
+    parser.add_argument("--experiment", default=None, metavar="NAME",
+                        help="Experiment name (backtester/experiments/<name>.toml). "
+                             "Use with --mode sensitivity or --mode wfo.")
+    parser.add_argument("--mode", default="discovery",
+                        choices=["discovery", "sensitivity", "wfo"],
+                        help="Run mode: discovery (full PARAM_GRID), sensitivity "
+                             "(experiment grid around best params), wfo (walk-forward).")
     args = parser.parse_args()
 
-    strategy_cls = STRATEGIES[args.strategy]
+    # ── Resolve strategy, param_grid, and WFO window params ───────
+    if args.experiment:
+        exp = load_experiment(args.experiment)
+        strategy_cls = STRATEGIES[exp.strategy]
+        if args.mode == "sensitivity":
+            param_grid = exp.build_sensitivity_grid()
+            args.robustness = True   # always include robustness for sensitivity runs
+        else:
+            param_grid = strategy_cls.PARAM_GRID
+        wfo_is_days   = exp.wfo_is_days
+        wfo_oos_days  = exp.wfo_oos_days
+        wfo_step_days = exp.wfo_step_days
+    else:
+        strategy_cls = STRATEGIES[args.strategy]
+        param_grid    = strategy_cls.PARAM_GRID
+        wfo_is_days   = args.is_days
+        wfo_oos_days  = args.oos_days
+        wfo_step_days = args.step_days
 
     print(f"\n{'='*60}")
     print(f"  Backtester V2 — {strategy_cls.name}")
@@ -82,7 +119,7 @@ def main():
     # Run grid
     t1 = time.time()
     df, keys, nav_daily_df, final_nav_df = run_grid_full(
-        strategy_cls, strategy_cls.PARAM_GRID, replay
+        strategy_cls, param_grid, replay
     )
     grid_time = time.time() - t1
 
@@ -97,29 +134,28 @@ def main():
         int(replay._spot_ts[-1]) / 1_000_000, tz=timezone.utc)
     date_range = (first_dt.strftime("%Y-%m-%d"), last_dt.strftime("%Y-%m-%d"))
 
-    # Console summary — top combos
-    totals = (
-        df.groupby("combo_idx")
-        .agg(total_pnl=("pnl", "sum"),
-             n=("pnl", "count"),
-             wins=("pnl", lambda x: (x > 0).sum()))
-        .sort_values("total_pnl", ascending=False)
-    )
-    print(f"\n  Top {_cfg.simulation.top_n_console} combos:")
-    for row in totals.head(_cfg.simulation.top_n_console).itertuples():
-        key = keys[row.Index]
-        params = dict(key)
-        wr = row.wins / row.n * 100 if row.n else 0
-        label = " | ".join(f"{k}={_fmt_val(v)}" for k, v in sorted(params.items()))
-        print(f"    {label}  →  ${row.total_pnl:,.0f}  ({row.n} trades, {wr:.0f}% win)")
-
-    # Generate HTML report
+    # Generate GridResult
+    account_size = float(_cfg.simulation.account_size_usd)
     result = GridResult(
         df, keys, nav_daily_df, final_nav_df,
-        param_grid=strategy_cls.PARAM_GRID,
-        account_size=float(_cfg.simulation.account_size_usd),
+        param_grid=param_grid,
+        account_size=account_size,
         date_range=date_range,
     )
+
+    # Walk-forward validation (optional)
+    wfo_result = None
+    if args.wfo or args.mode == "wfo":
+        wfo_result = run_walk_forward(
+            strategy_cls=strategy_cls,
+            options_path=args.options,
+            spot_path=args.spot,
+            is_days=wfo_is_days,
+            oos_days=wfo_oos_days,
+            step_days=wfo_step_days,
+            account_size=account_size,
+        )
+
     html = generate_html(
         strategy_name=strategy_cls.name,
         result=result,
@@ -127,11 +163,15 @@ def main():
         runtime_s=grid_time,
         strategy_description=getattr(strategy_cls, "DESCRIPTION", ""),
         robustness=args.robustness,
+        wfo_result=wfo_result,
     )
 
     reports_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "reports")
     os.makedirs(reports_dir, exist_ok=True)
-    output_path = args.output or os.path.join(reports_dir, f"{args.strategy}_report.html")
+    report_stem = args.experiment or args.strategy
+    if args.mode != "discovery":
+        report_stem = f"{report_stem}_{args.mode}"
+    output_path = args.output or os.path.join(reports_dir, f"{report_stem}_report.html")
     with open(output_path, "w") as f:
         f.write(html)
 

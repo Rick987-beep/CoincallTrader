@@ -28,6 +28,13 @@ from itertools import combinations
 
 from backtester.config import cfg
 from backtester.results import GridResult
+from backtester.reporting_charts import (
+    equity_chart_svg as _equity_chart_svg,
+    fan_chart_svg as _fan_chart_svg,
+    histogram_svg as _histogram_svg,
+    marginal_bar_chart_svg as _marginal_bar_chart_svg,
+    sparkline_svg as _sparkline_svg,
+)
 
 
 # ── Heatmap helpers ──────────────────────────────────────────────
@@ -113,555 +120,6 @@ def _heatmap_color(val, vmin, vmax):
     else:
         r, g = int(255 * (2 - t * 2)), 255
     return f"rgb({r},{g},80)"
-
-
-def _sparkline_svg(points, width=300, height=40):
-    if not points or len(points) < 2:
-        return ""
-    ymin, ymax = min(points), max(points)
-    if ymax == ymin:
-        ymax = ymin + 1
-    n = len(points)
-    coords = [
-        f"{i / (n-1) * width:.1f},"
-        f"{height - (y - ymin) / (ymax - ymin) * (height-4) - 2:.1f}"
-        for i, y in enumerate(points)
-    ]
-    zero_y = height - (0 - ymin) / (ymax - ymin) * (height-4) - 2
-    return (
-        f'<svg width="{width}" height="{height}" style="vertical-align:middle">'
-        f'<line x1="0" y1="{zero_y:.1f}" x2="{width}" y2="{zero_y:.1f}" '
-        f'stroke="#ccc" stroke-width="1" stroke-dasharray="4,3"/>'
-        f'<polyline points="{" ".join(coords)}" '
-        f'fill="none" stroke="#1565C0" stroke-width="2"/>'
-        f'</svg>'
-    )
-
-
-def _equity_chart_svg(daily_rows, capital=10000, width=860, height=260):
-    """Full equity curve SVG with labelled dollar Y-axis and day-number X-axis.
-
-    daily_rows: list of (date_str, day_pnl, cum_pnl, high, low, close)
-    Returns a self-contained <svg> string.
-    """
-    if not daily_rows or len(daily_rows) < 2:
-        return ""
-
-    ml, mr, mt, mb = 80, 20, 18, 36   # margins: left, right, top, bottom
-    pw = width - ml - mr
-    ph = height - mt - mb
-
-    eq_vals = [row[5] for row in daily_rows]  # close (NAV at end of day)
-    hi_vals  = [row[3] for row in daily_rows]  # intraday high
-    lo_vals  = [row[4] for row in daily_rows]  # intraday low
-    # Prepend Day 0 = initial capital so x-axis starts at 0
-    plot_vals = [capital] + eq_vals
-    plot_hi   = [capital] + hi_vals
-    plot_lo   = [capital] + lo_vals
-    n_pts = len(plot_vals)
-    # Include full intraday range and capital baseline in y-axis bounds
-    y_min = min(min(plot_lo), capital)
-    y_max = max(max(plot_hi), capital)
-    y_range = max(y_max - y_min, 1.0)
-    y_lo = y_min - y_range * 0.05
-    y_hi = y_max + y_range * 0.05
-
-    # Nice round Y-axis ticks
-    def _nice_step(span, n_ticks=6):
-        raw = span / n_ticks
-        mag = 10 ** math.floor(math.log10(max(raw, 1e-9)))
-        for f in (1, 2, 2.5, 5, 10):
-            if raw <= f * mag:
-                return f * mag
-        return 10 * mag
-
-    step = _nice_step(y_hi - y_lo)
-    first_tick = math.ceil(y_lo / step) * step
-    y_ticks = []
-    t = first_tick
-    while t <= y_hi + step * 0.01:
-        y_ticks.append(t)
-        t += step
-
-    def sx(i):    # point index (0 = Day 0) → pixel x
-        return ml + i / max(n_pts - 1, 1) * pw
-
-    def sy(v):    # equity value → pixel y
-        return mt + (1.0 - (v - y_lo) / (y_hi - y_lo)) * ph
-
-    parts = [
-        f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" '
-        f'style="display:block;font-family:-apple-system,BlinkMacSystemFont,sans-serif;'
-        f'font-size:11px;color:#333">'
-    ]
-
-    # Clip path for plot area (prevents fill/line overflow into margins)
-    parts.append(
-        f'<defs><clipPath id="plot-clip">'
-        f'<rect x="{ml}" y="{mt}" width="{pw}" height="{ph}"/>'
-        f'</clipPath></defs>'
-    )
-
-    # Plot area background
-    parts.append(
-        f'<rect x="{ml}" y="{mt}" width="{pw}" height="{ph}" '
-        f'fill="#fafafa" stroke="#ddd" stroke-width="1"/>'
-    )
-
-    # Y-axis gridlines + labels
-    for tick in y_ticks:
-        py = sy(tick)
-        if mt - 1 <= py <= mt + ph + 1:
-            parts.append(
-                f'<line x1="{ml}" y1="{py:.1f}" x2="{ml+pw}" y2="{py:.1f}" '
-                f'stroke="#e0e0e0" stroke-width="1"/>'
-            )
-            label = f"${tick:,.0f}"
-            parts.append(
-                f'<text x="{ml-6}" y="{py+4:.1f}" text-anchor="end" fill="#666">{label}</text>'
-            )
-
-    # Capital / zero-gain baseline (dashed)
-    py_cap = sy(capital)
-    if mt <= py_cap <= mt + ph:
-        parts.append(
-            f'<line x1="{ml}" y1="{py_cap:.1f}" x2="{ml+pw}" y2="{py_cap:.1f}" '
-            f'stroke="#999" stroke-width="1" stroke-dasharray="6,4"/>'
-        )
-        parts.append(
-            f'<text x="{ml+4}" y="{py_cap-4:.1f}" fill="#888" font-size="10">'
-            f'start ${capital:,.0f}</text>'
-        )
-
-    # X-axis tick labels (day number, spread evenly, ~8 labels max)
-    x_step = max(1, round(n_pts / 8))
-    for i in range(n_pts):
-        if i == 0 or i == n_pts - 1 or i % x_step == 0:
-            px = sx(i)
-            parts.append(
-                f'<line x1="{px:.1f}" y1="{mt+ph}" x2="{px:.1f}" y2="{mt+ph+4}" '
-                f'stroke="#aaa" stroke-width="1"/>'
-            )
-            parts.append(
-                f'<text x="{px:.1f}" y="{mt+ph+16}" text-anchor="middle" fill="#666">'
-                f'Day {i}</text>'
-            )
-
-    # Axis lines
-    parts.append(
-        f'<line x1="{ml}" y1="{mt}" x2="{ml}" y2="{mt+ph}" stroke="#aaa" stroke-width="1"/>'
-    )
-    parts.append(
-        f'<line x1="{ml}" y1="{mt+ph}" x2="{ml+pw}" y2="{mt+ph}" stroke="#aaa" stroke-width="1"/>'
-    )
-
-    # Axis titles
-    parts.append(
-        f'<text transform="rotate(-90)" x="-{mt+ph//2}" y="14" '
-        f'text-anchor="middle" fill="#555" font-size="11">Equity (USD)</text>'
-    )
-    parts.append(
-        f'<text x="{ml + pw // 2}" y="{height - 2}" '
-        f'text-anchor="middle" fill="#555" font-size="11">Day #</text>'
-    )
-
-    # Intraday high/low band (shaded, clipped to plot bounds)
-    band_fwd = " ".join(f"{sx(i):.1f},{sy(v):.1f}" for i, v in enumerate(plot_hi))
-    band_rev = " ".join(f"{sx(i):.1f},{sy(v):.1f}" for i, v in reversed(list(enumerate(plot_lo))))
-    parts.append(
-        f'<polygon points="{band_fwd} {band_rev}" fill="#1565C0" fill-opacity="0.08" '
-        f'clip-path="url(#plot-clip)"/>'
-    )
-
-    # Fill under curve (light blue area, clipped to plot bounds)
-    fill_pts = (
-        f"{sx(0):.1f},{sy(capital):.1f} "
-        + " ".join(f"{sx(i):.1f},{sy(v):.1f}" for i, v in enumerate(plot_vals))
-        + f" {sx(n_pts-1):.1f},{sy(capital):.1f}"
-    )
-    parts.append(
-        f'<polygon points="{fill_pts}" fill="#1565C0" fill-opacity="0.07" clip-path="url(#plot-clip)"/>'
-    )
-
-    # Equity curve line
-    line_pts = " ".join(f"{sx(i):.1f},{sy(v):.1f}" for i, v in enumerate(plot_vals))
-    parts.append(
-        f'<polyline points="{line_pts}" fill="none" stroke="#1565C0" '
-        f'stroke-width="2" stroke-linejoin="round" clip-path="url(#plot-clip)"/>'
-    )
-
-    # Final dot
-    parts.append(
-        f'<circle cx="{sx(n_pts-1):.1f}" cy="{sy(plot_vals[-1]):.1f}" r="3" '
-        f'fill="#1565C0"/>'
-    )
-
-    parts.append("</svg>")
-    return "\n".join(parts)
-
-
-# ── Performance fan chart helpers ────────────────────────────────
-
-def _lerp_color(c1, c2, t):
-    """Linearly interpolate between two '#rrggbb' hex colors."""
-    r1, g1, b1 = int(c1[1:3], 16), int(c1[3:5], 16), int(c1[5:7], 16)
-    r2, g2, b2 = int(c2[1:3], 16), int(c2[3:5], 16), int(c2[5:7], 16)
-    return (f"#{int(r1+(r2-r1)*t):02x}"
-            f"{int(g1+(g2-g1)*t):02x}"
-            f"{int(b1+(b2-b1)*t):02x}")
-
-
-def _rank_style(rank, n_curves):
-    """Return (color_hex, opacity, stroke_width) for a rank (1 = best)."""
-    if rank == 1:
-        return "#1b5e20", 1.0, 2.5
-    if rank <= 5:                                   # top-tier greens
-        t = (rank - 2) / max(3.0, 1)
-        return _lerp_color("#43a047", "#a5d6a7", t), 0.85, 1.5
-    if rank <= 12:                                  # mid-tier ambers
-        t = (rank - 6) / max(6.0, 1)
-        return _lerp_color("#fb8c00", "#ffe082", t), 0.65, 1.0
-    t = (rank - 13) / max(float(n_curves - 13), 1.0)   # bottom-tier reds
-    return _lerp_color("#e53935", "#ffcdd2", t), 0.45, 0.8
-
-
-def _fan_chart_svg(curves, capital=10000, width=920, height=340):
-    """Performance fan — all top-N equity curves in one SVG.
-
-    Three layers (bottom to top):
-      1. Shaded envelope band  — min/max range across all combos
-      2. Non-winner curves     — rank 20→2, green/amber/red gradient
-      3. Winner curve          — bold dark-green, final PnL label
-    """
-    if not curves or len(curves[0][2]) < 2:
-        return ""
-
-    n_curves = len(curves)
-    n_days   = len(curves[0][2])
-
-    ml, mr, mt, mb = 80, 30, 20, 42
-    pw = width - ml - mr
-    ph = height - mt - mb
-
-    # Axis range — include starting capital in bounds
-    all_vals = [v for _, _, eq, _ in curves for v in eq] + [float(capital)]
-    y_min, y_max = min(all_vals), max(all_vals)
-    y_range = max(y_max - y_min, 1.0)
-    y_lo = y_min - y_range * 0.06
-    y_hi = y_max + y_range * 0.08
-
-    def _nice_step(span, n_ticks=6):
-        raw = span / n_ticks
-        mag = 10 ** math.floor(math.log10(max(raw, 1e-9)))
-        for f in (1, 2, 2.5, 5, 10):
-            if raw <= f * mag:
-                return f * mag
-        return 10 * mag
-
-    step       = _nice_step(y_hi - y_lo)
-    first_tick = math.ceil(y_lo / step) * step
-    y_ticks    = []
-    t = first_tick
-    while t <= y_hi + step * 0.01:
-        y_ticks.append(t)
-        t += step
-
-    def sx(i):  return ml + i / max(n_days - 1, 1) * pw
-    def sy(v):  return mt + (1.0 - (v - y_lo) / (y_hi - y_lo)) * ph
-
-    p = []
-    p.append(
-        f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" '
-        f'style="display:block;font-family:-apple-system,BlinkMacSystemFont,sans-serif;'
-        f'font-size:11px">'
-    )
-
-    # Plot background
-    p.append(f'<rect x="{ml}" y="{mt}" width="{pw}" height="{ph}" '
-             f'fill="#fafafa" stroke="#ddd" stroke-width="1"/>')
-
-    # Y-axis gridlines + labels
-    for tick in y_ticks:
-        py = sy(tick)
-        if mt - 1 <= py <= mt + ph + 1:
-            p.append(f'<line x1="{ml}" y1="{py:.1f}" x2="{ml+pw}" y2="{py:.1f}" '
-                     f'stroke="#ececec" stroke-width="1"/>')
-            p.append(f'<text x="{ml-6}" y="{py+4:.1f}" text-anchor="end" '
-                     f'fill="#777">${tick:,.0f}</text>')
-
-    # Capital baseline (dashed)
-    py_cap = sy(capital)
-    if mt <= py_cap <= mt + ph:
-        p.append(f'<line x1="{ml}" y1="{py_cap:.1f}" x2="{ml+pw}" y2="{py_cap:.1f}" '
-                 f'stroke="#bbb" stroke-width="1" stroke-dasharray="5,4"/>')
-        p.append(f'<text x="{ml+4}" y="{py_cap-4:.1f}" fill="#aaa" font-size="10">'
-                 f'start ${capital:,.0f}</text>')
-
-    # X-axis ticks
-    x_step = max(1, round(n_days / 8))
-    for i in range(n_days):
-        if i == 0 or i == n_days - 1 or i % x_step == 0:
-            px = sx(i)
-            p.append(f'<line x1="{px:.1f}" y1="{mt+ph}" x2="{px:.1f}" y2="{mt+ph+4}" '
-                     f'stroke="#aaa" stroke-width="1"/>')
-            p.append(f'<text x="{px:.1f}" y="{mt+ph+16}" text-anchor="middle" fill="#777">'
-                     f'Day {i+1}</text>')
-
-    # ── Layer 1: Envelope band ───────────────────────────────────
-    env_top     = [max(c[2][i] for c in curves) for i in range(n_days)]
-    env_bot     = [min(c[2][i] for c in curves) for i in range(n_days)]
-    top_pts     = " ".join(f"{sx(i):.1f},{sy(v):.1f}" for i, v in enumerate(env_top))
-    bot_pts_rev = " ".join(f"{sx(i):.1f},{sy(v):.1f}"
-                           for i, v in reversed(list(enumerate(env_bot))))
-    p.append(f'<polygon points="{top_pts} {bot_pts_rev}" '
-             f'fill="#bbdefb" fill-opacity="0.35" stroke="none"/>')
-    p.append(f'<polyline points="{top_pts}" fill="none" '
-             f'stroke="#90caf9" stroke-width="0.8" stroke-opacity="0.6"/>')
-    p.append(f'<polyline points="{" ".join(f"{sx(i):.1f},{sy(v):.1f}" for i, v in enumerate(env_bot))}" '
-             f'fill="none" stroke="#90caf9" stroke-width="0.8" stroke-opacity="0.6"/>')
-
-    # ── Layer 2: Non-winner curves (worst → best order so best sits on top) ──
-    # Each curve: invisible fat hit-area overlay (12px) for hover, then visible line.
-    for rank, total_pnl, eq, tooltip in reversed(curves[1:]):
-        color, opacity, sw = _rank_style(rank, n_curves)
-        pts = " ".join(f"{sx(i):.1f},{sy(v):.1f}" for i, v in enumerate(eq))
-        # Hit area (transparent, wide enough to catch mouse)
-        p.append(f'<polyline points="{pts}" fill="none" stroke="#000" '
-                 f'stroke-width="12" stroke-opacity="0" stroke-linejoin="round">'
-                 f'<title>{tooltip}</title></polyline>')
-        # Visible line
-        p.append(f'<polyline points="{pts}" fill="none" stroke="{color}" '
-                 f'stroke-width="{sw}" stroke-opacity="{opacity}" stroke-linejoin="round"'
-                 f' pointer-events="none"/>')
-
-    # ── Layer 3: Winner ──────────────────────────────────────────
-    w_rank, w_pnl, w_eq, w_tip = curves[0]
-    w_pts = " ".join(f"{sx(i):.1f},{sy(v):.1f}" for i, v in enumerate(w_eq))
-    # Hit area
-    p.append(f'<polyline points="{w_pts}" fill="none" stroke="#000" '
-             f'stroke-width="12" stroke-opacity="0" stroke-linejoin="round">'
-             f'<title>{w_tip}</title></polyline>')
-    # Visible line
-    p.append(f'<polyline points="{w_pts}" fill="none" stroke="#1b5e20" '
-             f'stroke-width="2.5" stroke-linejoin="round" pointer-events="none"/>')
-    wx, wy = sx(n_days - 1), sy(w_eq[-1])
-    p.append(f'<circle cx="{wx:.1f}" cy="{wy:.1f}" r="4" fill="#1b5e20" pointer-events="none"/>')
-    # Label centered above the final dot, with white backing rect for legibility
-    sign = "+" if w_pnl >= 0 else ""
-    lbl_text = f"{sign}{_fmt_pnl(w_pnl)}"
-    lbl_w, lbl_h = 64, 16
-    p.append(f'<rect x="{wx - lbl_w/2:.1f}" y="{wy - 26:.1f}" width="{lbl_w}" height="{lbl_h}" '
-             f'fill="white" fill-opacity="0.85" rx="3" pointer-events="none"/>')
-    p.append(f'<text x="{wx:.1f}" y="{wy - 14:.1f}" text-anchor="middle" fill="#1b5e20" '
-             f'font-weight="bold" font-size="11" pointer-events="none">{lbl_text}</text>')
-
-    # ── Axis lines + titles ──────────────────────────────────────
-    p.append(f'<line x1="{ml}" y1="{mt}" x2="{ml}" y2="{mt+ph}" stroke="#aaa" stroke-width="1"/>')
-    p.append(f'<line x1="{ml}" y1="{mt+ph}" x2="{ml+pw}" y2="{mt+ph}" stroke="#aaa" stroke-width="1"/>')
-    p.append(f'<text transform="rotate(-90)" x="-{mt+ph//2}" y="14" '
-             f'text-anchor="middle" fill="#555" font-size="11">Equity (USD)</text>')
-    p.append(f'<text x="{ml + pw//2}" y="{height-4}" '
-             f'text-anchor="middle" fill="#555" font-size="11">Day #</text>')
-
-    # ── Legend (top-left inside plot area) ───────────────────────
-    lx, ly = ml + 10, mt + 14
-    legend = [
-        ("#1b5e20", 1.0,  2.5, False, "#1 Winner"),
-        ("#43a047", 0.85, 1.5, False, "Rank 2\u20135"),
-        ("#fb8c00", 0.65, 1.0, False, "Rank 6\u201312"),
-        ("#e53935", 0.45, 0.8, False, "Rank 13\u201320"),
-        ("#bbdefb", 0.35, 0,   True,  "Min/Max band"),
-    ]
-    leg_h = len(legend) * 16 + 8
-    p.append(f'<rect x="{lx-4}" y="{ly-12}" width="138" height="{leg_h}" '
-             f'fill="white" fill-opacity="0.88" rx="3" stroke="#ddd" stroke-width="0.5"/>')
-    for j, (color, op, sw, is_fill, lbl) in enumerate(legend):
-        yj = ly + j * 16
-        if is_fill:
-            p.append(f'<rect x="{lx}" y="{yj-6}" width="18" height="9" '
-                     f'fill="{color}" fill-opacity="{op}" stroke="#90caf9" stroke-width="0.5"/>')
-        else:
-            p.append(f'<line x1="{lx}" y1="{yj}" x2="{lx+18}" y2="{yj}" '
-                     f'stroke="{color}" stroke-width="{sw}" stroke-opacity="{op}"/>')
-            if sw > 2:
-                p.append(f'<circle cx="{lx+9}" cy="{yj}" r="2.5" fill="{color}"/>')
-        p.append(f'<text x="{lx+24}" y="{yj+4}" fill="#444" font-size="11">{lbl}</text>')
-
-    p.append("</svg>")
-    return "\n".join(p)
-
-
-# ── Robustness SVG helpers ───────────────────────────────────────
-
-def _histogram_svg(pnl_values, highlight_pnl=None, n_bins=20, width=700, height=200):
-    """Bar histogram of all combo PnLs with an optional vertical highlight marker.
-
-    pnl_values   — list of floats (one per combo)
-    highlight_pnl — if given, draw a vertical marker at this PnL (the live combo)
-    """
-    if not pnl_values:
-        return ""
-
-    pnl_min = min(pnl_values)
-    pnl_max = max(pnl_values)
-    if pnl_max == pnl_min:
-        pnl_max = pnl_min + 1
-
-    bin_w = (pnl_max - pnl_min) / n_bins
-    bins = [0] * n_bins
-    for v in pnl_values:
-        idx = min(int((v - pnl_min) / bin_w), n_bins - 1)
-        bins[idx] += 1
-
-    max_count = max(bins) if bins else 1
-
-    ml, mr, mt, mb = 50, 20, 14, 36
-    pw = width - ml - mr
-    ph = height - mt - mb
-    bar_gap = 1
-    bar_w = pw / n_bins
-
-    parts = [
-        f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" '
-        f'style="display:block;font-family:-apple-system,BlinkMacSystemFont,sans-serif;font-size:11px">'
-    ]
-
-    # Background
-    parts.append(f'<rect x="{ml}" y="{mt}" width="{pw}" height="{ph}" fill="#fafafa" stroke="#ddd" stroke-width="1"/>')
-
-    # Bars
-    for i, count in enumerate(bins):
-        x = ml + i * bar_w
-        bar_h = (count / max_count) * ph if max_count else 0
-        bin_centre = pnl_min + (i + 0.5) * bin_w
-        color = "#4caf50" if bin_centre >= 0 else "#e53935"
-        if bar_h > 0:
-            parts.append(
-                f'<rect x="{x + bar_gap:.1f}" y="{mt + ph - bar_h:.1f}" '
-                f'width="{bar_w - bar_gap * 2:.1f}" height="{bar_h:.1f}" '
-                f'fill="{color}" fill-opacity="0.75">'
-                f'<title>{count} combos  ~${bin_centre:,.0f}</title></rect>'
-            )
-
-    # Y-axis count labels (just 0 and max)
-    parts.append(f'<text x="{ml - 4}" y="{mt + ph}" text-anchor="end" fill="#888">0</text>')
-    parts.append(f'<text x="{ml - 4}" y="{mt + 8}" text-anchor="end" fill="#888">{max_count}</text>')
-
-    # X-axis ticks (min, 0 if in range, max)
-    def _sx(v):
-        return ml + (v - pnl_min) / (pnl_max - pnl_min) * pw
-
-    for label_v in [pnl_min, pnl_max]:
-        px = _sx(label_v)
-        parts.append(f'<line x1="{px:.1f}" y1="{mt+ph}" x2="{px:.1f}" y2="{mt+ph+4}" stroke="#aaa" stroke-width="1"/>')
-        parts.append(f'<text x="{px:.1f}" y="{mt+ph+16}" text-anchor="middle" fill="#666">${label_v:,.0f}</text>')
-    if pnl_min < 0 < pnl_max:
-        px0 = _sx(0)
-        parts.append(f'<line x1="{px0:.1f}" y1="{mt}" x2="{px0:.1f}" y2="{mt+ph}" stroke="#999" stroke-width="1" stroke-dasharray="4,3"/>')
-        parts.append(f'<text x="{px0:.1f}" y="{mt+ph+16}" text-anchor="middle" fill="#666">$0</text>')
-
-    # Highlight marker (live combo)
-    if highlight_pnl is not None and pnl_min <= highlight_pnl <= pnl_max:
-        hx = _sx(highlight_pnl)
-        parts.append(f'<line x1="{hx:.1f}" y1="{mt}" x2="{hx:.1f}" y2="{mt+ph}" stroke="#1565C0" stroke-width="2" stroke-dasharray="5,3"/>')
-        parts.append(f'<text x="{hx:.1f}" y="{mt - 2}" text-anchor="middle" fill="#1565C0" font-weight="bold" font-size="10">live: ${highlight_pnl:,.0f}</text>')
-
-    # Axis lines
-    parts.append(f'<line x1="{ml}" y1="{mt}" x2="{ml}" y2="{mt+ph}" stroke="#aaa" stroke-width="1"/>')
-    parts.append(f'<line x1="{ml}" y1="{mt+ph}" x2="{ml+pw}" y2="{mt+ph}" stroke="#aaa" stroke-width="1"/>')
-    parts.append(f'<text transform="rotate(-90)" x="-{mt+ph//2}" y="14" text-anchor="middle" fill="#555" font-size="11">Combos</text>')
-    parts.append(f'<text x="{ml+pw//2}" y="{height-2}" text-anchor="middle" fill="#555" font-size="11">Total PnL</text>')
-
-    parts.append("</svg>")
-    return "\n".join(parts)
-
-
-def _marginal_bar_chart_svg(sensitivity_rows, param_name, width=340, height=180):
-    """Horizontal bar chart for one parameter's marginal PnL.
-
-    sensitivity_rows — list of (value, mean_pnl, p10, p90) for each param value
-    Shows mean PnL as a bar, with a p10–p90 error band.
-    """
-    if not sensitivity_rows:
-        return ""
-
-    ml, mr, mt, mb = 80, 30, 14, 20
-    pw = width - ml - mr
-    ph = height - mt - mb
-
-    all_lo = [r[2] for r in sensitivity_rows]  # p10
-    all_hi = [r[3] for r in sensitivity_rows]  # p90
-    all_mean = [r[1] for r in sensitivity_rows]
-
-    y_lo = min(min(all_lo), 0) * 1.1 if min(all_lo) < 0 else 0
-    y_hi = max(max(all_hi), 0) * 1.1 if max(all_hi) > 0 else 1
-    if y_hi == y_lo:
-        y_hi = y_lo + 1
-
-    n = len(sensitivity_rows)
-    bar_h_px = ph / n * 0.6
-    gap_h_px = ph / n
-
-    def _sx(v):  # value → pixel x
-        return ml + (v - y_lo) / (y_hi - y_lo) * pw
-
-    def _sy(i):  # row index → pixel y centre
-        return mt + (i + 0.5) * gap_h_px
-
-    parts = [
-        f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" '
-        f'style="display:block;font-family:-apple-system,BlinkMacSystemFont,sans-serif;font-size:10px">'
-    ]
-    parts.append(f'<rect x="{ml}" y="{mt}" width="{pw}" height="{ph}" fill="#fafafa" stroke="#ddd" stroke-width="1"/>')
-
-    # Zero line
-    x0 = _sx(0)
-    if ml <= x0 <= ml + pw:
-        parts.append(f'<line x1="{x0:.1f}" y1="{mt}" x2="{x0:.1f}" y2="{mt+ph}" stroke="#bbb" stroke-width="1" stroke-dasharray="4,3"/>')
-
-    for i, (val, mean_v, p10_v, p90_v) in enumerate(sensitivity_rows):
-        cy = _sy(i)
-        x_mean = _sx(mean_v)
-        x_zero = _sx(0)
-        color = "#4caf50" if mean_v >= 0 else "#e53935"
-
-        # Bar from 0 to mean
-        bar_x = min(x_zero, x_mean)
-        bar_w_px = abs(x_mean - x_zero)
-        parts.append(
-            f'<rect x="{bar_x:.1f}" y="{cy - bar_h_px/2:.1f}" '
-            f'width="{bar_w_px:.1f}" height="{bar_h_px:.1f}" '
-            f'fill="{color}" fill-opacity="0.72"/>'
-        )
-
-        # p10-p90 error band
-        x_p10 = _sx(p10_v)
-        x_p90 = _sx(p90_v)
-        parts.append(
-            f'<line x1="{x_p10:.1f}" y1="{cy:.1f}" x2="{x_p90:.1f}" y2="{cy:.1f}" '
-            f'stroke="#555" stroke-width="1.5" opacity="0.5"/>'
-        )
-        parts.append(f'<line x1="{x_p10:.1f}" y1="{cy-4:.1f}" x2="{x_p10:.1f}" y2="{cy+4:.1f}" stroke="#555" stroke-width="1" opacity="0.5"/>')
-        parts.append(f'<line x1="{x_p90:.1f}" y1="{cy-4:.1f}" x2="{x_p90:.1f}" y2="{cy+4:.1f}" stroke="#555" stroke-width="1" opacity="0.5"/>')
-
-        # Y-axis label (param value)
-        parts.append(f'<text x="{ml-4}" y="{cy+3:.1f}" text-anchor="end" fill="#444">{_fmt_val(val)}</text>')
-
-        # Mean value label at end of bar
-        lbl_x = x_mean + (5 if mean_v >= 0 else -5)
-        anchor = "start" if mean_v >= 0 else "end"
-        parts.append(f'<text x="{lbl_x:.1f}" y="{cy+3:.1f}" text-anchor="{anchor}" fill="{color}" font-weight="600">${mean_v:,.0f}</text>')
-
-    # Axis
-    parts.append(f'<line x1="{ml}" y1="{mt}" x2="{ml}" y2="{mt+ph}" stroke="#aaa" stroke-width="1"/>')
-    parts.append(f'<line x1="{ml}" y1="{mt+ph}" x2="{ml+pw}" y2="{mt+ph}" stroke="#aaa" stroke-width="1"/>')
-
-    # Title
-    label = param_name.replace("_", " ").title()
-    parts.append(f'<text x="{ml+pw//2}" y="{mt-2}" text-anchor="middle" fill="#333" font-size="11" font-weight="600">{label}</text>')
-
-    parts.append("</svg>")
-    return "\n".join(parts)
 
 
 def _robustness_section_html(result, highlight_key=None):
@@ -878,11 +336,117 @@ th:first-child, td:first-child { text-align: left; }
 """
 
 
+# ── Walk-Forward section ─────────────────────────────────────────
+
+def _wfo_section_html(wfo_result, account_size):
+    """Render the Walk-Forward Validation section as an HTML string."""
+    from backtester.walk_forward import WFOResult  # local import to avoid circularity
+
+    parts = []
+    parts.append("<h2>Walk-Forward Validation</h2>")
+
+    n_win = len(wfo_result.windows)
+    n_oos_win = sum(1 for w in wfo_result.windows if w.oos_win)
+    wr_color = "#2e7d32" if wfo_result.oos_win_rate >= 0.67 else (
+        "#fb8c00" if wfo_result.oos_win_rate >= 0.34 else "#c62828")
+    total_pnl_cls = "pos" if wfo_result.oos_total_pnl >= 0 else "neg"
+    avg_sh_color = "#2e7d32" if wfo_result.oos_avg_sharpe >= 1.0 else (
+        "#fb8c00" if wfo_result.oos_avg_sharpe >= 0.3 else "#c62828")
+
+    parts.append(
+        f'<p style="color:#555;font-size:13px;margin:4px 0 10px">'
+        f'Parameters optimised on the in-sample (IS) period each window; '
+        f'best IS combo run frozen on out-of-sample (OOS).  '
+        f'IS={wfo_result.is_days}d / OOS={wfo_result.oos_days}d / step={wfo_result.step_days}d.</p>'
+    )
+
+    parts.append('<div class="grid-info">')
+    parts.append(
+        f'<span class="metric"><span class="metric-label">Windows</span><br>'
+        f'<span class="metric-value">{n_win}</span></span>'
+    )
+    parts.append(
+        f'<span class="metric"><span class="metric-label">OOS Win Rate</span><br>'
+        f'<span class="metric-value" style="color:{wr_color}">'
+        f'{n_oos_win}/{n_win} ({wfo_result.oos_win_rate*100:.0f}%)</span></span>'
+    )
+    parts.append(
+        f'<span class="metric"><span class="metric-label">OOS Total PnL</span><br>'
+        f'<span class="metric-value {total_pnl_cls}">'
+        f'${wfo_result.oos_total_pnl:+,.0f}</span></span>'
+    )
+    parts.append(
+        f'<span class="metric"><span class="metric-label">Avg OOS Sharpe</span><br>'
+        f'<span class="metric-value" style="color:{avg_sh_color}">'
+        f'{wfo_result.oos_avg_sharpe:.2f}</span></span>'
+    )
+    parts.append('</div>')
+
+    # OOS stitched equity chart
+    if wfo_result.oos_equity:
+        chart = _equity_chart_svg(wfo_result.oos_equity, capital=account_size)
+        parts.append(
+            f'<h3 style="margin-top:18px;margin-bottom:4px">Stitched OOS Equity Curve</h3>'
+            f'<p style="color:#555;font-size:13px;margin:0 0 6px">Each segment uses the '
+            f'IS-optimised combo, run frozen on the OOS period.</p>'
+        )
+        parts.append(f'<div style="margin-bottom:14px">{chart}</div>')
+
+    # Per-window table
+    parts.append('<h3 style="margin-top:18px">Per-Window Results</h3>')
+    # Determine param names from first window
+    param_names_wfo = sorted(wfo_result.windows[0].best_params.keys()) if wfo_result.windows else []
+    parts.append('<div class="hm-wrap"><table>')
+    hdr = (
+        '<tr><th>#</th>'
+        '<th>IS Period</th><th>OOS Period</th>'
+    )
+    for p in param_names_wfo:
+        hdr += f'<th>{_param_label(p)}</th>'
+    hdr += (
+        '<th>IS PnL</th><th>IS Trades</th><th>IS Sharpe</th>'
+        '<th>OOS PnL</th><th>OOS Trades</th><th>OOS Sharpe</th>'
+        '<th>Result</th></tr>'
+    )
+    parts.append(hdr)
+
+    for w in wfo_result.windows:
+        is_cls = _pnl_class(w.is_pnl)
+        oos_cls = _pnl_class(w.oos_pnl)
+        badge = (
+            '<span style="color:#2e7d32;font-weight:600">&#x2713; Win</span>'
+            if w.oos_win else
+            '<span style="color:#c62828;font-weight:600">&#x2717; Loss</span>'
+        )
+        row = (
+            f'<tr>'
+            f'<td>{w.idx}</td>'
+            f'<td style="white-space:nowrap">{w.is_start}<br><small>to {w.is_end}</small></td>'
+            f'<td style="white-space:nowrap">{w.oos_start}<br><small>to {w.oos_end}</small></td>'
+        )
+        for p in param_names_wfo:
+            row += f'<td>{_fmt_val(w.best_params.get(p))}</td>'
+        row += (
+            f'<td class="{is_cls}">${w.is_pnl:+,.0f}</td>'
+            f'<td>{w.is_n_trades}</td>'
+            f'<td>{w.is_sharpe:.2f}</td>'
+            f'<td class="{oos_cls}">${w.oos_pnl:+,.0f}</td>'
+            f'<td>{w.oos_n_trades}</td>'
+            f'<td>{w.oos_sharpe:.2f}</td>'
+            f'<td>{badge}</td>'
+            f'</tr>'
+        )
+        parts.append(row)
+
+    parts.append('</table></div>')
+    return "\n".join(parts)
+
+
 # ── HTML Report ──────────────────────────────────────────────────
 
 def generate_html(strategy_name, result, n_intervals, runtime_s,
                   strategy_description="", qty=1, heatmap_pairs=None,
-                  robustness=False):
+                  robustness=False, wfo_result=None):
     """Generate a self-contained HTML backtest report.
 
     Args:
@@ -897,6 +461,9 @@ def generate_html(strategy_name, result, n_intervals, runtime_s,
         robustness:           If True, include the robustness analysis section
                               (distribution histogram, marginal charts, all-combos
                               table). Off by default for fast discovery runs.
+        wfo_result:           Optional WFOResult from walk_forward.run_walk_forward.
+                              When provided, a Walk-Forward Validation section is
+                              appended before the trade log.
 
     Returns:
         Complete self-contained HTML string.
@@ -1002,6 +569,20 @@ def generate_html(strategy_name, result, n_intervals, runtime_s,
                 ("Ulcer Index", f'{best_stats.get("ulcer", 0):.1f}'),
                 ("Consistency", f'{best_stats.get("consistency", 0)*100:.0f}%'),
             ])
+        if robustness and result.dsr is not None:
+            dsr = result.dsr
+            dsr_color = "#2e7d32" if dsr >= 0.95 else ("#fb8c00" if dsr >= 0.70 else "#c62828")
+            n_trials = len(result.keys)
+            dsr_tip = (
+                f"title=\"Deflated Sharpe Ratio: probability that the best-combo Sharpe "
+                f"is genuinely positive after correcting for {n_trials:,} combos tested "
+                f"and non-normality of returns (Bailey &amp; L\\u00f3pez de Prado 2014). "
+                f"\\u2265 0.95 = strong; &lt; 0.50 = likely noise.\""
+            )
+            metrics_html.append((
+                f'DSR <span {dsr_tip} style="cursor:help">\u2139</span>',
+                f'<span style="color:{dsr_color}">{dsr:.2f}</span>',
+            ))
 
         for label, val in metrics_html:
             parts.append(
@@ -1266,6 +847,10 @@ def generate_html(strategy_name, result, n_intervals, runtime_s,
   <b>Consec Wins:</b> {eq["consec_wins"]} &nbsp;|&nbsp;
   <b>Consec Losses:</b> {eq["consec_losses"]}
 </div>""")
+
+    # ── Walk-Forward Validation section (opt-in via --wfo) ────────
+    if wfo_result is not None:
+        parts.append(_wfo_section_html(wfo_result, account_size=account_size))
 
     # ── Trade log — best combo ───────────────────────────────────
     if df_best is not None and not df_best.empty:

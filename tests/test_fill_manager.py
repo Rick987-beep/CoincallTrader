@@ -191,7 +191,8 @@ class TestLegacyMode:
         time.sleep(0.02)
         mgr.check()  # requoted (round 1)
         time.sleep(0.02)
-        result = mgr.check()
+        assert mgr.check() == "pending"  # grace tick
+        result = mgr.check()             # final: failed
         assert result == "failed"
 
 
@@ -229,7 +230,8 @@ class TestPhasedMode:
 
         # Expire the only phase
         mgr._phase_started_at = time.time() - 20
-        result = mgr.check()
+        assert mgr.check() == "pending"  # grace tick
+        result = mgr.check()             # final: failed
         assert result == "failed"
 
     def test_within_phase_reprice(self):

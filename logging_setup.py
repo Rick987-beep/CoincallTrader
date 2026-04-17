@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Logging Setup — Structured multi-track logging for CoincallTrader.
+Logging Setup — Structured multi-track logging for CryoTrader.
 
 Initialises three track loggers in the ct.* namespace, each writing
 structured JSONL to a dedicated rotating file:

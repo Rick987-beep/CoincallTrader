@@ -5,7 +5,22 @@ Implements the exchange abstraction interfaces for Deribit.
 All prices internally are BTC-denominated (Deribit native); USD conversion
 happens at adapter boundaries where the rest of the system expects USD.
 """
+# ---------------------------------------------------------------------------
+# Deribit endpoint URLs — owned by this adapter, not config.py
+# ---------------------------------------------------------------------------
+DERIBIT_URLS = {
+    'testnet': {
+        'base_url': 'https://test.deribit.com',
+    },
+    'production': {
+        'base_url': 'https://www.deribit.com',
+    },
+}
 
+
+def get_deribit_base_url(environment: str) -> str:
+    """Resolve the Deribit REST base URL for the given environment."""
+    return DERIBIT_URLS[environment]['base_url']
 from order_manager import OrderStatus
 
 # Deribit order_state (string) → internal OrderStatus

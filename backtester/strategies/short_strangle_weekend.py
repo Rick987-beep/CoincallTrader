@@ -1,17 +1,13 @@
 #!/usr/bin/env python3
-"""
-short_strangle_weekend.py — Short N-DTE strangle (delta-selected) sold on weekends only.
+"""short_strangle_weekend.py — Short N-DTE strangle (delta-selected) sold on chosen days.
 
 Based on short_strangle_delta_tp.py, with one key difference:
 
-    open_days — controls which weekend days entries are allowed:
-        "saturday"  → only Saturday  (weekday == 5)
-        "sunday"    → only Sunday    (weekday == 6)
-        "both"      → Saturday OR Sunday
+    open_days — comma-separated weekday names controlling which days
+    entries are allowed, e.g. "sunday", "saturday,sunday", "sunday,monday".
 
-The weekday filter replaces skip_weekends entirely.  All other behaviour
-(delta selection, entry window, SL, TP, max-hold, expiry settlement) is
-identical to ShortStrangleDeltaTp.
+All other behaviour (delta selection, entry window, SL, TP, max-hold,
+expiry settlement) is identical to ShortStrangleDeltaTp.
 """
 import re
 from datetime import datetime, timedelta
@@ -109,22 +105,43 @@ def _apply_min_otm(chain, selected, spot, min_pct, is_call):
 # Strategy
 # ------------------------------------------------------------------
 
-_OPEN_DAYS_MAP = {
-    "saturday": frozenset([5]),
-    "sunday":   frozenset([6]),
-    "both":     frozenset([5, 6]),
+_WEEKDAY_NAMES = {
+    "monday": 0, "tuesday": 1, "wednesday": 2, "thursday": 3,
+    "friday": 4, "saturday": 5, "sunday": 6,
 }
+_WEEKDAY_REVERSE = {v: k for k, v in _WEEKDAY_NAMES.items()}
+
+
+def _parse_open_days(value):
+    # type: (str) -> frozenset
+    """Parse comma-separated weekday names into a frozenset of ints.
+    E.g. 'sunday,monday' -> frozenset({6, 0})
+    """
+    parts = [s.strip().lower() for s in value.split(",") if s.strip()]
+    nums = []
+    for p in parts:
+        if p not in _WEEKDAY_NAMES:
+            raise ValueError(f"Unknown weekday: {p!r}")
+        nums.append(_WEEKDAY_NAMES[p])
+    return frozenset(nums)
+
+
+def _open_days_label(days_set):
+    # type: (frozenset) -> str
+    """Convert frozenset of weekday ints back to sorted comma-separated string."""
+    ordered = [0, 1, 2, 3, 4, 5, 6]
+    return ",".join(_WEEKDAY_REVERSE[d] for d in ordered if d in days_set)
 
 
 class ShortStrangleWeekend:
-    """Sell N-DTE OTM strangle on weekend days only; exit on TP, SL, time exit, or expiry."""
+    """Sell N-DTE OTM strangle on chosen days; exit on TP, SL, time exit, or expiry."""
 
     name = "short_strangle_weekend"
-    DATE_RANGE = ("2025-05-01", "2026-04-15")
+    DATE_RANGE = ("2025-11-01", "2026-04-15")
     DESCRIPTION = (
         "Sells a strangle on a Deribit expiry N calendar days ahead (dte=1/2), "
-        "with legs chosen by target delta, but entries are restricted to weekend days. "
-        "open_days controls which days are allowed: 'saturday', 'sunday', or 'both'. "
+        "with legs chosen by target delta, but entries are restricted to specific days. "
+        "open_days is a comma-separated list of weekday names (e.g. 'sunday,monday'). "
         "Take-profit closes when combined ask drops to (1-tp_pct) × entry premium. "
         "TP uses raw ask prices. SL uses mark/fair prices. "
         "One entry per day; up to dte+1 positions open concurrently."
@@ -133,10 +150,10 @@ class ShortStrangleWeekend:
     PARAM_GRID = {
         "dte":              [1],
         "delta":            [0.05, 0.10, 0.15],
-        "entry_hour":       [3,6,9,12],
-        "stop_loss_pct":    [0, 5.0, 7.0],
+        "entry_hour":       [12,15,18,21,23],
+        "stop_loss_pct":    [0, 3.0, 5.0, 7.0],
         "take_profit_pct":  [0, 0.5, 0.8],
-        "max_hold_hours":   [0,12,18,24,30],
+        "max_hold_hours":   [6,8,10,12,14,16],
         "open_days":        ["sunday"],
         "min_otm_pct":      [0],
     }
@@ -150,7 +167,7 @@ class ShortStrangleWeekend:
         self._tp_pct = 0.65
         self._entry_hour = 16
         self._max_hold_hours = 0
-        self._open_days = frozenset([5, 6])   # "both" by default
+        self._open_days = frozenset([5, 6])   # saturday,sunday by default
         self._min_otm_pct = 0
         self._last_trade_date = None  # type: Optional[Any]
         self._entry_conditions = []
@@ -169,8 +186,8 @@ class ShortStrangleWeekend:
         self._positions = []
         self._last_trade_date = None
 
-        open_days_key = params.get("open_days", "both")
-        self._open_days = _OPEN_DAYS_MAP.get(open_days_key, frozenset([5, 6]))
+        open_days_str = params.get("open_days", "saturday,sunday")
+        self._open_days = _parse_open_days(open_days_str)
 
         self._entry_conditions = [
             time_window(self._entry_hour, self._entry_hour + 1),
@@ -230,9 +247,6 @@ class ShortStrangleWeekend:
 
     def describe_params(self):
         # type: () -> Dict[str, Any]
-        # Recover string label from frozenset for serialisation.
-        reverse_map = {v: k for k, v in _OPEN_DAYS_MAP.items()}
-        open_days_label = reverse_map.get(self._open_days, str(self._open_days))
         return {
             "dte":              self._dte,
             "delta":            self._delta,
@@ -240,7 +254,7 @@ class ShortStrangleWeekend:
             "take_profit_pct":  self._tp_pct,
             "entry_hour":       self._entry_hour,
             "max_hold_hours":   self._max_hold_hours,
-            "open_days":        open_days_label,
+            "open_days":        _open_days_label(self._open_days),
             "min_otm_pct":      self._min_otm_pct,
         }
 

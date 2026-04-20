@@ -212,11 +212,21 @@ class Router:
             direction="open",
         )
 
-        result = mgr.place_all(
-            trade.open_legs,
-            lifecycle_id=trade.id,
-            purpose=OrderPurpose.OPEN_LEG,
-        )
+        try:
+            result = mgr.place_all(
+                trade.open_legs,
+                lifecycle_id=trade.id,
+                purpose=OrderPurpose.OPEN_LEG,
+            )
+        except Exception as e:
+            logger.error(f"Trade {trade.id}: open placement exception: {e}")
+            trade.error = str(e)
+            trade.state = TradeState.FAILED
+            return FillResult(
+                status=FillStatus.FAILED, legs=[],
+                phase_index=1, phase_total=1, phase_pricing="n/a",
+                elapsed_seconds=0.0, error=str(e),
+            )
 
         if result.status in (FillStatus.REFUSED, FillStatus.FAILED):
             trade.error = result.error or "Failed to place open orders"
@@ -367,12 +377,21 @@ class Router:
             direction="close",
         )
 
-        result = mgr.place_all(
-            trade.close_legs,
-            lifecycle_id=trade.id,
-            purpose=OrderPurpose.CLOSE_LEG,
-            reduce_only=True,
-        )
+        try:
+            result = mgr.place_all(
+                trade.close_legs,
+                lifecycle_id=trade.id,
+                purpose=OrderPurpose.CLOSE_LEG,
+                reduce_only=True,
+            )
+        except Exception as e:
+            logger.error(f"Trade {trade.id}: close placement exception: {e}")
+            trade.state = TradeState.PENDING_CLOSE
+            return FillResult(
+                status=FillStatus.FAILED, legs=[],
+                phase_index=1, phase_total=1, phase_pricing="n/a",
+                elapsed_seconds=0.0, error=str(e),
+            )
 
         if result.status in (FillStatus.REFUSED, FillStatus.FAILED):
             logger.error(

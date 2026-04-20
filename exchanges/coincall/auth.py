@@ -2,14 +2,16 @@
 
 from exchanges.base import ExchangeAuth
 from auth import CoincallAuth
-from config import API_KEY, API_SECRET, BASE_URL
+from config import API_KEY, API_SECRET, ENVIRONMENT
+from exchanges.coincall import get_coincall_base_url
 
 
 class CoincallAuthAdapter(ExchangeAuth):
     """Thin wrapper around CoincallAuth implementing ExchangeAuth interface."""
 
     def __init__(self):
-        self._inner = CoincallAuth(API_KEY, API_SECRET, BASE_URL)
+        base_url = get_coincall_base_url(ENVIRONMENT)
+        self._inner = CoincallAuth(API_KEY, API_SECRET, base_url)
         self.base_url = self._inner.base_url
 
     @property

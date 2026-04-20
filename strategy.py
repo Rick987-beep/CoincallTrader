@@ -110,6 +110,8 @@ def build_context(
     account_mgr = components['account_manager']
     state_map = components['state_map']
     monitor = PositionMonitor(account_manager=account_mgr, poll_interval=poll_interval, auth=auth)
+    from config import EXCHANGE
+    denomination = Currency.USD if EXCHANGE == "coincall" else Currency.BTC
     lifecycle_mgr = LifecycleEngine(
         rfq_notional_threshold=rfq_notional_threshold,
         account_manager=account_mgr,
@@ -117,7 +119,7 @@ def build_context(
         rfq_executor=rfq_executor,
         market_data=market_data_svc,
         exchange_state_map=state_map,
-        expected_denomination=Currency.BTC,
+        expected_denomination=denomination,
     )
 
     # Wire lifecycle ticks to position monitor

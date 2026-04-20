@@ -52,6 +52,9 @@ class TradeStatePersistence:
                 "entry_cost": trade.total_entry_cost() if hasattr(trade, "total_entry_cost") else 0,
                 "exit_cost": getattr(trade, "exit_cost", None),
                 "realized_pnl": getattr(trade, "realized_pnl", None),
+                "realized_pnl_gross": getattr(trade, "realized_pnl_gross", None),
+                "total_fees": float(trade.total_fees) if getattr(trade, "total_fees", None) else None,
+                "fee_denomination": trade.total_fees.currency.value if getattr(trade, "total_fees", None) else None,
                 "open_legs": [
                     {
                         "symbol": leg.symbol,

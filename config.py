@@ -1,117 +1,145 @@
 #!/usr/bin/env python3
 """
-Configuration Module
+CryoTrader — Application Configuration
 
-Centralized configuration for the Coincall trading bot.
-Supports both testnet and production environments with simple switching.
+Resolves environment variables (from .env) into typed Python constants that
+the rest of the application imports.  This module is the **single entry
+point** for three configuration axes:
 
-To switch environments:
-  Set TRADING_ENVIRONMENT variable in .env file:
-    TRADING_ENVIRONMENT=testnet   (default)
-    TRADING_ENVIRONMENT=production
+  1. DEPLOYMENT_TARGET  — 'development' (macOS local) or 'production' (VPS)
+  2. EXCHANGE           — 'coincall' or 'deribit'
+  3. ENVIRONMENT        — 'testnet' or 'production' (trading venue)
+
+Design principles:
+  • Secrets live in .env (gitignored).  This file never contains secrets.
+  • Exchange URLs are owned by their respective adapters
+    (exchanges/coincall/, exchanges/deribit/).  This module re-exports
+    BASE_URL and DERIBIT_BASE_URL for legacy callers only.
+  • Strategy parameters are NOT here — they flow through the slot system:
+    slots/slot-XX.toml → slot_config.py → .env.slot-XX → PARAM_* env vars.
+  • Execution profiles live in execution_profiles.toml.
+  • Account-to-credential mappings live in accounts.toml.
+
+Env vars consumed (all optional with defaults shown):
+  DEPLOYMENT_TARGET      = development
+  EXCHANGE               = coincall
+  TRADING_ENVIRONMENT    = testnet
+  COINCALL_API_KEY_TEST / _PROD
+  COINCALL_API_SECRET_TEST / _PROD
+  DERIBIT_CLIENT_ID_TEST / _PROD
+  DERIBIT_CLIENT_SECRET_TEST / _PROD
+  DASHBOARD_MODE         = full
+  SLOT_NAME              = (empty)
 """
 
 import os
 from dotenv import load_dotenv
 
-# Load environment variables from .env file
+# ---------------------------------------------------------------------------
+# Bootstrap: load .env before anything else reads os.getenv()
+# ---------------------------------------------------------------------------
 load_dotenv()
 
-# =============================================================================
-# DEPLOYMENT TARGET
-# =============================================================================
 
-# Deployment target: development (macOS) or production (Windows Server)
+# =============================================================================
+# 1. DEPLOYMENT TARGET
+# =============================================================================
+# 'development' — local macOS; enables stale-log cleanup, verbose logging.
+# 'production'  — VPS; disables dev-only helpers.
+
 DEPLOYMENT_TARGET = os.getenv('DEPLOYMENT_TARGET', 'development').lower()
 
 if DEPLOYMENT_TARGET not in ['development', 'production']:
     raise ValueError(f"Invalid DEPLOYMENT_TARGET: '{DEPLOYMENT_TARGET}'. Must be 'development' or 'production'")
 
-# =============================================================================
-# EXCHANGE SELECTION
-# =============================================================================
 
-# Which exchange to use: 'coincall' (default) or 'deribit' (Phase 2)
+# =============================================================================
+# 2. EXCHANGE SELECTION
+# =============================================================================
+# Determines which exchange adapter package (exchanges/coincall or
+# exchanges/deribit) is instantiated by exchanges.build_exchange().
+
 EXCHANGE = os.getenv('EXCHANGE', 'coincall').lower()
 
 if EXCHANGE not in ['coincall', 'deribit']:
     raise ValueError(f"Invalid EXCHANGE: '{EXCHANGE}'. Must be 'coincall' or 'deribit'")
 
-# =============================================================================
-# ENVIRONMENT SELECTION
-# =============================================================================
 
-# Simple environment switcher - change this or set TRADING_ENVIRONMENT in .env
+# =============================================================================
+# 3. TRADING ENVIRONMENT
+# =============================================================================
+# 'testnet'    — exchange sandbox / paper trading.
+# 'production' — real money, real exchange endpoints.
+# This controls which set of API credentials is loaded below and which
+# endpoint URLs the exchange adapters resolve.
+
 ENVIRONMENT = os.getenv('TRADING_ENVIRONMENT', 'testnet').lower()
 
 if ENVIRONMENT not in ['testnet', 'production']:
     raise ValueError(f"Invalid TRADING_ENVIRONMENT: '{ENVIRONMENT}'. Must be 'testnet' or 'production'")
 
-# =============================================================================
-# TESTNET CONFIGURATION
-# =============================================================================
 
-TESTNET = {
-    'base_url': 'https://betaapi.coincall.com',
-    'api_key': os.getenv('COINCALL_API_KEY_TEST'),
-    'api_secret': os.getenv('COINCALL_API_SECRET_TEST'),
-    'ws_options': 'wss://betaws.coincall.com/options',
-    'ws_futures': 'wss://betaws.coincall.com/futures',
-    'ws_spot': 'wss://betaws.coincall.com/spot',
+# =============================================================================
+# 4. COINCALL CREDENTIALS
+# =============================================================================
+# Keyed by ENVIRONMENT so the correct testnet/production secrets are
+# selected automatically.  The actual values come from .env.
+
+_COINCALL_CREDS = {
+    'testnet': {
+        'api_key': os.getenv('COINCALL_API_KEY_TEST'),
+        'api_secret': os.getenv('COINCALL_API_SECRET_TEST'),
+    },
+    'production': {
+        'api_key': os.getenv('COINCALL_API_KEY_PROD'),
+        'api_secret': os.getenv('COINCALL_API_SECRET_PROD'),
+    },
 }
 
-# =============================================================================
-# PRODUCTION CONFIGURATION
-# =============================================================================
+API_KEY = _COINCALL_CREDS[ENVIRONMENT]['api_key']
+API_SECRET = _COINCALL_CREDS[ENVIRONMENT]['api_secret']
 
-PRODUCTION = {
-    'base_url': 'https://api.coincall.com',
-    'api_key': os.getenv('COINCALL_API_KEY_PROD'),
-    'api_secret': os.getenv('COINCALL_API_SECRET_PROD'),
-    'ws_options': 'wss://ws.coincall.com/options',
-    'ws_futures': 'wss://ws.coincall.com/futures',
-    'ws_spot': 'wss://ws.coincall.com/spot',
+# BASE_URL: the Coincall REST endpoint.  URL ownership lives in the
+# Coincall adapter (exchanges/coincall/__init__.py); we re-export it
+# here because legacy root modules (market_data.py, rfq.py,
+# trade_execution.py, account_manager.py) still do
+# `from config import BASE_URL`.
+from exchanges.coincall import get_coincall_base_url as _get_cc_url
+BASE_URL = _get_cc_url(ENVIRONMENT)
+
+
+# =============================================================================
+# 5. DERIBIT CREDENTIALS
+# =============================================================================
+# Same pattern as Coincall: credentials from .env, URL from adapter.
+
+_DERIBIT_CREDS = {
+    'testnet': {
+        'client_id': os.getenv('DERIBIT_CLIENT_ID_TEST'),
+        'client_secret': os.getenv('DERIBIT_CLIENT_SECRET_TEST'),
+    },
+    'production': {
+        'client_id': os.getenv('DERIBIT_CLIENT_ID_PROD'),
+        'client_secret': os.getenv('DERIBIT_CLIENT_SECRET_PROD'),
+    },
 }
 
-# =============================================================================
-# ACTIVE CONFIGURATION (Selected by TRADING_ENVIRONMENT)
-# =============================================================================
+DERIBIT_CLIENT_ID = _DERIBIT_CREDS[ENVIRONMENT]['client_id']
+DERIBIT_CLIENT_SECRET = _DERIBIT_CREDS[ENVIRONMENT]['client_secret']
 
-ACTIVE_CONFIG = TESTNET if ENVIRONMENT == 'testnet' else PRODUCTION
-
-# Export commonly used values for convenience
-BASE_URL = ACTIVE_CONFIG['base_url']
-API_KEY = ACTIVE_CONFIG['api_key']
-API_SECRET = ACTIVE_CONFIG['api_secret']
-
-# =============================================================================
-# DERIBIT CONFIGURATION
-# =============================================================================
-
-DERIBIT_TESTNET = {
-    'base_url': 'https://test.deribit.com',
-    'client_id': os.getenv('DERIBIT_CLIENT_ID_TEST'),
-    'client_secret': os.getenv('DERIBIT_CLIENT_SECRET_TEST'),
-}
-
-DERIBIT_PRODUCTION = {
-    'base_url': 'https://www.deribit.com',
-    'client_id': os.getenv('DERIBIT_CLIENT_ID_PROD'),
-    'client_secret': os.getenv('DERIBIT_CLIENT_SECRET_PROD'),
-}
-
-DERIBIT_CONFIG = DERIBIT_TESTNET if ENVIRONMENT == 'testnet' else DERIBIT_PRODUCTION
-DERIBIT_BASE_URL = DERIBIT_CONFIG['base_url']
-DERIBIT_CLIENT_ID = DERIBIT_CONFIG['client_id']
-DERIBIT_CLIENT_SECRET = DERIBIT_CONFIG['client_secret']
+# DERIBIT_BASE_URL: same re-export pattern as BASE_URL above.
+from exchanges.deribit import get_deribit_base_url as _get_db_url
+DERIBIT_BASE_URL = _get_db_url(ENVIRONMENT)
 
 
 # =============================================================================
-# CONFIGURATION VALIDATION
+# 6. CONFIGURATION VALIDATION
 # =============================================================================
+# Runs on import.  Ensures the selected exchange has credentials set.
+# Fails fast so we don't discover missing keys mid-trade.
 
 def validate_config():
-    """Validate that all required configuration is present"""
+    """Raise ValueError if required API credentials for the active exchange are missing."""
     if EXCHANGE == 'coincall':
         required = {'API_KEY': API_KEY, 'API_SECRET': API_SECRET}
     else:
@@ -120,32 +148,37 @@ def validate_config():
 
     missing = [k for k, v in required.items() if not v]
     if missing:
-        env_str = f"({ENVIRONMENT} mode)" if ENVIRONMENT else ""
         raise ValueError(
-            f"Missing required API credentials for {EXCHANGE} {env_str}: {', '.join(missing)}\n"
+            f"Missing required API credentials for {EXCHANGE} "
+            f"({ENVIRONMENT} mode): {', '.join(missing)}\n"
             f"Please set environment variables in .env file."
         )
 
 
 # =============================================================================
-# DASHBOARD MODE
+# 7. DASHBOARD MODE
 # =============================================================================
+# Controls the web dashboard exposed by each slot process.
+#   'full'     — normal dashboard with UI (default for dev)
+#   'control'  — headless; only control endpoints, bound to 127.0.0.1
+#   'disabled' — no HTTP server at all
 
-# 'full' = normal dashboard with UI (default)
-# 'control' = headless mode — only control endpoints, bound to 127.0.0.1
-# 'disabled' = no dashboard at all
 DASHBOARD_MODE = os.getenv('DASHBOARD_MODE', 'full').lower()
 
 if DASHBOARD_MODE not in ['full', 'control', 'disabled']:
     raise ValueError(f"Invalid DASHBOARD_MODE: '{DASHBOARD_MODE}'. Must be 'full', 'control', or 'disabled'")
 
-# Human-readable slot name for the hub dashboard
+# Human-readable slot label shown in the hub dashboard (e.g. "Put Sell 80 DTE").
+# Set automatically by slot_config.py when generating .env.slot-XX files.
 SLOT_NAME = os.getenv('SLOT_NAME', '')
 
-# Validate on import
+
+# =============================================================================
+# 8. STARTUP VALIDATION & BANNER
+# =============================================================================
+
 validate_config()
 
-# Print configuration status
 print(f"[CONFIG] Deployment: {DEPLOYMENT_TARGET.upper()}")
 print(f"[CONFIG] Exchange: {EXCHANGE.upper()}")
 print(f"[CONFIG] Environment: {ENVIRONMENT.upper()}")

@@ -232,7 +232,12 @@ class LifecycleEngine:
         """Delegate fill-checking to FillManager."""
         mgr: Optional[FillManager] = trade.metadata.get("_open_fill_mgr")
         if mgr is None:
-            logger.error(f"Trade {trade.id}: no fill manager for OPENING state")
+            logger.error(
+                f"Trade {trade.id}: no fill manager for OPENING state "
+                f"— marking FAILED"
+            )
+            trade.error = "No fill manager — placement never completed"
+            trade.state = TradeState.FAILED
             return
 
         result = mgr.check()
@@ -418,6 +423,7 @@ class LifecycleEngine:
                     "fill_status": result.status.value,
                     "trigger": trade.metadata.get("close_trigger", ""),
                     "realized_pnl": trade.realized_pnl,
+                    "realized_pnl_gross": trade.realized_pnl_gross,
                     "duration_s": duration_s,
                     "legs": [
                         {"symbol": l.symbol, "fill_price": float(l.fill_price) if l.fill_price is not None else None, "filled_qty": l.filled_qty}
@@ -497,6 +503,7 @@ class LifecycleEngine:
             "trade_id": trade.id,
             "trigger": "expiry",
             "realized_pnl": trade.realized_pnl,
+            "realized_pnl_gross": trade.realized_pnl_gross,
             "duration_s": max(0, duration_s),
         })
         # Notification handled by strategy on_trade_closed callback

@@ -219,7 +219,8 @@ class TradeLifecycle:
     metadata: Dict[str, Any] = field(default_factory=dict)
 
     # Populated at close time — persists after positions disappear
-    realized_pnl: Optional[float] = None
+    realized_pnl: Optional[float] = None        # net (after fees)
+    realized_pnl_gross: Optional[float] = None   # gross (before fees)
     exit_cost: Optional[float] = None
 
     # Currency for this trade (detected from orderbook at open time)
@@ -329,16 +330,17 @@ class TradeLifecycle:
         """Capture realized PnL at close time.
 
         Called exactly once when the trade transitions to CLOSED.
-        Computes PnL from entry vs exit fill prices so the result
-        persists after exchange positions disappear.
+        Computes gross PnL from entry vs exit fill prices, then
+        deducts captured fees for the net figure.
 
-        PnL = -(entry_cost + exit_cost)
-        For a buy-to-open: entry_cost is positive (debit), exit_cost is
-        negative (credit from selling), so net = credit - debit.
+        gross = -(entry_cost + exit_cost)
+        net   = gross - total_fees
         """
         self.exit_cost = self.total_exit_cost()
         entry = self.total_entry_cost()
-        self.realized_pnl = -(entry + self.exit_cost)
+        self.realized_pnl_gross = -(entry + self.exit_cost)
+        fees = float(self.total_fees) if self.total_fees else 0.0
+        self.realized_pnl = self.realized_pnl_gross - fees
 
     def summary(self, account: Optional[AccountSnapshot] = None) -> str:
         legs_str = ", ".join(
@@ -372,6 +374,7 @@ class TradeLifecycle:
             "closed_at": self.closed_at,
             "error": self.error,
             "realized_pnl": self.realized_pnl,
+            "realized_pnl_gross": self.realized_pnl_gross,
             "exit_cost": self.exit_cost,
             "currency": self.currency.value if self.currency else None,
             "open_fees": self.open_fees.to_dict() if self.open_fees else None,
@@ -418,6 +421,7 @@ class TradeLifecycle:
             closed_at=data.get("closed_at"),
             error=data.get("error"),
             realized_pnl=data.get("realized_pnl"),
+            realized_pnl_gross=data.get("realized_pnl_gross"),
             exit_cost=data.get("exit_cost"),
             currency=Currency(data["currency"]) if data.get("currency") else None,
             open_fees=Price.from_dict(data["open_fees"]) if data.get("open_fees") else None,

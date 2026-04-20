@@ -5,10 +5,27 @@ Provides mock implementations of exchange adapters so the entire
 engine stack can be tested without network calls.
 """
 
+import os
 import time
 import pytest
 from dataclasses import dataclass
 from unittest.mock import MagicMock
+
+# ---------------------------------------------------------------------------
+# Test bootstrap: ensure config.py import doesn't require real secrets
+# ---------------------------------------------------------------------------
+# Many modules import `config` at import time. `config.validate_config()` fails
+# fast if required API credentials are missing. For unit tests we always use
+# mocks, so we install dummy credentials here before importing any modules that
+# transitively import `config`.
+os.environ.setdefault("DEPLOYMENT_TARGET", "development")
+os.environ.setdefault("TRADING_ENVIRONMENT", "testnet")
+os.environ.setdefault("EXCHANGE", "coincall")
+
+os.environ.setdefault("COINCALL_API_KEY_TEST", "test")
+os.environ.setdefault("COINCALL_API_SECRET_TEST", "test")
+os.environ.setdefault("DERIBIT_CLIENT_ID_TEST", "test")
+os.environ.setdefault("DERIBIT_CLIENT_SECRET_TEST", "test")
 
 from account_manager import AccountSnapshot, PositionSnapshot
 from order_manager import OrderManager

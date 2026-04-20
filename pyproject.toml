@@ -3,3 +3,5 @@ markers = [
     "live: tests that connect to a real exchange (deselected by default)",
 ]
 addopts = "-m 'not live'"
+testpaths = ["tests"]
+norecursedirs = ["archive"]

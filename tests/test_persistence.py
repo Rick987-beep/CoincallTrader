@@ -25,6 +25,9 @@ class FakeTrade:
         self.closed_at = 1000100.0
         self.hold_seconds = 90.0
         self.realized_pnl = realized_pnl
+        self.realized_pnl_gross = realized_pnl
+        self.exit_cost = -16.0
+        self.total_fees = None
         self.open_legs = [
             TradeLeg(symbol="BTCUSD-28MAR26-85000-P", qty=0.8,
                      side="sell", fill_price=50.0, filled_qty=0.8),

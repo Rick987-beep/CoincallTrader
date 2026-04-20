@@ -6,7 +6,28 @@ market_data.py, trade_execution.py, account_manager.py, rfq.py).
 These adapters implement the exchange abstraction interfaces and handle
 side encoding translation (string ↔ int).
 """
+# ---------------------------------------------------------------------------
+# Coincall endpoint URLs — owned by this adapter, not config.py
+# ---------------------------------------------------------------------------
+COINCALL_URLS = {
+    'testnet': {
+        'base_url': 'https://betaapi.coincall.com',
+        'ws_options': 'wss://betaws.coincall.com/options',
+        'ws_futures': 'wss://betaws.coincall.com/futures',
+        'ws_spot': 'wss://betaws.coincall.com/spot',
+    },
+    'production': {
+        'base_url': 'https://api.coincall.com',
+        'ws_options': 'wss://ws.coincall.com/options',
+        'ws_futures': 'wss://ws.coincall.com/futures',
+        'ws_spot': 'wss://ws.coincall.com/spot',
+    },
+}
 
+
+def get_coincall_base_url(environment: str) -> str:
+    """Resolve the Coincall REST base URL for the given environment."""
+    return COINCALL_URLS[environment]['base_url']
 from order_manager import OrderStatus
 
 # Coincall exchange state codes → internal OrderStatus

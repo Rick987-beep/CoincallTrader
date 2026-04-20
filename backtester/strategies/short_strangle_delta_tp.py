@@ -118,7 +118,7 @@ class ShortStrangleDeltaTp:
     """Sell N-DTE OTM strangle (delta-selected); exit on TP, SL, time exit, or expiry."""
 
     name = "short_strangle_delta_tp"
-    DATE_RANGE = ("2025-11-10", "2026-04-15")
+    DATE_RANGE = ("2025-10-01", "2026-04-15")
     DESCRIPTION = (
         "Sells a strangle on a Deribit expiry N calendar days ahead (dte=1/2/3), "
         "with legs chosen by target delta (e.g. delta=0.25 → 25-delta call + put). "
@@ -134,13 +134,13 @@ class ShortStrangleDeltaTp:
         # Sensitivity analysis and WFO use experiment files in backtester/experiments/.
         
         "dte":              [1],
-        "delta":            [0.10, 0.125, 0.15],
-        "entry_hour":       [14, 16, 18, 20, 22],
+        "delta":            [0.05],
+        "entry_hour":       [6,9,12,15,18],
         "stop_loss_pct":    [0, 3.0, 4.0, 5.0, 6.0],
         "take_profit_pct":  [0, 0.5, 0.90],
         "max_hold_hours":   [0],
-        "skip_weekends":    [1],
-        "min_otm_pct":      [0],
+        "skip_weekends":    [0,1],
+        "min_otm_pct":      [3,4,4.5, 5,5.5, 6],
     }
 
     def __init__(self):
@@ -269,10 +269,12 @@ class ShortStrangleDeltaTp:
         put_q  = state.get_option(expiry, pos.metadata["put_strike"], False)
         if call_q is None or put_q is None:
             return None
-        # ask == 0 means the option is essentially worthless (no market maker quoting).
-        # Treat as 0 rather than skipping — a zero ask is a genuine TP signal.
-        call_ask_usd = call_q.ask_usd if call_q.ask > 0 else 0.0
-        put_ask_usd  = put_q.ask_usd  if put_q.ask  > 0 else 0.0
+        # TP uses executable close cost (ask). If ask is missing (0), skip this
+        # tick rather than firing TP on phantom liquidity.
+        if call_q.ask <= 0 or put_q.ask <= 0:
+            return None
+        call_ask_usd = call_q.ask_usd
+        put_ask_usd  = put_q.ask_usd
         current_usd = call_ask_usd + put_ask_usd
         _ep = pos.entry_price_usd
         profit_ratio = (_ep - current_usd) / (_ep if _ep > 0.01 else 0.01)

@@ -5,6 +5,35 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.16.1] - 2026-04-20
+
+### Changed — Fee-Inclusive PnL (gross + net)
+
+- **`trade_lifecycle.py`** — `TradeLifecycle._finalize_close()` now computes:
+  - `realized_pnl_gross` (before fees)
+  - `realized_pnl` (net after deducting `total_fees`)
+- **`persistence.py`** — trade history JSONL records now include `realized_pnl_gross`, `total_fees`, and `fee_denomination`
+- **`lifecycle_engine.py`** and exchange dashboards — trade closed events now include `realized_pnl_gross` alongside net PnL
+- **Tests** — extended coverage for fee deduction and round-trip serialization
+
+### Changed — Configuration: clarified ownership and selection axes
+
+- **`config.py`** — refactored into explicit axes:
+  - `DEPLOYMENT_TARGET` (dev vs prod)
+  - `EXCHANGE` (coincall vs deribit)
+  - `ENVIRONMENT` (testnet vs production)
+  - base URLs are now resolved by exchange adapters and re-exported for legacy callers
+
+### Changed — Backtester strategies (research grid updates)
+
+- **`backtester/strategies/short_strangle_delta_tp.py`** — updated `DATE_RANGE` and `PARAM_GRID` for new research runs
+- **`backtester/strategies/short_strangle_weekend.py`** — generalized `open_days` to comma-separated weekday names and updated discovery grid
+
+### Added — Docs / operator context
+
+- **`docs/upgrades/trade-blotter.md`** — upgrade doc for durable trade history / blotter
+- **`AGENTS.md`** — high-signal “agent memory” for live trading + backtester + deploy model
+
 ## [1.16.0] - 2026-04-19
 
 ### Added — `execution/` Package (Execution Layer Refactoring Phase 1-3)

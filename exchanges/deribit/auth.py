@@ -18,7 +18,8 @@ from typing import Any, Dict, Optional
 import requests
 
 from exchanges.base import ExchangeAuth
-from config import DERIBIT_BASE_URL, DERIBIT_CLIENT_ID, DERIBIT_CLIENT_SECRET
+from config import DERIBIT_CLIENT_ID, DERIBIT_CLIENT_SECRET, ENVIRONMENT
+from exchanges.deribit import get_deribit_base_url
 from retry import retry
 
 logger = logging.getLogger(__name__)
@@ -51,7 +52,7 @@ class DeribitAuth(ExchangeAuth):
     ):
         self._client_id = client_id or DERIBIT_CLIENT_ID
         self._client_secret = client_secret or DERIBIT_CLIENT_SECRET
-        self.base_url = base_url or DERIBIT_BASE_URL
+        self.base_url = base_url or get_deribit_base_url(ENVIRONMENT)
 
         self._session = requests.Session()
         self._lock = threading.Lock()

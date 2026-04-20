@@ -139,8 +139,45 @@ class TestPnLMath:
         )
         t._finalize_close()
         # entry_cost = -100 (sell credit), exit_cost = +60 (buy debit)
-        # realized_pnl = -(entry + exit) = -(-100 + 60) = 40
+        # gross = -(entry + exit) = -(-100 + 60) = 40; no fees → net == gross
         assert t.realized_pnl == 40.0
+        assert t.realized_pnl_gross == 40.0
+
+    def test_finalize_close_deducts_fees(self):
+        from execution.currency import Price, Currency
+        t = TradeLifecycle(
+            open_legs=[
+                TradeLeg(symbol="A", qty=1.0, side="sell", fill_price=100.0, filled_qty=1.0),
+            ],
+            close_legs=[
+                TradeLeg(symbol="A", qty=1.0, side="buy", fill_price=60.0, filled_qty=1.0),
+            ],
+            open_fees=Price(3.0, Currency.USD),
+            close_fees=Price(2.5, Currency.USD),
+        )
+        t._finalize_close()
+        assert t.realized_pnl_gross == 40.0
+        assert t.realized_pnl == pytest.approx(34.5)  # 40.0 - 5.5
+
+    def test_finalize_close_deducts_btc_fees(self):
+        from execution.currency import Price, Currency
+        t = TradeLifecycle(
+            open_legs=[
+                TradeLeg(symbol="X", qty=5.0, side="sell",
+                         fill_price=Price(0.0100, Currency.BTC), filled_qty=5.0),
+            ],
+            close_legs=[
+                TradeLeg(symbol="X", qty=5.0, side="buy",
+                         fill_price=Price(0.0050, Currency.BTC), filled_qty=5.0),
+            ],
+            open_fees=Price(0.00027707, Currency.BTC),
+            close_fees=Price(0.00024293, Currency.BTC),
+        )
+        t._finalize_close()
+        # gross = -((-0.05) + 0.025) = 0.025
+        assert t.realized_pnl_gross == pytest.approx(0.025)
+        # net = 0.025 - 0.00052 = 0.02448
+        assert t.realized_pnl == pytest.approx(0.025 - 0.00052)
 
     def test_structure_pnl(self):
         pos = _make_position("A", qty=0.5, unrealized_pnl=10.0)
@@ -224,11 +261,12 @@ class TestSerialization:
     def test_realized_pnl_round_trips(self):
         t = TradeLifecycle(
             id="pnl-test", state=TradeState.CLOSED,
-            realized_pnl=42.5, exit_cost=17.3,
+            realized_pnl=42.5, realized_pnl_gross=45.0, exit_cost=17.3,
         )
         d = t.to_dict()
         restored = TradeLifecycle.from_dict(d)
         assert restored.realized_pnl == 42.5
+        assert restored.realized_pnl_gross == 45.0
         assert restored.exit_cost == 17.3
 
 
@@ -300,5 +338,6 @@ class TestPhase3PriceFillPrice:
         assert exit_ == pytest.approx(0.0050)   # buy → debit
 
         t._finalize_close()
-        # PnL = -(entry + exit) = -(-0.01 + 0.005) = 0.005
+        # PnL = -(entry + exit) = -(-0.01 + 0.005) = 0.005; no fees
         assert t.realized_pnl == pytest.approx(0.005)
+        assert t.realized_pnl_gross == pytest.approx(0.005)

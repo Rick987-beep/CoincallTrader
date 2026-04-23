@@ -14,56 +14,14 @@ Pricing modes:
     "real"  — sell at bid, buy back at ask (conservative, default)
     "bs"    — Black-Scholes with snapshot IV
 """
-import re
-from datetime import datetime, timezone
-from functools import lru_cache
 from typing import Any, Dict, List, Optional
 
+from backtester.expiry_utils import parse_expiry_date, expiry_dt_utc
 from backtester.pricing import deribit_fee_per_leg, bs_put, HOURS_PER_YEAR, EXPIRY_HOUR_UTC
 from backtester.strategy_base import (
     OpenPosition, Trade, close_trade,
     time_window, weekday_only, stop_loss_pct,
 )
-
-
-@lru_cache(maxsize=64)
-def _parse_expiry_date(expiry_code):
-    # type: (str) -> Optional[datetime]
-    """Parse Deribit expiry code like '15MAR26' to a datetime.
-
-    lru_cache: expiry codes are static strings (e.g. '28MAR26'). Without
-    caching this regex runs once per tick per open position — ~1.5M times
-    in a 560-combo grid run. With cache: at most ~30 unique codes ever seen.
-    """
-    month_map = {
-        "JAN": 1, "FEB": 2, "MAR": 3, "APR": 4,
-        "MAY": 5, "JUN": 6, "JUL": 7, "AUG": 8,
-        "SEP": 9, "OCT": 10, "NOV": 11, "DEC": 12,
-    }
-    m = re.match(r"(\d{1,2})([A-Z]{3})(\d{2})", expiry_code)
-    if not m:
-        return None
-    day = int(m.group(1))
-    month = month_map.get(m.group(2))
-    year = 2000 + int(m.group(3))
-    if month is None:
-        return None
-    return datetime(year, month, day)
-
-
-@lru_cache(maxsize=64)
-def _expiry_dt_utc(expiry_code, tzinfo):
-    # type: (str, Any) -> Optional[datetime]
-    """Return the UTC expiry deadline datetime for an expiry code.
-
-    lru_cache: called once per position open and then stored in
-    pos.metadata['expiry_dt']. The cache also speeds up _nearest_1dte_expiry
-    which calls _parse_expiry_date repeatedly across all expiries each tick.
-    """
-    exp_date = _parse_expiry_date(expiry_code)
-    if exp_date is None:
-        return None
-    return exp_date.replace(hour=EXPIRY_HOUR_UTC, tzinfo=tzinfo)
 
 
 def _nearest_1dte_expiry(state):
@@ -79,7 +37,7 @@ def _nearest_1dte_expiry(state):
     best = None
     best_diff = None
     for exp in state.expiries():
-        exp_date = _parse_expiry_date(exp)
+        exp_date = parse_expiry_date(exp)
         if exp_date is None:
             continue
         diff = (exp_date.date() - today).days
@@ -237,7 +195,7 @@ class DailyPutSell:
             entry_usd = best.bid_usd
         else:
             # BS mode
-            exp_date = _parse_expiry_date(expiry)
+            exp_date = parse_expiry_date(expiry)
             dte_h = (exp_date.replace(hour=EXPIRY_HOUR_UTC) -
                      state.dt.replace(tzinfo=None)).total_seconds() / 3600
             if dte_h <= 0:
@@ -252,7 +210,7 @@ class DailyPutSell:
 
         fees = deribit_fee_per_leg(state.spot, entry_usd)
 
-        exp_dt = _expiry_dt_utc(expiry, state.dt.tzinfo)
+        exp_dt = expiry_dt_utc(expiry, state.dt.tzinfo)
 
         self._positions.append(OpenPosition(
             entry_time=state.dt,
@@ -302,7 +260,7 @@ class DailyPutSell:
                 exit_usd = quote.mark_usd
         else:
             # BS mode
-            exp_date = _parse_expiry_date(expiry)
+            exp_date = parse_expiry_date(expiry)
             dte_h = (exp_date.replace(hour=EXPIRY_HOUR_UTC) -
                      state.dt.replace(tzinfo=None)).total_seconds() / 3600
             dte_h = max(dte_h, 0.001)

@@ -16,6 +16,26 @@ import os
 from datetime import datetime, timezone
 from typing import Dict, List, Any
 
+# Price was introduced in v1.16.0 (execution/currency.py). Import it so we can
+# detect Price objects and extract their .amount before JSON serialisation.
+try:
+    from execution.currency import Price as _Price
+except ImportError:  # pragma: no cover
+    _Price = None  # type: ignore[assignment,misc]
+
+
+def _serialise_price(value: Any) -> Any:
+    """Return a JSON-safe representation of a fill_price / fee value.
+
+    Before v1.16.0 these were plain floats.  Since v1.16.0 they are
+    ``Price`` dataclasses.  Calling ``json.dumps`` on a Price raises
+    ``TypeError: Object of type Price is not JSON serializable`` which
+    silently dropped every completed trade from trade_history.jsonl.
+    """
+    if _Price is not None and isinstance(value, _Price):
+        return value.amount  # store the numeric amount; denomination is in fee_denomination
+    return value
+
 logger = logging.getLogger(__name__)
 
 HISTORY_FILE = os.path.join("logs", "trade_history.jsonl")
@@ -53,14 +73,17 @@ class TradeStatePersistence:
                 "exit_cost": getattr(trade, "exit_cost", None),
                 "realized_pnl": getattr(trade, "realized_pnl", None),
                 "realized_pnl_gross": getattr(trade, "realized_pnl_gross", None),
-                "total_fees": float(trade.total_fees) if getattr(trade, "total_fees", None) else None,
-                "fee_denomination": trade.total_fees.currency.value if getattr(trade, "total_fees", None) else None,
+                # total_fees may be a Price object (v1.16.0+) or a plain float (legacy).
+                # Use _serialise_price to safely extract the numeric amount in both cases.
+                "total_fees": _serialise_price(trade.total_fees) if getattr(trade, "total_fees", None) else None,
+                "fee_denomination": trade.total_fees.currency.value if (getattr(trade, "total_fees", None) and hasattr(trade.total_fees, "currency")) else None,
                 "open_legs": [
                     {
                         "symbol": leg.symbol,
                         "qty": leg.qty,
                         "side": leg.side,
-                        "fill_price": leg.fill_price,
+                        # fill_price is a Price object since v1.16.0; serialise to float amount.
+                        "fill_price": _serialise_price(leg.fill_price),
                         "filled_qty": leg.filled_qty,
                     }
                     for leg in trade.open_legs
@@ -70,7 +93,8 @@ class TradeStatePersistence:
                         "symbol": leg.symbol,
                         "qty": leg.qty,
                         "side": leg.side,
-                        "fill_price": leg.fill_price,
+                        # fill_price is a Price object since v1.16.0; serialise to float amount.
+                        "fill_price": _serialise_price(leg.fill_price),
                         "filled_qty": leg.filled_qty,
                     }
                     for leg in trade.close_legs

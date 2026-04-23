@@ -359,3 +359,75 @@ def close_trade(state, pos, reason, current_usd=None, fees_close=0.0):
         entry_date=pos.entry_time.strftime("%Y-%m-%d"),
         metadata={**pos.metadata},
     )
+
+
+# ------------------------------------------------------------------
+# Short strangle helpers (shared by delta_tp, turbulence_tp,
+# weekend, weekly_tp strategies)
+# ------------------------------------------------------------------
+
+def check_expiry(state, pos):
+    # type: (Any, OpenPosition) -> Optional[str]
+    """Return 'expiry' if pos.metadata['expiry_dt'] has been reached, else None."""
+    exp_dt = pos.metadata.get("expiry_dt")
+    if exp_dt is None:
+        return None
+    return "expiry" if state.dt >= exp_dt else None
+
+
+def check_take_profit_strangle(state, pos, tp_pct):
+    # type: (Any, OpenPosition, float) -> Optional[str]
+    """Return 'take_profit' when combined buy-back cost (ask) drops to (1-tp_pct) × entry.
+
+    Reads call_strike / put_strike from pos.metadata.
+    Returns None if tp_pct <= 0, quotes are absent, or ask == 0 (no executable
+    price — skip tick rather than firing on phantom liquidity).
+    """
+    if tp_pct <= 0:
+        return None
+    expiry = pos.metadata["expiry"]
+    call_q = state.get_option(expiry, pos.metadata["call_strike"], True)
+    put_q  = state.get_option(expiry, pos.metadata["put_strike"], False)
+    if call_q is None or put_q is None:
+        return None
+    if call_q.ask <= 0 or put_q.ask <= 0:
+        return None
+    current_usd = call_q.ask_usd + put_q.ask_usd
+    profit_ratio = (pos.entry_price_usd - current_usd) / max(pos.entry_price_usd, 0.01)
+    if profit_ratio >= tp_pct:
+        return "take_profit"
+    return None
+
+
+def close_short_strangle(state, pos, reason):
+    # type: (Any, OpenPosition, str) -> Trade
+    """Build a Trade for closing a 2-leg short strangle.
+
+    On 'expiry': intrinsic settlement (call: max(0, spot-K); put: max(0, K-spot)).
+    Otherwise:   buy back at ask; fallback to Deribit min tick (0.0001 BTC) when
+                 ask is absent or zero — options are never free to close on Deribit.
+
+    The caller is responsible for appending strategy-specific keys to
+    trade.metadata after this call returns.
+    """
+    from backtester.pricing import deribit_fee_per_leg
+    expiry      = pos.metadata["expiry"]
+    call_strike = pos.metadata["call_strike"]
+    put_strike  = pos.metadata["put_strike"]
+
+    if reason == "expiry":
+        call_exit_usd = max(0.0, state.spot - call_strike)
+        put_exit_usd  = max(0.0, put_strike - state.spot)
+    else:
+        _min_tick_usd = 0.0001 * state.spot
+        call_q = state.get_option(expiry, call_strike, True)
+        put_q  = state.get_option(expiry, put_strike,  False)
+        call_exit_usd = (call_q.ask_usd if call_q and call_q.ask > 0 else _min_tick_usd)
+        put_exit_usd  = (put_q.ask_usd  if put_q  and put_q.ask  > 0 else _min_tick_usd)
+
+    exit_usd   = call_exit_usd + put_exit_usd
+    fees_close = 0.0 if reason == "expiry" else (
+        deribit_fee_per_leg(state.spot, call_exit_usd) +
+        deribit_fee_per_leg(state.spot, put_exit_usd)
+    )
+    return close_trade(state, pos, reason, exit_usd, fees_close)

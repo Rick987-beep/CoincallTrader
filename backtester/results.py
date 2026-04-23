@@ -186,9 +186,95 @@ def _all_combo_stats(df, keys, capital=10000, nav_daily_df=None, date_from=None,
     return result
 
 
+# ── Percentile rank helper (module-level, shared by scoring + recency) ────────
+
+def _prank(vals):
+    """Percentile rank: 0.0 (lowest value) → 1.0 (highest value)."""
+    n = len(vals)
+    if n == 1:
+        return [0.5]
+    order = sorted(range(n), key=lambda i: vals[i])
+    ranks = [0.0] * n
+    for pos, idx in enumerate(order):
+        ranks[idx] = pos / (n - 1)
+    return ranks
+
+
+# ── Recency Stats ─────────────────────────────────────────────────
+
+def _recency_stats(nav_daily_df, keys, date_from, date_to, capital, recency_pct):
+    """Compute per-combo Sharpe and PnL for the trailing recency window.
+
+    The window length is ``recency_pct`` × total date range so it scales with
+    the backtest length (e.g. 20% of a 100-day test = last 20 days).
+
+    Returns dict[key → {recent_sharpe, recent_pnl, recent_active_days}].
+    Returns {} when data is unavailable or recency_pct is 0.
+    """
+    if nav_daily_df is None or nav_daily_df.empty or recency_pct <= 0.0:
+        return {}
+
+    d_from = datetime.strptime(date_from, "%Y-%m-%d").date()
+    d_to   = datetime.strptime(date_to,   "%Y-%m-%d").date()
+    total_days = (d_to - d_from).days
+    if total_days < 2:
+        return {}
+
+    recency_days = max(1, int(total_days * recency_pct))
+    recency_start = d_to - timedelta(days=recency_days)
+    recency_start_str = recency_start.strftime("%Y-%m-%d")
+
+    nav = nav_daily_df.copy()
+    nav["date"] = nav["date"].astype(str)
+
+    # Build pivot for the recency window
+    nav_window = nav[nav["date"] >= recency_start_str]
+    if nav_window.empty:
+        return {}
+
+    all_dates = pd.date_range(recency_start, d_to, freq="D").strftime("%Y-%m-%d")
+
+    nav_close = nav_window.pivot(index="date", columns="combo_idx", values="nav_close")
+    nav_close = nav_close.reindex(all_dates).ffill().fillna(capital)
+
+    # Baseline: last close before the window (so first-day return is vs prior day)
+    nav_before = nav[nav["date"] < recency_start_str]
+    if not nav_before.empty:
+        last_before = (
+            nav_before.pivot(index="date", columns="combo_idx", values="nav_close")
+            .iloc[-1]
+            .reindex(nav_close.columns)
+            .fillna(capital)
+        )
+    else:
+        last_before = pd.Series(capital, index=nav_close.columns)
+
+    daily_returns = nav_close.diff()
+    daily_returns.iloc[0] = nav_close.iloc[0] - last_before
+
+    recent_pnl = daily_returns.sum()
+    avg_d = daily_returns.mean()
+    std_d = daily_returns.std(ddof=1).replace(0, np.nan)
+    recent_sharpe = (avg_d / std_d * 365 ** 0.5).fillna(0.0)
+
+    # Active days = days with non-zero NAV change (proxy for trading activity)
+    active_days = (daily_returns.abs() > 0).sum()
+
+    result = {}
+    for combo_idx, key in enumerate(keys):
+        if combo_idx not in nav_close.columns:
+            continue
+        result[key] = {
+            "recent_sharpe":      float(recent_sharpe.get(combo_idx, 0.0)),
+            "recent_pnl":         float(recent_pnl.get(combo_idx, 0.0)),
+            "recent_active_days": int(active_days.get(combo_idx, 0)),
+        }
+    return result
+
+
 # ── Combo Scoring ─────────────────────────────────────────────────
 
-def _score_combos(all_stats):
+def _score_combos(all_stats, recency_stats=None):
     """Rank combos using a percentile-weighted composite score (0–1).
 
     Each metric is percentile-ranked across eligible combos (0 = worst, 1 = best).
@@ -198,25 +284,18 @@ def _score_combos(all_stats):
     Combos below cfg.scoring.min_trades are ineligible and receive score 0.0,
     sinking them to the bottom of the ranked list.
 
-    Returns dict[key → float].
+    When recency_stats is provided, a recency overlay is blended in:
+      final_score = (1 - recency_weight) × full_score + recency_weight × recent_score
+    and optionally a hard gate vetoes combos with poor recent performance.
+
+    Returns (dict[key → float], set[gated_keys]).
     """
     sc = cfg.scoring
     items = list(all_stats.items())
     eligible = [(k, s) for k, s in items if s["n"] >= sc.min_trades]
 
     if not eligible:
-        return {k: 0.0 for k, _ in items}
-
-    def _prank(vals):
-        """Percentile rank: 0.0 (lowest value) → 1.0 (highest value)."""
-        n = len(vals)
-        if n == 1:
-            return [0.5]
-        order = sorted(range(n), key=lambda i: vals[i])
-        ranks = [0.0] * n
-        for pos, idx in enumerate(order):
-            ranks[idx] = pos / (n - 1)
-        return ranks
+        return {k: 0.0 for k, _ in items}, set()
 
     sharpe_r  = _prank([s["sharpe"]        for _, s in eligible])
     pnl_r     = _prank([s["total_pnl"]     for _, s in eligible])
@@ -227,9 +306,9 @@ def _score_combos(all_stats):
     ulcer_r   = _prank([s["ulcer"]         for _, s in eligible])   # inverted — lower is better
     consist_r = _prank([s["consistency"]   for _, s in eligible])
 
-    scores = {}
+    full_scores = {}
     for i, (k, _) in enumerate(eligible):
-        scores[k] = (
+        full_scores[k] = (
             sc.w_r_squared       * r2_r[i]
             + sc.w_sharpe        * sharpe_r[i]
             + sc.w_pnl           * pnl_r[i]
@@ -240,10 +319,63 @@ def _score_combos(all_stats):
             + sc.w_profit_factor * pf_r[i]
         )
 
+    # ── Hard recency gate ────────────────────────────────────────────────────
+    # Veto combos whose recent-window Sharpe is below the configured threshold.
+    gated_keys = set()
+    if (recency_stats
+            and sc.recency_pct > 0.0
+            and sc.recency_gate_enabled):
+        for k, _ in eligible:
+            rs = recency_stats.get(k)
+            if rs is not None and rs["recent_sharpe"] < sc.recency_gate_sharpe:
+                gated_keys.add(k)
+
+    # ── Recency overlay ──────────────────────────────────────────────────────
+    # Percentile-rank recent Sharpe and PnL across eligible (non-gated) combos,
+    # then blend into the composite score.
+    rw = sc.recency_weight if (recency_stats and sc.recency_pct > 0.0) else 0.0
+
+    recent_score_map = {}  # key → float 0–1 (or 0.5 neutral)
+    if rw > 0.0 and recency_stats:
+        # Separate combos with enough recency data for proper ranking
+        ranked_keys = []
+        ranked_sharpes = []
+        ranked_pnls = []
+        for k, _ in eligible:
+            if k in gated_keys:
+                continue
+            rs = recency_stats.get(k)
+            if rs and rs["recent_active_days"] >= sc.recency_min_trades:
+                ranked_keys.append(k)
+                ranked_sharpes.append(rs["recent_sharpe"])
+                ranked_pnls.append(rs["recent_pnl"])
+
+        if len(ranked_keys) >= 2:
+            r_sharpe_ranks = _prank(ranked_sharpes)
+            r_pnl_ranks    = _prank(ranked_pnls)
+            for i, k in enumerate(ranked_keys):
+                # Blend: 60% Sharpe-rank, 40% PnL-rank
+                recent_score_map[k] = 0.6 * r_sharpe_ranks[i] + 0.4 * r_pnl_ranks[i]
+        elif len(ranked_keys) == 1:
+            recent_score_map[ranked_keys[0]] = 0.5  # only one — neutral
+
+    # ── Assemble final scores ────────────────────────────────────────────────
+    scores = {}
+    for k, _ in eligible:
+        if k in gated_keys:
+            scores[k] = 0.0
+            continue
+        full_s = full_scores[k]
+        if rw > 0.0:
+            recent_s = recent_score_map.get(k, 0.5)  # 0.5 = neutral when data sparse
+            scores[k] = (1.0 - rw) * full_s + rw * recent_s
+        else:
+            scores[k] = full_s
+
     # Ineligible combos score 0 and sink to the bottom
     for k, _ in items:
         scores.setdefault(k, 0.0)
-    return scores
+    return scores, gated_keys
 
 
 def equity_metrics(df_combo, capital=10000, nav_daily_combo=None, date_from=None, date_to=None):
@@ -449,7 +581,26 @@ class GridResult:
             nav_daily_df=nav_daily_df,
             date_from=_d_from, date_to=_d_to,
         )
-        self.scores = _score_combos(self.all_stats)
+
+        # Recency overlay: compute per-combo stats for the trailing window
+        sc = cfg.scoring
+        self.recency_stats = _recency_stats(
+            nav_daily_df, keys, _d_from, _d_to,
+            capital=self.account_size,
+            recency_pct=sc.recency_pct,
+        )
+        # Store window metadata for reporting
+        if sc.recency_pct > 0.0 and _d_from and _d_to:
+            _d_from_dt = datetime.strptime(_d_from, "%Y-%m-%d").date()
+            _d_to_dt   = datetime.strptime(_d_to,   "%Y-%m-%d").date()
+            _total_days = (_d_to_dt - _d_from_dt).days
+            self.recency_window_days = max(1, int(_total_days * sc.recency_pct))
+        else:
+            self.recency_window_days = 0
+
+        self.scores, self.recency_gated_keys = _score_combos(
+            self.all_stats, recency_stats=self.recency_stats
+        )
         self.ranked = sorted(
             self.all_stats.items(),
             key=lambda x: self.scores[x[0]],

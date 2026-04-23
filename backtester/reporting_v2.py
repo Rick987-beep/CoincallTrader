@@ -613,6 +613,23 @@ def generate_html(strategy_name, result, n_intervals, runtime_s,
     top_n = min(20, len(ranked))
     parts.append(f'<h2>Top {top_n} Combos</h2>')
     _sc = cfg.scoring
+    # Recency description line
+    if _sc.recency_pct > 0.0:
+        _r_window = f'{_sc.recency_pct*100:.0f}% of range'
+        _r_blend  = f'{_sc.recency_weight*100:.0f}%'
+        _r_gate   = (
+            f'gate Sharpe&nbsp;&ge;&nbsp;{_sc.recency_gate_sharpe:.2f}'
+            if _sc.recency_gate_enabled else 'gate off'
+        )
+        _recency_str = (
+            f' &nbsp;|&nbsp; '
+            f'<b>Recency</b>: window&nbsp;=&nbsp;{_r_window} &middot; '
+            f'blend&nbsp;=&nbsp;{_r_blend} &middot; '
+            f'{_r_gate} &middot; '
+            f'min&nbsp;active&nbsp;days&nbsp;=&nbsp;{_sc.recency_min_trades}'
+        )
+    else:
+        _recency_str = ' &nbsp;|&nbsp; <b>Recency</b>: off'
     parts.append(
         f'<p style="color:#555;font-size:13px;margin:4px 0 8px">'
         f'Ranked by composite score &mdash; '
@@ -625,6 +642,7 @@ def generate_html(strategy_name, result, n_intervals, runtime_s,
         f'<b>Consistency</b> {_sc.w_consistency*100:.0f}% &middot; '
         f'<b>Profit&nbsp;Factor</b> {_sc.w_profit_factor*100:.0f}% &nbsp;|&nbsp; '
         f'min trades: {_sc.min_trades}'
+        f'{_recency_str}'
         f'</p>'
     )
     parts.append('<div class="hm-wrap"><table>')

@@ -530,6 +530,11 @@ class MarketReplay:
             ),
         )
 
+    def date_range(self):
+        # type: () -> Tuple[datetime, datetime]
+        """Data coverage as (start, end) UTC datetimes. Callable alias for time_range."""
+        return self.time_range
+
     def __len__(self):
         # type: () -> int
         return len(self._timestamps)

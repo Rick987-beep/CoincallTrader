@@ -33,6 +33,20 @@ import telegram_notifier
 
 
 # =============================================================================
+# Silence Telegram for all tests
+# =============================================================================
+
+@pytest.fixture(autouse=True, scope="session")
+def _silence_telegram():
+    """Replace TelegramNotifier.send with a no-op for the entire test session.
+
+    Prevents real HTTP calls to Telegram during test runs regardless of
+    whether TELEGRAM_BOT_TOKEN is set in the environment.
+    """
+    telegram_notifier.TelegramNotifier.send = lambda self, *a, **kw: False
+
+
+# =============================================================================
 # Mock Executor — records calls, returns configurable responses
 # =============================================================================
 

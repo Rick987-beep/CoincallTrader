@@ -5,6 +5,60 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.17.0] - 2026-04-23
+
+### Added — Backtester Indicators System
+
+- **`backtester/indicators.py`** — new indicator pre-computation module; strategies declare `indicator_deps` (list of `IndicatorDep`) and receive injected DataFrames via `set_indicators()`; initial implementation includes turbulence signal from 15-min klines
+- **`backtester/engine.py`** — added `_inject_indicators()`: builds all declared indicators once before the grid replay and injects into every strategy instance (both `run_grid` and `run_grid_full`)
+
+### Added — New Backtester Strategies
+
+- **`backtester/strategies/short_generic.py`** — unified short option strategy (`ShortGeneric`); supports three leg types (`strangle`, `call`, `put`) with delta-selected legs; exits on TP, SL, max-hold, or expiry; replaces `ShortStrangleDeltaTp` and `ShortStrangleOffset`
+- **`backtester/strategies/short_strangle_turbulence_tp.py`** — short strangle with turbulence indicator filter; skips entry during high-turbulence windows
+- **`backtester/strategies/long_strangle_weekend.py`** — long strangle positioned over weekends
+
+### Added — Backtester Recency Scoring
+
+- **`backtester/results.py`** — added `_recency_stats()`: computes per-combo Sharpe and PnL for a trailing window (configurable `recency_pct` × total date range); used in composite scoring to reward strategies that perform well recently; also extracted `_prank()` as a shared percentile-rank helper
+
+### Added — Shared Strategy Helpers
+
+- **`backtester/strategy_base.py`** — added `check_expiry()`, `check_take_profit_strangle()`, and `close_short_strangle()` as shared helpers for short strangle strategies; reduces duplication across `weekend`, `weekly_cap`, `deltaswipswap`, and `batman_calendar` implementations
+
+### Changed — Backtester Strategy Registry
+
+- **`backtester/run.py`** — registered `ShortGeneric` under aliases `delta_strangle_tp`, `short_option`, `short_generic`; added `turbulence_strangle_tp` and `long_strangle_weekend`; removed deleted strategy aliases `short_straddle` and `weekly_strangle_tp`
+
+### Changed — Backtester Strategy Refactors
+
+- **`backtester/strategies/short_strangle_weekend.py`** — migrated to shared `strategy_base` helpers
+- **`backtester/strategies/short_strangle_weekly_cap.py`** — migrated to shared `strategy_base` helpers
+- **`backtester/strategies/deltaswipswap.py`** — migrated to shared `strategy_base` helpers
+- **`backtester/strategies/batman_calendar.py`** — migrated to shared `strategy_base` helpers
+
+### Changed — Telegram Notifier
+
+- **`telegram_notifier.py`** — added module-level `send()` and `escape()` shortcuts for use by strategies without needing the singleton; removed `notify_trade_opened` / `notify_trade_closed` (notification is now the strategy's responsibility)
+
+### Changed — Live Strategies Cleanup
+
+- **`strategies/blueprint_strangle.py`** — updated
+- **`main.py`** — removed `atm_straddle_index_move` import (strategy retired)
+
+### Fixed — `persistence.py` Price Serialisation
+
+- **`persistence.py`** — added `_serialise_price()` helper to safely extract `.amount` from `Price` dataclass objects (introduced in v1.16.0); previously `json.dumps` raised `TypeError` on `Price` instances, silently dropping completed trades from `trade_history.jsonl`
+
+### Removed
+
+- **`backtester/strategies/short_strangle_delta_tp.py`** — replaced by `short_generic.py`
+- **`backtester/strategies/short_strangle_offset.py`** — replaced by `short_generic.py`
+- **`backtester/strategies/short_strangle_weekly_tp.py`** — consolidated into `short_strangle_weekly_cap.py`
+- **`strategies/short_strangle_delta_tp.py`** — live strategy retired
+- **`strategies/atm_straddle_index_move.py`** — live strategy retired
+- **`tests/test_short_strangle_delta_tp.py`** — replaced by `test_short_generic.py`
+
 ## [1.16.1] - 2026-04-20
 
 ### Changed — Fee-Inclusive PnL (gross + net)

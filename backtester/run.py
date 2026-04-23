@@ -26,13 +26,13 @@ from backtester.walk_forward import run_walk_forward
 from backtester.experiment import load_experiment
 from backtester.strategies.straddle_strangle import ExtrusionStraddleStrangle
 from backtester.strategies.daily_put_sell import DailyPutSell
-from backtester.strategies.short_strangle_offset import ShortStrangleOffset
-from backtester.strategies.short_strangle_delta_tp import ShortStrangleDeltaTp
+from backtester.strategies.short_generic import ShortGeneric
 from backtester.strategies.deltaswipswap import DeltaSwipSwap
-from backtester.strategies.short_strangle_weekly_tp import ShortStrangleWeeklyTp
 from backtester.strategies.short_strangle_weekly_cap import ShortStrangleWeeklyCap
 from backtester.strategies.short_strangle_weekend import ShortStrangleWeekend
 from backtester.strategies.batman_calendar import BatmanCalendar
+from backtester.strategies.short_strangle_turbulence_tp import ShortStrangleTurbulenceTp
+from backtester.strategies.long_strangle_weekend import LongStrangleWeekend
 from backtester.config import cfg as _cfg
 
 # ── Strategy Registry ────────────────────────────────────────────
@@ -40,13 +40,15 @@ from backtester.config import cfg as _cfg
 STRATEGIES = {
     "straddle": ExtrusionStraddleStrangle,
     "put_sell": DailyPutSell,
-    "short_straddle": ShortStrangleOffset,
-    "delta_strangle_tp": ShortStrangleDeltaTp,
+    "delta_strangle_tp": ShortGeneric,
+    "short_option":       ShortGeneric,
+    "short_generic":      ShortGeneric,
     "deltaswipswap": DeltaSwipSwap,
-    "weekly_strangle_tp": ShortStrangleWeeklyTp,
     "weekly_strangle_cap": ShortStrangleWeeklyCap,
     "weekend_strangle": ShortStrangleWeekend,
     "batman_calendar": BatmanCalendar,
+    "turbulence_strangle_tp": ShortStrangleTurbulenceTp,
+    "long_strangle_weekend": LongStrangleWeekend,
 }
 
 DEFAULT_OPTIONS = _cfg.data.options_parquet

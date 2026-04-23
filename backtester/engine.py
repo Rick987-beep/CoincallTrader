@@ -41,6 +41,32 @@ from typing import Any, Dict, List, Optional, Tuple, Type
 from backtester.config import cfg as _cfg
 from backtester.strategy_base import Trade, _reprice_legs
 
+
+def _inject_indicators(strategy_cls, instances, replay, progress):
+    # type: (Type, List[Any], Any, bool) -> None
+    """Pre-compute indicators declared by the strategy and inject into all instances."""
+    deps = getattr(strategy_cls, "indicator_deps", None)
+    if not deps:
+        return
+
+    from datetime import timezone
+    from backtester.indicators import build_indicators
+
+    start_dt, end_dt = replay.date_range()
+
+    if progress:
+        names = [d.name for d in deps]
+        print(f"Building indicators {names} ({start_dt.date()} → {end_dt.date()})...")
+
+    ind = build_indicators(deps, start_dt, end_dt)
+
+    for strategy in instances:
+        if hasattr(strategy, "set_indicators"):
+            strategy.set_indicators(ind)
+
+    if progress:
+        print(f"  Indicators ready: {sorted(ind.keys())}")
+
 _progress_interval = _cfg.simulation.progress_interval
 
 
@@ -197,6 +223,9 @@ def run_grid(
         instances.append(strategy)
         keys.append(_params_to_key(params))
 
+    # Inject pre-computed indicators if strategy declares dependencies
+    _inject_indicators(strategy_cls, instances, replay, progress)
+
     # Results: key → list of V1-compatible tuples
     results = {k: [] for k in keys}
 
@@ -288,6 +317,9 @@ def run_grid_full(
         strategy.configure(full_params)
         instances.append(strategy)
         keys.append(_params_to_key(params))
+
+    # Inject pre-computed indicators if strategy declares dependencies
+    _inject_indicators(strategy_cls, instances, replay, progress)
 
     # Flat lists — Trade objects are decomposed immediately and discarded
     _combo_idx = []

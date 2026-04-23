@@ -25,86 +25,22 @@ Counting:
     1 unit = 1 strangle = 1 contract per leg (call + put)
     current_open = len(self._positions)
 """
-import re
-from datetime import datetime
-from functools import lru_cache
 from typing import Any, Dict, List, Optional
 
+from backtester.bt_option_selection import select_by_delta
+from backtester.expiry_utils import parse_expiry_date, expiry_dt_utc, select_expiry_for_week
 from backtester.pricing import deribit_fee_per_leg, EXPIRY_HOUR_UTC
 from backtester.strategy_base import (
     OpenPosition, Trade, close_trade,
+    check_expiry,
     time_window, stop_loss_pct, max_hold_days,
 )
 
 
 # ------------------------------------------------------------------
-# Expiry helpers (identical to short_strangle_weekly_tp)
-# ------------------------------------------------------------------
-
-_MONTH_MAP = {
-    "JAN": 1, "FEB": 2, "MAR": 3, "APR": 4,
-    "MAY": 5, "JUN": 6, "JUL": 7, "AUG": 8,
-    "SEP": 9, "OCT": 10, "NOV": 11, "DEC": 12,
-}
-
-
-@lru_cache(maxsize=128)
-def _parse_expiry_date(expiry_code):
-    # type: (str) -> Optional[datetime]
-    m = re.match(r"(\d{1,2})([A-Z]{3})(\d{2})", expiry_code)
-    if not m:
-        return None
-    day = int(m.group(1))
-    month = _MONTH_MAP.get(m.group(2))
-    year = 2000 + int(m.group(3))
-    if month is None:
-        return None
-    return datetime(year, month, day)
-
-
-@lru_cache(maxsize=128)
-def _expiry_dt_utc(expiry_code, tzinfo):
-    # type: (str, Any) -> Optional[datetime]
-    exp_date = _parse_expiry_date(expiry_code)
-    if exp_date is None:
-        return None
-    return exp_date.replace(hour=EXPIRY_HOUR_UTC, tzinfo=tzinfo)
-
-
-def _select_expiry_for_week(state, target_weeks):
-    # type: (Any, int) -> Optional[str]
-    """Return the expiry in [target_weeks*7, target_weeks*7+6] DTE with lowest DTE."""
-    lo = target_weeks * 7
-    hi = lo + 6
-    today = state.dt.date()
-
-    best_expiry = None
-    best_dte = None
-    for exp in state.expiries():
-        exp_date = _parse_expiry_date(exp)
-        if exp_date is None:
-            continue
-        dte = (exp_date.date() - today).days
-        if lo <= dte <= hi:
-            if best_dte is None or dte < best_dte:
-                best_expiry = exp
-                best_dte = dte
-    return best_expiry
-
-
-def _select_by_delta(chain, target_delta):
-    # type: (list, float) -> Optional[Any]
-    candidates = [q for q in chain if q.delta != 0.0]
-    if not candidates:
-        candidates = chain
-    if not candidates:
-        return None
-    return min(candidates, key=lambda q: abs(q.delta - target_delta))
-
-
-# ------------------------------------------------------------------
 # Strategy
 # ------------------------------------------------------------------
+
 
 class ShortStrangleWeeklyCap:
     """Capacity-managed daily short strangle with week-bucket DTE targeting.
@@ -260,12 +196,7 @@ class ShortStrangleWeeklyCap:
 
     def _check_expiry(self, state, pos):
         # type: (Any, OpenPosition) -> Optional[str]
-        exp_dt = pos.metadata.get("expiry_dt")
-        if exp_dt is None:
-            return None
-        if state.dt >= exp_dt:
-            return "expiry"
-        return None
+        return check_expiry(state, pos)
 
     def _check_take_profit(self, state, pos):
         # type: (Any, OpenPosition) -> Optional[str]
@@ -303,7 +234,7 @@ class ShortStrangleWeeklyCap:
 
     def _try_open(self, state):
         # type: (Any) -> None
-        expiry = _select_expiry_for_week(state, self._target_weeks)
+        expiry = select_expiry_for_week(state, self._target_weeks)
         if expiry is None:
             return
 
@@ -311,16 +242,16 @@ class ShortStrangleWeeklyCap:
         if not chain:
             return
 
-        exp_dt   = _expiry_dt_utc(expiry, state.dt.tzinfo)
+        exp_dt   = expiry_dt_utc(expiry, state.dt.tzinfo)
         today    = state.dt.date()
-        exp_date = _parse_expiry_date(expiry)
+        exp_date = parse_expiry_date(expiry)
         dte      = (exp_date.date() - today).days if exp_date else None
 
         if self._leg_mode == "strangle":
             calls = [q for q in chain if q.is_call]
             puts  = [q for q in chain if not q.is_call]
-            call  = _select_by_delta(calls, +self._delta)
-            put   = _select_by_delta(puts,  -self._delta)
+            call  = select_by_delta(calls, +self._delta)
+            put   = select_by_delta(puts,  -self._delta)
             if call is None or put is None:
                 return
             if call.bid <= 0 or put.bid <= 0:
@@ -345,7 +276,7 @@ class ShortStrangleWeeklyCap:
             }
         elif self._leg_mode == "put":
             puts = [q for q in chain if not q.is_call]
-            put  = _select_by_delta(puts, -self._delta)
+            put  = select_by_delta(puts, -self._delta)
             if put is None or put.bid <= 0:
                 return
             entry_usd = put.bid_usd
@@ -363,7 +294,7 @@ class ShortStrangleWeeklyCap:
             }
         else:  # call
             calls = [q for q in chain if q.is_call]
-            call  = _select_by_delta(calls, +self._delta)
+            call  = select_by_delta(calls, +self._delta)
             if call is None or call.bid <= 0:
                 return
             entry_usd = call.bid_usd

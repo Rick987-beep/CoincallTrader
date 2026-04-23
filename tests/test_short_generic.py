@@ -1,5 +1,5 @@
 """
-Unit tests for backtester/strategies/short_strangle_delta_tp.py
+Unit tests for backtester/strategies/short_generic.py
 
 Tests cover:
     - TP fires when combined ask drops enough
@@ -17,7 +17,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from backtester.strategies.short_strangle_delta_tp import ShortStrangleDeltaTp
+from backtester.strategies.short_generic import ShortGeneric
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -110,7 +110,7 @@ def _entry_state(**kwargs):
 
 
 def _make_strategy(sl_pct=2.0, tp_pct=0.60):
-    s = ShortStrangleDeltaTp()
+    s = ShortGeneric()
     s.configure({
         "dte":             1,
         "delta":           0.25,

@@ -93,10 +93,33 @@ min_trades          = 10
 # Each metric is ranked 0→1 across all eligible combos before weighting.
 # max_dd_pct and ulcer are INVERTED (1 − rank) so lower values = better score.
 w_sharpe        = 0.15   # risk-adjusted return (higher = better)
-w_pnl           = 0.15   # total PnL (higher = better)
+w_pnl           = 0.20   # total PnL (higher = better)
 w_max_dd        = 0.15   # max drawdown % intraday (lower = better — inverted)
-w_profit_factor = 0.10   # gross win / gross loss (higher = better)
+w_profit_factor = 0.08   # gross win / gross loss (higher = better)
 w_r_squared     = 0.15   # R² of equity curve vs linear trend (higher = better)
-w_omega         = 0.10   # Omega ratio of daily returns (higher = better)
-w_ulcer         = 0.10   # Ulcer Index (lower = better — inverted)
-w_consistency   = 0.10   # fraction of calendar months with positive return (higher = better)
+w_omega         = 0.07   # Omega ratio of daily returns (higher = better)
+w_ulcer         = 0.15   # Ulcer Index (lower = better — inverted)
+w_consistency   = 0.05   # fraction of calendar months with positive return (higher = better)
+
+# ── Recency overlay ───────────────────────────────────────────────────────────
+# Treats the trailing portion of the backtest as a pseudo-OOS window.
+# The composite score is blended: (1 - recency_weight) × full_score + recency_weight × recent_score.
+# Recent score is the percentile-ranked blend of recent-window Sharpe (60%) + PnL (40%).
+# Set recency_pct = 0.0 to disable entirely.
+
+# Fraction of the total date range used as the recency window (0.0–1.0).
+# Examples: 0.10 → last 10 days of a 100-day test; last 1 day of a 10-day test.
+recency_pct         = 0.20
+
+# Weight of the recent-window score in the composite (0.0 = full-period only).
+recency_weight      = 0.30
+
+# Minimum number of active days (non-zero NAV change) required in the recency window
+# for a combo to receive a proper recent score. Combos below this get a neutral 0.5.
+recency_min_trades  = 3
+
+# Hard gate: veto combos whose recent-window Sharpe falls below this threshold.
+# Vetoed combos receive score 0.0 and sink to the bottom of the ranking.
+# Set recency_gate_enabled = false to disable the gate entirely.
+recency_gate_enabled    = true
+recency_gate_sharpe     = 0.3   # require mild positive recent Sharpe (0.0 = just profitable, 0.5 = stricter)

@@ -88,6 +88,9 @@ backtester2/snapshots/
 backtester2/tardis_options/data/
 backtester2/*_report.html
 
+# Indicator historical kline data (permanent, auto-downloaded from Binance)
+indicators/data/
+
 # Backtester artifacts (data, raw ingest, tardis downloads, reports)
 backtester/data/
 backtester/data_dte700/

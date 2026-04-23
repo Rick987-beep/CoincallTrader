@@ -1,27 +1,27 @@
 """
-Short Strangle Delta TP — N-DTE BTC Short Volatility Strategy with Take Profit
+Short Strangle Turbulence TP — N-DTE BTC Short Volatility gated by Turbulence Indicator
 
-Extends short_strangle_delta with:
+Sells a delta-selected OTM strangle, but only enters when the composite
+Turbulence score (0–100) is below TURBULENCE_THRESHOLD at the time of the
+entry tick.
 
-    1. Take-profit exit — close when combined ask cost has fallen enough
-       that profit_ratio >= TAKE_PROFIT_PCT.  Uses raw ask prices (no fair
-       floor) to match the backtester behaviour.
+Entry logic:
+    1. At entry_hour UTC, start watching on every check cycle.
+    2. Each check: composite < turbulence_threshold → open immediately.
+    3. If WATCH_HOURS elapse from entry_hour without the condition being met,
+       the day is skipped (no trade).
+    4. If the score is unavailable (network error, weekend, warmup) → fail-open
+       (treat as calm and allow entry).
 
-    2. min_otm_pct — if the delta-selected strike is closer to ATM than
-       MIN_OTM_PCT, push to the nearest qualifying OTM strike.  Blocks
-       entry entirely if no qualifying strike exists.
+Turbulence indicator:
+    - Composite 0–100 score computed from 15-min BTCUSDT klines (Binance public).
+    - Green (0–35) = calm / safe to sell.
+    - Yellow (35–65) = caution.
+    - Red (65–100) = stay out.
+    - Fetched + cached by indicators/data.py; indicator computed by indicators/turbulence.py.
 
-All other behaviour (delta selection, entry window, SL, max-hold, expiry,
-weekend filter, execution phases) is identical to ShortStrangleDelta.
-
-Exit logic:
-    1. Take-profit  — combined ask drops enough that
-                      (premium - combined_ask) / premium >= TAKE_PROFIT_PCT.
-    2. Stop-loss    — combined fair value of both legs exceeds
-                      combined_premium × (1 + STOP_LOSS_PCT).
-    3. Max hold     — position has been open MAX_HOLD_HOURS hours;
-                      set MAX_HOLD_HOURS=0 to disable (hold to expiry).
-    4. Expiry       — 08:00 UTC on the expiry date.
+Everything else (delta selection, SL, TP, max-hold, expiry, execution phases,
+Telegram notifications) is identical to short_strangle_delta_tp.
 
 Open Execution (two phases, total ≤ 60s):
     Phase 1 (30s): both legs placed at fair price.
@@ -36,16 +36,18 @@ Close Execution — Max-hold / manual (single aggressive phase, 30s):
 """
 
 import logging
+import math
 import time
 from datetime import datetime, timezone
 from typing import Optional
 
+from indicators.data import fetch_klines
+from indicators.turbulence import turbulence as _compute_turbulence
 from market_data import get_btc_index_price, get_option_details
 from option_selection import strangle
 from strategy import (
     StrategyConfig,
     max_hold_hours,
-    time_window,
     weekday_filter,
 )
 from execution.profiles import get_profile
@@ -66,17 +68,21 @@ def _p(name, default, cast=float):
 # Structure
 QTY   = _p("QTY",   1.0)            # contracts per leg (Deribit min=0.1)
 DTE   = _p("DTE",   1, int)         # calendar days to target expiry (1, 2, or 3)
-DELTA = _p("DELTA", 0.1)            # target absolute delta per leg (e.g. 0.25 → 25Δ)
+DELTA = _p("DELTA", 0.12)           # target absolute delta per leg
 
 # Scheduling
-ENTRY_HOUR      = _p("ENTRY_HOUR",      18,  int)   # UTC hour to open (one-hour window)
-WEEKEND_FILTER  = _p("WEEKEND_FILTER",  1,   int)   # 1 = block new opens on Sat/Sun (default on)
+ENTRY_HOUR      = _p("ENTRY_HOUR",     19, int)   # UTC hour to start watching
+WATCH_HOURS     = _p("WATCH_HOURS",     4, int)   # hours to wait for turbulence to drop
+WEEKEND_FILTER  = _p("WEEKEND_FILTER",  1, int)   # 1 = block new opens on Sat/Sun
+
+# Turbulence gate
+TURBULENCE_THRESHOLD = _p("TURBULENCE_THRESHOLD", 50.0)   # open only when composite < this
 
 # Risk
-STOP_LOSS_PCT    = _p("STOP_LOSS_PCT",    3.0)       # SL fires when combined fair ≥ premium × (1 + pct)
+STOP_LOSS_PCT    = _p("STOP_LOSS_PCT",    4.0)       # SL fires when combined fair ≥ premium × (1 + pct)
 TAKE_PROFIT_PCT  = _p("TAKE_PROFIT_PCT",  0.0)       # TP: close when profit ratio ≥ this (0 = disabled)
 MAX_HOLD_HOURS   = _p("MAX_HOLD_HOURS",   48, int)   # force close after N hours; 0 = disabled
-MIN_OTM_PCT      = _p("MIN_OTM_PCT",      3.0)       # min OTM distance %; 0 = disabled
+MIN_OTM_PCT      = _p("MIN_OTM_PCT",      0.0)       # min OTM distance %; 0 = disabled
 
 # Open execution
 LIMIT_OPEN_FAIR_SECONDS = _p("LIMIT_OPEN_FAIR_SECONDS", 30, int)   # Phase 1: quote at fair
@@ -94,6 +100,94 @@ MAX_CONCURRENT = DTE + 1                    # 1DTE→2, 2DTE→3, 3DTE→4 (over
 CHECK_INTERVAL = _p("CHECK_INTERVAL", 15, int)
 
 
+# ─── Turbulence Gate ────────────────────────────────────────────────────────
+
+def _turbulence_ok(dt: Optional[datetime] = None) -> bool:
+    """
+    Return True if the current turbulence composite score is below
+    TURBULENCE_THRESHOLD, or if data is unavailable (fail-open).
+
+    Uses the Binance 15m BTCUSDT klines (public, no auth required).
+    Results are cached inside indicators/data.py for the interval TTL (~5min).
+    """
+    try:
+        df_15m = fetch_klines(symbol="BTCUSDT", interval="15m", lookback_bars=1500)
+        if df_15m is None or df_15m.empty:
+            logger.warning("[TurbulenceGate] No kline data — failing open")
+            return True
+
+        df_turb = _compute_turbulence(df_15m)
+        if df_turb is None or df_turb.empty:
+            logger.warning("[TurbulenceGate] Indicator produced no output — failing open")
+            return True
+
+        if dt is None:
+            dt = datetime.now(timezone.utc)
+
+        # Look up the current hour's composite score
+        hour_ts = dt.replace(minute=0, second=0, microsecond=0)
+        if hour_ts not in df_turb.index:
+            logger.debug("[TurbulenceGate] No row for %s — failing open", hour_ts)
+            return True
+
+        composite = df_turb.loc[hour_ts, "composite"]
+
+        try:
+            if math.isnan(float(composite)):
+                logger.debug("[TurbulenceGate] composite=NaN (weekend/warmup) — failing open")
+                return True
+        except (TypeError, ValueError):
+            return True
+
+        score = float(composite)
+        ok = score < TURBULENCE_THRESHOLD
+        logger.debug(
+            "[TurbulenceGate] composite=%.1f threshold=%.1f → %s",
+            score, TURBULENCE_THRESHOLD, "OK" if ok else "BLOCKED"
+        )
+        return ok
+
+    except Exception:
+        logger.exception("[TurbulenceGate] Error evaluating turbulence — failing open")
+        return True
+
+
+# ─── Entry Condition: Turbulence-Gated Time Window ─────────────────────────
+
+def _turbulence_entry():
+    """
+    Entry condition that combines a time window with a turbulence gate.
+
+    Opens when ALL of:
+      - current UTC hour is within [ENTRY_HOUR, ENTRY_HOUR + WATCH_HOURS)
+      - turbulence composite < TURBULENCE_THRESHOLD  (fail-open on missing data)
+    """
+    label = (
+        f"turbulence_entry(hour={ENTRY_HOUR}-{ENTRY_HOUR + WATCH_HOURS}, "
+        f"threshold={TURBULENCE_THRESHOLD:.0f})"
+    )
+
+    def _check(account, trade=None):
+        now = datetime.now(timezone.utc)
+        hour = now.hour
+
+        # Outside the watch window
+        if not (ENTRY_HOUR <= hour < ENTRY_HOUR + WATCH_HOURS):
+            return False
+
+        if not _turbulence_ok(now):
+            logger.info(
+                "[TurbulenceGate] Turbulence above threshold (%.0f) at %02d:00 UTC — "
+                "waiting for next tick", TURBULENCE_THRESHOLD, hour
+            )
+            return False
+
+        return True
+
+    _check.__name__ = label
+    return _check
+
+
 # ─── Fair Price Helper ──────────────────────────────────────────────────────
 
 def _fair(symbol):
@@ -101,58 +195,31 @@ def _fair(symbol):
     """
     Compute fair price for one option leg in fill_price-native units.
 
-    On Deribit, fill_price is BTC-denominated, so BTC-native prices
-    (_mark_price_btc, _best_bid_btc, _best_ask_btc) are used.
-    On Coincall, fill_price is USD, so USD prices (markPrice, bid, ask) are used.
-
-    Returns dict with: fair, bid, ask, mark, index_price.
-    Returns None if no market data.
+    On Deribit, fill_price is BTC-denominated.
+    On Coincall, fill_price is USD.
     """
     details = get_option_details(symbol)
     if not details:
         return None
 
-    # ── Denomination selection ──────────────────────────────────────────────
-    # The presence of '_mark_price_btc' identifies the Deribit adapter, which
-    # uses BTC as the fill-price denomination.  Coincall uses USD.  Mixing
-    # denominations here would produce SL/TP thresholds that are ~70,000×
-    # too large (USD value treated as BTC), so never skip this branch check.
     if "_mark_price_btc" in details:
-        # Deribit: all prices are BTC-native (correct fill denomination).
         bid  = float(details.get("_best_bid_btc",   0) or 0)
         ask  = float(details.get("_best_ask_btc",   0) or 0)
         mark = float(details.get("_mark_price_btc", 0) or 0)
     else:
-        # Coincall: all prices are USD-native.
         bid  = float(details.get("bid",       0) or 0)
         ask  = float(details.get("ask",       0) or 0)
         mark = float(details.get("markPrice", 0) or 0)
 
-    # ── Compute fair value ────────────────────────────────────────────────────
-    # This fair value is used for SL/TP condition DETECTION only — it is NOT
-    # used for order price computation (that is handled by LimitFillManager).
-    #
-    # Missing-data cases (ordered by data availability):
-    #   bid > 0 and ask > 0 — full book: mark if inside spread, else midpoint.
-    #   bid > 0, ask = 0    — ask missing: max(mark, bid) as conservative fair.
-    #   bid = 0, ask > 0    — bid missing (deep-OTM near expiry, no buyers):
-    #                          min(mark, ask).  TP uses fp["ask"] directly, so
-    #                          fair here only affects the SL check.  min() avoids
-    #                          inflating the SL level when mark < ask.
-    #   mark > 0 only       — no book at all: trust the mark.
-    #   all zero            — return None; caller skips the exit check entirely.
     if bid > 0 and ask > 0:
         fair = mark if bid <= mark <= ask else (bid + ask) / 2
     elif bid > 0:
         fair = max(mark, bid) if mark > 0 else bid
     elif ask > 0:
-        # Bid absent — deep-OTM or expiring leg with no buyers.
-        # min() ensures fair does not overshoot the ask (avoids premature SL).
         fair = min(mark, ask) if mark > 0 else ask
     elif mark > 0:
         fair = mark
     else:
-        # No pricing data at all — cannot derive a fair value.
         return None
 
     index_price = float(details.get("indexPrice", 0) or 0)
@@ -173,7 +240,6 @@ def _combined_sl():
     Exit condition: combined fair-price based stop loss.
 
     Fires when (call_fair + put_fair) >= combined_fill_premium × (1 + STOP_LOSS_PCT).
-    On trigger, configures a phased limit buy-to-close on the trade.
     """
     label = f"combined_fair_sl({STOP_LOSS_PCT:.0%})"
 
@@ -194,7 +260,7 @@ def _combined_sl():
         if sl_threshold is None:
             combined_premium = float(call_leg.fill_price) + float(put_leg.fill_price)
             sl_threshold = combined_premium * (1.0 + STOP_LOSS_PCT)
-            trade.metadata["sl_threshold"]    = sl_threshold
+            trade.metadata["sl_threshold"]     = sl_threshold
             trade.metadata["combined_premium"] = combined_premium
 
         call_fp = _fair(call_leg.symbol)
@@ -212,11 +278,6 @@ def _combined_sl():
                 f"[{trade.id}] {label} TRIGGERED: combined_fair={combined_fair:.4f} "
                 f">= threshold={sl_threshold:.4f} "
                 f"(premium={combined_premium:.4f}, loss={loss_pct:.1f}%)"
-            )
-            logger.info(
-                f"[{trade.id}] SL legs: "
-                f"call fair={call_fp['fair']:.4f} bid={call_fp['bid'] or 0:.4f} ask={call_fp['ask'] or 0:.4f} | "
-                f"put  fair={put_fp['fair']:.4f} bid={put_fp['bid'] or 0:.4f} ask={put_fp['ask'] or 0:.4f}"
             )
             trade.execution_mode = "limit"
             trade.metadata["sl_triggered"]    = True
@@ -236,10 +297,8 @@ def _combined_tp():
 
     Fires when (premium - combined_ask) / premium >= TAKE_PROFIT_PCT.
     Uses raw ask prices — no mark/fair floor — matching backtester behaviour.
-    On trigger, configures a phased limit buy-to-close on the trade.
     """
     if TAKE_PROFIT_PCT <= 0:
-        # Disabled — return a no-op condition
         def _noop(account, trade):
             return False
         _noop.__name__ = "combined_ask_tp(disabled)"
@@ -273,7 +332,6 @@ def _combined_tp():
         if not call_fp or not put_fp:
             return False
 
-        # Use ask prices only — skip tick if ask is missing
         call_ask = call_fp.get("ask")
         put_ask  = put_fp.get("ask")
         if not call_ask or not put_ask:
@@ -289,10 +347,6 @@ def _combined_tp():
                 f"profit_ratio={profit_ratio:.2%} >= {TAKE_PROFIT_PCT:.0%} "
                 f"(premium={combined_premium:.4f})"
             )
-            logger.info(
-                f"[{trade.id}] TP legs: "
-                f"call ask={call_ask:.4f} | put ask={put_ask:.4f}"
-            )
             trade.execution_mode = "limit"
             trade.metadata["tp_triggered"]    = True
             trade.metadata["tp_triggered_at"] = time.time()
@@ -307,14 +361,11 @@ def _combined_tp():
 
 def _structure_label():
     # type: () -> str
-    """Human-readable structure label, e.g. '25Δ strangle (1DTE)'."""
     delta_pct = int(round(DELTA * 100))
-    return f"{delta_pct}\u0394 strangle ({DTE}DTE)"
+    return f"{delta_pct}Δ strangle ({DTE}DTE) [turb&lt;{TURBULENCE_THRESHOLD:.0f}]"
 
 
 def _on_trade_opened(trade, account):
-    # type: (...) -> None
-    """Log entry details and send Telegram notification."""
     index_price = get_btc_index_price(use_cache=False)
     if index_price is not None:
         trade.metadata["entry_index_price"] = index_price
@@ -329,12 +380,10 @@ def _on_trade_opened(trade, account):
 
     if combined_premium > 0:
         sl_threshold = combined_premium * (1.0 + STOP_LOSS_PCT)
-        trade.metadata["sl_threshold"]    = sl_threshold
+        trade.metadata["sl_threshold"]     = sl_threshold
         trade.metadata["combined_premium"] = combined_premium
 
-    # Configure max-hold close execution — override profile for max-hold exit.
-    # SL/TP exits use the profile's standard close_phases (from delta_strangle_2phase).
-    # Max-hold exit uses a dedicated 1-phase aggressive close profile.
+    # Max-hold close uses a dedicated 1-phase aggressive profile
     _max_hold_profile = get_profile("max_hold_close_1phase")
     trade.metadata["_max_hold_close_profile"] = _max_hold_profile
 
@@ -357,41 +406,37 @@ def _on_trade_opened(trade, account):
     idx = index_price or 0.0
 
     logger.info(
-        f"[ShortStrangleDeltaTp] Opened {structure}: "
+        f"[ShortStrangleTurbulenceTp] Opened {structure}: "
         f"CALL {call_leg.symbol if call_leg else '?'} @ {call_fill:.4f} | "
         f"PUT  {put_leg.symbol  if put_leg  else '?'} @ {put_fill:.4f} | "
         f"combined={combined_premium:.4f}  SL@={trade.metadata.get('sl_threshold', 0):.4f}  "
         f"BTC=${idx:,.0f}  {phase_label} {duration_s}s"
     )
 
-    sl_thresh = trade.metadata.get('sl_threshold', 0)
+    sl_thresh  = trade.metadata.get("sl_threshold", 0)
     hold_label = f"{MAX_HOLD_HOURS}h" if MAX_HOLD_HOURS > 0 else "expiry"
-    tp_label = f"{TAKE_PROFIT_PCT:.0%}" if TAKE_PROFIT_PCT > 0 else "off"
-    otm_label = f"{MIN_OTM_PCT:.0f}%" if MIN_OTM_PCT > 0 else "off"
+    tp_label   = f"{TAKE_PROFIT_PCT:.0%}" if TAKE_PROFIT_PCT > 0 else "off"
+    otm_label  = f"{MIN_OTM_PCT:.0f}%" if MIN_OTM_PCT > 0 else "off"
     try:
         get_notifier().send(
-            f"\U0001f4c9 <b>Short {structure.title()} — Trade Opened</b>\n\n"
+            f"📉 <b>Short {structure.title()} — Trade Opened</b>\n\n"
             f"Time: {ts}  |  BTC: ${idx:,.0f}\n"
             f"ID: {trade.id}\n\n"
-            f"SELL {QTY}\u00d7 {call_leg.symbol if call_leg else '?'}  @ {call_fill:.4f} BTC (${call_fill * idx:,.2f})\n"
-            f"SELL {QTY}\u00d7 {put_leg.symbol  if put_leg  else '?'}  @ {put_fill:.4f} BTC (${put_fill * idx:,.2f})\n\n"
+            f"SELL {QTY}× {call_leg.symbol if call_leg else '?'}  @ {call_fill:.4f} BTC (${call_fill * idx:,.2f})\n"
+            f"SELL {QTY}× {put_leg.symbol  if put_leg  else '?'}  @ {put_fill:.4f} BTC (${put_fill * idx:,.2f})\n\n"
             f"Combined premium: <b>{combined_premium:.4f} BTC</b> (${combined_premium * idx:,.2f})  ({vs_fair})\n"
             f"SL threshold: {sl_thresh:.4f} BTC (${sl_thresh * idx:,.2f})  (+{STOP_LOSS_PCT:.0%})\n"
-            f"TP: {tp_label}  |  Min OTM: {otm_label}\n"
+            f"TP: {tp_label}  |  Min OTM: {otm_label}  |  Turb&lt;{TURBULENCE_THRESHOLD:.0f}\n"
             f"Max hold: {hold_label}  |  {phase_label}  {duration_s}s\n\n"
-            f"Fair call: {call_fair:.4f} BTC (${call_fair * idx:,.2f})  |  "
-            f"Fair put: {put_fair:.4f} BTC (${put_fair * idx:,.2f})  |  "
+            f"Fair call: {call_fair:.4f} BTC  |  Fair put: {put_fair:.4f} BTC  |  "
             f"Fair combined: {combined_fair:.4f} BTC (${combined_fair * idx:,.2f})\n"
-            f"Equity: ${account.equity:,.2f}  |  "
-            f"Avail: ${account.available_margin:,.2f}"
+            f"Equity: ${account.equity:,.2f}  |  Avail: ${account.available_margin:,.2f}"
         )
     except Exception:
         pass
 
 
 def _on_trade_closed(trade, account):
-    # type: (...) -> None
-    """Log close details and send Telegram notification."""
     idx   = get_btc_index_price(use_cache=False) or 0.0
     pnl   = trade.realized_pnl if trade.realized_pnl is not None else 0.0
     pnl_usd = pnl * idx
@@ -411,12 +456,12 @@ def _on_trade_closed(trade, account):
         exit_label = "closed"
 
     logger.info(
-        f"[ShortStrangleDeltaTp] Closed: {trade.id}  |  PnL: ${pnl_usd:+.2f}  |  "
+        f"[ShortStrangleTurbulenceTp] Closed: {trade.id}  |  PnL: ${pnl_usd:+.2f}  |  "
         f"ROI: {roi:+.1f}%  |  Hold: {hold_seconds / 60:.1f}min  |  Exit: {exit_label}"
     )
 
     ts    = datetime.now(timezone.utc).strftime("%H:%M UTC")
-    emoji = "\u2705" if pnl >= 0 else "\u274c"
+    emoji = "✅" if pnl >= 0 else "❌"
 
     open_legs  = trade.open_legs
     call_open  = next((l for l in open_legs if l.symbol.endswith("-C")), None)
@@ -424,9 +469,9 @@ def _on_trade_closed(trade, account):
     call_fill_open = float(call_open.fill_price) if call_open and call_open.fill_price else 0.0
     put_fill_open  = float(put_open.fill_price)  if put_open  and put_open.fill_price  else 0.0
 
-    close_legs  = trade.close_legs or []
-    call_close  = next((l for l in close_legs if l.symbol.endswith("-C")), None)
-    put_close   = next((l for l in close_legs if l.symbol.endswith("-P")), None)
+    close_legs      = trade.close_legs or []
+    call_close      = next((l for l in close_legs if l.symbol.endswith("-C")), None)
+    put_close       = next((l for l in close_legs if l.symbol.endswith("-P")), None)
     call_fill_close = float(call_close.fill_price) if call_close and call_close.fill_price else 0.0
     put_fill_close  = float(put_close.fill_price)  if put_close  and put_close.fill_price  else 0.0
     combined_close  = call_fill_close + put_fill_close
@@ -439,13 +484,11 @@ def _on_trade_closed(trade, account):
         (call_fp["fair"] if call_fp else 0.0) + (put_fp["fair"] if put_fp else 0.0)
     )
 
-    structure = _structure_label()
-
-    # Fee data from FillResult (captured by LifecycleEngine)
-    open_fees = float(trade.open_fees) if trade.open_fees else 0.0
+    structure  = _structure_label()
+    open_fees  = float(trade.open_fees)  if trade.open_fees  else 0.0
     close_fees = float(trade.close_fees) if trade.close_fees else 0.0
     total_fees = open_fees + close_fees
-    net_pnl = pnl - total_fees
+    net_pnl    = pnl - total_fees
     net_pnl_usd = net_pnl * idx
 
     try:
@@ -476,9 +519,9 @@ def _on_trade_closed(trade, account):
             f"Trigger: <b>{exit_label}</b>\n"
             f"{detail_line}"
             f"\nOpen:  CALL {call_fill_open:.4f} BTC  PUT {put_fill_open:.4f} BTC  "
-            f"\u2192  {combined_premium:.4f} BTC (${combined_premium * idx:,.2f})\n"
+            f"→  {combined_premium:.4f} BTC (${combined_premium * idx:,.2f})\n"
             f"Close: CALL {call_fill_close:.4f} BTC  PUT {put_fill_close:.4f} BTC  "
-            f"\u2192  {combined_close:.4f} BTC (${combined_close * idx:,.2f})\n"
+            f"→  {combined_close:.4f} BTC (${combined_close * idx:,.2f})\n"
             f"{fee_line}"
             f"\nGross PnL: ${pnl_usd:+.2f}  ({roi:+.1f}%)\n"
             f"Net PnL: <b>${net_pnl_usd:+.2f}</b>\n"
@@ -494,8 +537,7 @@ def _max_hold_close():
     """
     Exit condition: max hold timer with close profile override.
 
-    Same as strategy.max_hold_hours() but also swaps the execution profile
-    to max_hold_close_1phase (single aggressive phase) for faster close.
+    Swaps execution profile to max_hold_close_1phase (single aggressive phase).
     """
     if MAX_HOLD_HOURS <= 0:
         def _noop(account, trade):
@@ -512,7 +554,6 @@ def _max_hold_close():
         triggered = hold >= MAX_HOLD_HOURS * 3600
         if triggered:
             logger.info(f"[{trade.id}] {label} triggered: held {hold/3600:.1f}h")
-            # Swap to aggressive 1-phase close profile
             max_hold_profile = trade.metadata.get("_max_hold_close_profile")
             if max_hold_profile:
                 trade.metadata["_execution_profile"] = max_hold_profile
@@ -524,19 +565,19 @@ def _max_hold_close():
 
 # ─── Strategy Factory ────────────────────────────────────────────────────────
 
-def short_strangle_delta_tp() -> StrategyConfig:
+def short_strangle_turbulence_tp() -> StrategyConfig:
     """
-    Short N-DTE strangle selected by delta — sell combined premium,
-    exit on TP, SL, optional max-hold, or expiry.
+    Short N-DTE strangle selected by delta, gated by the Turbulence indicator.
 
-    Extends short_strangle_delta with take-profit and min_otm_pct.
+    Entry only fires when turbulence composite < TURBULENCE_THRESHOLD.
+    Exits on TP, SL, optional max-hold, or expiry.
     """
     exit_conditions = [_combined_tp(), _combined_sl()]
     if MAX_HOLD_HOURS > 0:
         exit_conditions.append(_max_hold_close())
 
     return StrategyConfig(
-        name="short_strangle_delta_tp",
+        name="short_strangle_turbulence_tp",
 
         # ── What to trade ─────────────────────────────────────────────
         legs=strangle(
@@ -550,7 +591,7 @@ def short_strangle_delta_tp() -> StrategyConfig:
 
         # ── When to enter ─────────────────────────────────────────────
         entry_conditions=[
-            time_window(ENTRY_HOUR, ENTRY_HOUR + 4),
+            _turbulence_entry(),
             *([
                 weekday_filter(["mon", "tue", "wed", "thu", "fri"])
             ] if WEEKEND_FILTER else []),
@@ -563,7 +604,6 @@ def short_strangle_delta_tp() -> StrategyConfig:
         execution_mode="limit",
         execution_profile="delta_strangle_2phase",
 
-        # RFQ fallback for emergency manual closes only
         rfq_params=RFQParams(
             timeout_seconds=15,
             min_improvement_pct=-999,

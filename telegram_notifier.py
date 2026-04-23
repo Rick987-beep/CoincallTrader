@@ -11,9 +11,9 @@ should NOT call the notifier; notification decisions belong to strategies.
 
 Available helpers:
   - notify_startup / notify_shutdown
-  - notify_trade_opened / notify_trade_closed
   - notify_error
-  - send() for custom messages
+  - notify_orphan_detected / notify_reconciliation_warning
+  - send() / escape() module-level shortcuts for strategy use
 
 Setup:
   1. Message @BotFather on Telegram → /newbot → get your bot token
@@ -27,6 +27,7 @@ Setup:
 If TELEGRAM_BOT_TOKEN is not set, the notifier silently no-ops.
 """
 
+import html
 import logging
 import os
 import threading
@@ -55,6 +56,31 @@ def get_notifier() -> "TelegramNotifier":
     if _instance is None:
         _instance = TelegramNotifier()
     return _instance
+
+
+def send(message: str, parse_mode: str = "HTML") -> bool:
+    """Module-level shortcut: send a message via the singleton notifier.
+
+    Equivalent to ``get_notifier().send(message)``.  Import as::
+
+        from telegram_notifier import send
+        send(f"📈 <b>Trade opened</b>\n...")
+    """
+    return get_notifier().send(message, parse_mode)
+
+
+def escape(text: str) -> str:
+    """Escape a string for safe interpolation inside an HTML-mode Telegram message.
+
+    Converts ``<``, ``>``, ``&``, ``"`` to their HTML entities so dynamic
+    values (symbols, labels, numbers) cannot accidentally break message parsing.
+
+    Example::
+
+        from telegram_notifier import send, escape
+        send(f"Symbol: {escape(symbol)}  Threshold: &lt;{threshold:.0f}")
+    """
+    return html.escape(str(text))
 
 
 class TelegramNotifier:
@@ -141,54 +167,6 @@ class TelegramNotifier:
         """Send a system shutdown notification."""
         ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
         self.send(f"🔴 <b>CryoTrader stopped</b>\nTime: {ts}")
-
-    def notify_trade_opened(
-        self,
-        strategy_name: str,
-        trade_id: str,
-        legs: list,
-        entry_cost: float,
-    ) -> None:
-        """Notify when a new trade is opened."""
-        legs_text = "\n".join(
-            f"  {leg.side.upper()} {leg.qty}× {leg.symbol}"
-            for leg in legs
-        )
-        self.send(
-            f"📈 <b>Trade Opened</b>\n"
-            f"Strategy: {strategy_name}\n"
-            f"ID: {trade_id}\n"
-            f"{legs_text}\n"
-            f"Entry cost: ${entry_cost:.2f}"
-        )
-
-    def notify_trade_closed(
-        self,
-        strategy_name: str,
-        trade_id: str,
-        pnl: float,
-        roi: float,
-        hold_minutes: float,
-        entry_cost: float,
-        close_legs: list = None,
-    ) -> None:
-        """Notify when a trade is closed with PnL details."""
-        emoji = "✅" if pnl >= 0 else "❌"
-        legs_text = ""
-        if close_legs:
-            legs_text = "\n" + "\n".join(
-                f"  {leg.side.upper()} {leg.filled_qty}× {leg.symbol} @ {float(leg.fill_price) if leg.fill_price is not None else '?'}"
-                for leg in close_legs
-            ) + "\n"
-        self.send(
-            f"{emoji} <b>Trade Closed</b>\n"
-            f"Strategy: {strategy_name}\n"
-            f"ID: {trade_id}\n"
-            f"PnL: <b>${pnl:+.2f}</b> ({roi:+.1f}%)\n"
-            f"Hold: {hold_minutes:.1f} min\n"
-            f"Entry cost: ${entry_cost:.2f}"
-            f"{legs_text}"
-        )
 
     def notify_error(self, message: str) -> None:
         """Send a critical error alert."""

@@ -6,6 +6,9 @@ Wraps rsync over SSH to pull completed daily parquets to the local dev
 machine. With --delete-after, removes transferred files from the server
 after verifying checksums — but never touches the current or previous day.
 
+Files are written directly to backtester/data/ — the directory that
+MarketReplay reads from by default.
+
 Usage:
     # Download last 7 days (dry run — default)
     python -m backtester.ingest.tickrecorder.sync --days 7
@@ -16,10 +19,20 @@ Usage:
     # Download all available data
     python -m backtester.ingest.tickrecorder.sync --all
 
-Config (read from .env):
-    RECORDER_VPS_HOST       e.g. ct@46.225.137.92
-    RECORDER_VPS_DATA_DIR   e.g. /opt/ct/recorder/data
-    RECORDER_SSH_KEY        e.g. /Users/you/.ssh/id_rsa  (optional)
+Config (optional — falls back to production defaults if not set):
+    RECORDER_VPS_HOST       e.g. root@46.225.137.92  (default: production server)
+    RECORDER_VPS_DATA_DIR   e.g. /opt/ct/recorder/data  (default: production path)
+    RECORDER_SSH_KEY        SSH key path (falls back to SSH_KEY in .env)
+
+Naming convention note:
+    The recorder (VPS) produces:
+        options_YYYY-MM-DD.parquet      — option chain snapshots
+        spot_track_YYYY-MM-DD.parquet   — 1-min BTC spot OHLC
+    The Tardis bulk-download pipeline produces:
+        options_YYYY-MM-DD.parquet      — same schema
+        spot_YYYY-MM-DD.parquet         — same schema, different prefix
+    Both sets land in backtester/data/. MarketReplay._load_parquets globs
+    'spot_*.parquet' which matches both prefixes, so they coexist fine.
 """
 import argparse
 import hashlib
@@ -36,16 +49,30 @@ load_dotenv()
 
 logger = logging.getLogger(__name__)
 
-# Local target directory (relative to this file's location)
-_LOCAL_DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
+# Local target directory — backtester/data/ (two levels up from this file's
+# location at backtester/ingest/tickrecorder/). This is the directory that
+# MarketReplay reads from by default (backtester/config.toml: data.options_parquet).
+_LOCAL_DATA_DIR = os.path.normpath(
+    os.path.join(os.path.dirname(__file__), "..", "..", "data")
+)
+
+# Production server defaults (mirrors servers.toml + .env.recorder).
+# Override via env vars if the server changes.
+_DEFAULT_VPS_HOST = "root@46.225.137.92"
+_DEFAULT_VPS_DATA_DIR = "/opt/ct/recorder/data"
 
 # Minimum days to always keep on server (never delete current or previous day)
 _KEEP_DAYS_ON_SERVER = 2
 
 
-def _get_env(name, required=True):
-    # type: (str, bool) -> Optional[str]
+def _get_env(name, required=True, default=None, fallback=None):
+    # type: (str, bool, Optional[str], Optional[str]) -> Optional[str]
+    """Read an env var with optional fallback to a second var and a hardcoded default."""
     val = os.getenv(name, "").strip()
+    if not val and fallback:
+        val = os.getenv(fallback, "").strip()
+    if not val and default:
+        val = default
     if not val and required:
         logger.error("Missing required env var: %s", name)
         sys.exit(1)
@@ -156,9 +183,10 @@ def _remote_list(vps_host, ssh_key, remote_dir):
 def run(days=None, all_files=False, delete_after=False, confirm=False, dry_run=True):
     # type: (Optional[int], bool, bool, bool, bool) -> int
     """Main sync logic. Returns exit code (0 = success)."""
-    vps_host = _get_env("RECORDER_VPS_HOST")
-    remote_dir = _get_env("RECORDER_VPS_DATA_DIR")
-    ssh_key = _get_env("RECORDER_SSH_KEY", required=False)
+    vps_host = _get_env("RECORDER_VPS_HOST", default=_DEFAULT_VPS_HOST)
+    remote_dir = _get_env("RECORDER_VPS_DATA_DIR", default=_DEFAULT_VPS_DATA_DIR)
+    # RECORDER_SSH_KEY takes precedence; falls back to the general SSH_KEY in .env
+    ssh_key = _get_env("RECORDER_SSH_KEY", required=False, fallback="SSH_KEY")
 
     os.makedirs(_LOCAL_DATA_DIR, exist_ok=True)
 
@@ -181,7 +209,10 @@ def run(days=None, all_files=False, delete_after=False, confirm=False, dry_run=T
     logger.info("Dates to sync: %s to %s (%d days)",
                 dates_to_sync[0], dates_to_sync[-1], len(dates_to_sync))
 
-    # Build file list
+    # Build file list.
+    # Note: the recorder writes spot_track_YYYY-MM-DD.parquet (not spot_YYYY-MM-DD.parquet).
+    # The Tardis pipeline uses the shorter spot_ prefix. MarketReplay handles both via
+    # a glob on spot_*.parquet, so both naming conventions coexist in backtester/data/.
     filenames = []
     for date_str in dates_to_sync:
         filenames.append(f"options_{date_str}.parquet")
@@ -208,6 +239,7 @@ def run(days=None, all_files=False, delete_after=False, confirm=False, dry_run=T
                 logger.info("Skipping delete for %s (too recent, keeping on server)", date_str)
                 continue
 
+            # spot_track_ matches the recorder's naming (cf. Tardis: spot_)
             for prefix in ("options", "spot_track"):
                 fname = f"{prefix}_{date_str}.parquet"
                 local_path = os.path.join(_LOCAL_DATA_DIR, fname)

@@ -73,11 +73,10 @@ if _slot_strategy:
     logger.info(f"Strategy loaded from SLOT_STRATEGY: {_slot_strategy}")
 else:
     # Dev mode: import manually and uncomment the one you want
-    from strategies import (blueprint_strangle, atm_straddle_index_move,
+    from strategies import (blueprint_strangle,
                             daily_put_sell, long_strangle_index_move)
 
     STRATEGIES = [
-        # atm_straddle_index_move,
         # blueprint_strangle,
         # daily_put_sell,
         long_strangle_index_move,

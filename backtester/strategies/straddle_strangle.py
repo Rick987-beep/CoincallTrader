@@ -42,59 +42,14 @@ Fees:
     At typical BTC prices the index cap (= 0.0003 BTC/leg) usually binds
     for options priced above ~0.0024 BTC.
 """
-import re
-from datetime import datetime
-from functools import lru_cache
 from typing import Any, Dict, List, Optional
 
+from backtester.expiry_utils import parse_expiry_date, nearest_valid_expiry
 from backtester.pricing import deribit_fee_per_leg, bs_call, bs_put, HOURS_PER_YEAR, EXPIRY_HOUR_UTC
 from backtester.strategy_base import (
     OpenPosition, Trade, close_trade,
     time_window, weekday_only, index_move_trigger, max_hold_hours,
 )
-
-
-@lru_cache(maxsize=64)
-def _parse_expiry_date(expiry_code):
-    # type: (str) -> Optional[datetime]
-    """Parse Deribit expiry code like '9MAR26' to a datetime date."""
-    month_map = {
-        "JAN": 1, "FEB": 2, "MAR": 3, "APR": 4,
-        "MAY": 5, "JUN": 6, "JUL": 7, "AUG": 8,
-        "SEP": 9, "OCT": 10, "NOV": 11, "DEC": 12,
-    }
-    m = re.match(r"(\d{1,2})([A-Z]{3})(\d{2})", expiry_code)
-    if not m:
-        return None
-    day = int(m.group(1))
-    month = month_map.get(m.group(2))
-    year = 2000 + int(m.group(3))
-    if month is None:
-        return None
-    return datetime(year, month, day)
-
-
-def _nearest_valid_expiry(state):
-    # type: (Any) -> Optional[str]
-    """Find the nearest expiry that hasn't expired yet.
-
-    Deribit options expire at 08:00 UTC on the expiry date.
-    Before 08:00: today's expiry is used (0DTE).
-    After  08:00: today's expiry is gone, so tomorrow's expiry is used (~1DTE).
-    """
-    best = None
-    best_dt = None
-    for exp in state.expiries():
-        exp_date = _parse_expiry_date(exp)
-        if exp_date is None:
-            continue
-        exp_dt = exp_date.replace(hour=EXPIRY_HOUR_UTC, tzinfo=state.dt.tzinfo)
-        if exp_dt <= state.dt:
-            continue  # already expired
-        if best_dt is None or exp_dt < best_dt:
-            best = exp
-            best_dt = exp_dt
-    return best
 
 
 class ExtrusionStraddleStrangle:
@@ -200,7 +155,7 @@ class ExtrusionStraddleStrangle:
         expiry_code = self._position.metadata.get("expiry")
         if expiry_code is None:
             return None
-        exp_date = _parse_expiry_date(expiry_code)
+        exp_date = parse_expiry_date(expiry_code)
         if exp_date is None:
             return None
         # Expired if we're past the expiry date's 08:00 UTC
@@ -212,7 +167,7 @@ class ExtrusionStraddleStrangle:
     def _try_open(self, state):
         # type: (Any) -> None
         """Try to open a straddle/strangle position."""
-        expiry = _nearest_valid_expiry(state)
+        expiry = nearest_valid_expiry(state)
         if expiry is None:
             return
 
@@ -233,7 +188,7 @@ class ExtrusionStraddleStrangle:
             entry_usd = call.ask_usd + put.ask_usd
         else:
             # BS mode: use IV from snapshot
-            exp_date = _parse_expiry_date(expiry)
+            exp_date = parse_expiry_date(expiry)
             dte_h = (exp_date.replace(hour=EXPIRY_HOUR_UTC) -
                      state.dt.replace(tzinfo=None)).total_seconds() / 3600
             if dte_h <= 0:
@@ -300,7 +255,7 @@ class ExtrusionStraddleStrangle:
             exit_usd = call_bid_usd + put_bid_usd
         else:
             # BS mode
-            exp_date = _parse_expiry_date(expiry)
+            exp_date = parse_expiry_date(expiry)
             dte_h = (exp_date.replace(hour=EXPIRY_HOUR_UTC) -
                      state.dt.replace(tzinfo=None)).total_seconds() / 3600
             dte_h = max(dte_h, 0.001)

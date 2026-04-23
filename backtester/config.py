@@ -83,6 +83,12 @@ class ScoringConfig:
     w_omega:         float
     w_ulcer:         float
     w_consistency:   float
+    # Recency overlay
+    recency_pct:          float
+    recency_weight:       float
+    recency_min_trades:   int
+    recency_gate_enabled: bool
+    recency_gate_sharpe:  float
 
 
 @dataclass
@@ -170,6 +176,11 @@ def load_config(path=_CONFIG_PATH):
             w_omega=float(sc["w_omega"]),
             w_ulcer=float(sc["w_ulcer"]),
             w_consistency=float(sc["w_consistency"]),
+            recency_pct=float(sc["recency_pct"]),
+            recency_weight=float(sc["recency_weight"]),
+            recency_min_trades=int(sc["recency_min_trades"]),
+            recency_gate_enabled=bool(sc["recency_gate_enabled"]),
+            recency_gate_sharpe=float(sc["recency_gate_sharpe"]),
         ),
     )
 

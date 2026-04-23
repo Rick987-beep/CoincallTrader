@@ -46,11 +46,10 @@ Fees:
     Deribit model: MIN(0.03% × index, 12.5% × option_price) per leg,
     charged on both open and close (except inner legs at expiry).
 """
-import re
-from datetime import datetime, timedelta
-from functools import lru_cache
 from typing import Any, Dict, List, Optional
 
+from backtester.bt_option_selection import select_by_delta
+from backtester.expiry_utils import parse_expiry_date, expiry_dt_utc, select_expiry
 from backtester.pricing import deribit_fee_per_leg, EXPIRY_HOUR_UTC
 from backtester.strategy_base import (
     OpenPosition, Trade, close_trade,
@@ -61,53 +60,6 @@ from backtester.strategy_base import (
 # ------------------------------------------------------------------
 # Helpers
 # ------------------------------------------------------------------
-
-@lru_cache(maxsize=64)
-def _parse_expiry_date(expiry_code):
-    # type: (str) -> Optional[datetime]
-    month_map = {
-        "JAN": 1, "FEB": 2, "MAR": 3, "APR": 4,
-        "MAY": 5, "JUN": 6, "JUL": 7, "AUG": 8,
-        "SEP": 9, "OCT": 10, "NOV": 11, "DEC": 12,
-    }
-    m = re.match(r"(\d{1,2})([A-Z]{3})(\d{2})", expiry_code)
-    if not m:
-        return None
-    day = int(m.group(1))
-    month = month_map.get(m.group(2))
-    year = 2000 + int(m.group(3))
-    if month is None:
-        return None
-    return datetime(year, month, day)
-
-
-@lru_cache(maxsize=64)
-def _expiry_dt_utc(expiry_code, tzinfo):
-    # type: (str, Any) -> Optional[datetime]
-    exp_date = _parse_expiry_date(expiry_code)
-    if exp_date is None:
-        return None
-    return exp_date.replace(hour=EXPIRY_HOUR_UTC, tzinfo=tzinfo)
-
-
-def _select_expiry(state, dte):
-    # type: (Any, int) -> Optional[str]
-    target_date = state.dt.date() + timedelta(days=dte)
-    for exp in state.expiries():
-        exp_date = _parse_expiry_date(exp)
-        if exp_date is not None and exp_date.date() == target_date:
-            return exp
-    return None
-
-
-def _select_by_delta(chain, target_delta):
-    # type: (list, float) -> Optional[Any]
-    candidates = [q for q in chain if q.delta != 0.0]
-    if not candidates:
-        candidates = chain
-    if not candidates:
-        return None
-    return min(candidates, key=lambda q: abs(q.delta - target_delta))
 
 
 def _find_strike(chain, target_strike, is_call):
@@ -242,7 +194,7 @@ class BatmanCalendar:
 
     def _try_open(self, state):
         # type: (Any) -> None
-        inner_expiry = _select_expiry(state, self._inner_dte)
+        inner_expiry = select_expiry(state, self._inner_dte)
         if inner_expiry is None:
             return
         # Outer expiry: walk forward from minimum DTE until we find one that
@@ -252,7 +204,7 @@ class BatmanCalendar:
         min_outer_dte = self._inner_dte + self._outer_dte_offset
         outer_expiry = None
         for dte in range(min_outer_dte, min_outer_dte + 30):
-            outer_expiry = _select_expiry(state, dte)
+            outer_expiry = select_expiry(state, dte)
             if outer_expiry is not None:
                 break
         if outer_expiry is None:
@@ -265,8 +217,8 @@ class BatmanCalendar:
         inner_calls = [q for q in inner_chain if q.is_call]
         inner_puts = [q for q in inner_chain if not q.is_call]
 
-        inner_call = _select_by_delta(inner_calls, +self._delta)
-        inner_put = _select_by_delta(inner_puts, -self._delta)
+        inner_call = select_by_delta(inner_calls, +self._delta)
+        inner_put = select_by_delta(inner_puts, -self._delta)
         if inner_call is None or inner_put is None:
             return
         if inner_call.bid <= 0 or inner_put.bid <= 0:
@@ -304,8 +256,8 @@ class BatmanCalendar:
         fee_outer = (deribit_fee_per_leg(state.spot, outer_call.ask_usd)
                      + deribit_fee_per_leg(state.spot, outer_put.ask_usd)) * self._ratio
 
-        inner_exp_dt = _expiry_dt_utc(inner_expiry, state.dt.tzinfo)
-        outer_exp_dt = _expiry_dt_utc(outer_expiry, state.dt.tzinfo)
+        inner_exp_dt = expiry_dt_utc(inner_expiry, state.dt.tzinfo)
+        outer_exp_dt = expiry_dt_utc(outer_expiry, state.dt.tzinfo)
 
         legs = [
             {

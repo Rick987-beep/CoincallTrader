@@ -52,7 +52,7 @@ from strategy import (
     # RFQ timing (optional — import when using RFQ execution)
     # RFQParams,  # from trade_lifecycle import RFQParams
 )
-from telegram_notifier import get_notifier
+from telegram_notifier import get_notifier, escape
 
 logger = logging.getLogger(__name__)
 
@@ -92,12 +92,18 @@ CHECK_INTERVAL = 30                 # seconds between entry/exit evaluations
 
 def _on_trade_opened(trade, account) -> None:
     """Send Telegram notification when strangle trade opens."""
+    legs = trade.open_legs
+    legs_text = "\n".join(
+        f"  {leg.side.upper()} {leg.qty}× {escape(leg.symbol)}"
+        for leg in legs
+    )
+    entry_cost = trade.total_entry_cost()
     try:
-        get_notifier().notify_trade_opened(
-            strategy_name="Blueprint Strangle",
-            trade_id=trade.id,
-            legs=trade.open_legs,
-            entry_cost=trade.total_entry_cost(),
+        get_notifier().send(
+            f"📈 <b>Blueprint Strangle — Trade Opened</b>\n"
+            f"ID: {trade.id}\n"
+            f"{legs_text}\n"
+            f"Entry cost: ${entry_cost:.2f}"
         )
     except Exception:
         pass
@@ -124,14 +130,20 @@ def _on_trade_closed(trade, account) -> None:
     )
 
     try:
-        get_notifier().notify_trade_closed(
-            strategy_name="Blueprint Strangle",
-            trade_id=trade.id,
-            pnl=pnl,
-            roi=roi,
-            hold_minutes=hold_seconds / 60,
-            entry_cost=entry_cost,
-            close_legs=trade.close_legs,
+        emoji = "✅" if pnl >= 0 else "❌"
+        close_legs = trade.close_legs or []
+        legs_text = "\n".join(
+            f"  {leg.side.upper()} {leg.filled_qty}× {escape(leg.symbol)} "
+            f"@ {float(leg.fill_price) if leg.fill_price is not None else '?'}"
+            for leg in close_legs
+        )
+        get_notifier().send(
+            f"{emoji} <b>Blueprint Strangle — Trade Closed</b>\n"
+            f"ID: {trade.id}\n"
+            f"PnL: <b>${pnl:+.2f}</b> ({roi:+.1f}%)\n"
+            f"Hold: {hold_seconds / 60:.1f} min\n"
+            f"Entry cost: ${entry_cost:.2f}"
+            + (f"\n{legs_text}" if legs_text else "")
         )
     except Exception:
         pass

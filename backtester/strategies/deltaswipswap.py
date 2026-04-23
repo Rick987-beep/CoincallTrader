@@ -37,11 +37,9 @@ P&L accounting (gross cash-flow model):
 Trade metadata breakdown (for analysis):
     option_pnl, perp_pnl, perp_trades, perp_fees, perp_qty_pre_close
 """
-import re
-from datetime import datetime
-from functools import lru_cache
 from typing import Any, Dict, List, Optional, Tuple
 
+from backtester.expiry_utils import parse_expiry_date, nearest_valid_expiry
 from backtester.pricing import (
     deribit_fee_per_leg, deribit_perp_fee,
     bs_call_delta, bs_put_delta,
@@ -57,48 +55,11 @@ from backtester.strategy_base import (
 # Expiry helpers (shared pattern with straddle_strangle)
 # ------------------------------------------------------------------
 
-@lru_cache(maxsize=64)
-def _parse_expiry_date(expiry_code):
-    # type: (str) -> Optional[datetime]
-    """Parse Deribit expiry code like '9MAR26' to a datetime."""
-    month_map = {
-        "JAN": 1, "FEB": 2, "MAR": 3, "APR": 4,
-        "MAY": 5, "JUN": 6, "JUL": 7, "AUG": 8,
-        "SEP": 9, "OCT": 10, "NOV": 11, "DEC": 12,
-    }
-    m = re.match(r"(\d{1,2})([A-Z]{3})(\d{2})", expiry_code)
-    if not m:
-        return None
-    day = int(m.group(1))
-    month = month_map.get(m.group(2))
-    year = 2000 + int(m.group(3))
-    if month is None:
-        return None
-    return datetime(year, month, day)
-
-
-def _nearest_valid_expiry(state):
-    # type: (Any) -> Optional[str]
-    """Find the nearest expiry whose 08:00 UTC deadline hasn't passed yet."""
-    best = None
-    best_dt = None
-    for exp in state.expiries():
-        exp_date = _parse_expiry_date(exp)
-        if exp_date is None:
-            continue
-        exp_dt = exp_date.replace(hour=EXPIRY_HOUR_UTC, tzinfo=state.dt.tzinfo)
-        if exp_dt <= state.dt:
-            continue
-        if best_dt is None or exp_dt < best_dt:
-            best = exp
-            best_dt = exp_dt
-    return best
-
 
 def _hours_to_expiry(current_dt, expiry_code):
     # type: (Any, str) -> float
     """Hours remaining until expiry (08:00 UTC on expiry date)."""
-    exp_date = _parse_expiry_date(expiry_code)
+    exp_date = parse_expiry_date(expiry_code)
     if exp_date is None:
         return 0.0
     exp_dt = exp_date.replace(hour=EXPIRY_HOUR_UTC)
@@ -241,7 +202,7 @@ class DeltaSwipSwap:
         expiry_code = self._position.metadata.get("expiry")
         if expiry_code is None:
             return None
-        exp_date = _parse_expiry_date(expiry_code)
+        exp_date = parse_expiry_date(expiry_code)
         if exp_date is None:
             return None
         exp_dt = exp_date.replace(hour=EXPIRY_HOUR_UTC, tzinfo=state.dt.tzinfo)
@@ -307,7 +268,7 @@ class DeltaSwipSwap:
     def _try_open(self, state):
         # type: (Any) -> None
         """Try to open a straddle/strangle and delta-neutralise with a perp."""
-        expiry = _nearest_valid_expiry(state)
+        expiry = nearest_valid_expiry(state)
         if expiry is None:
             return
 

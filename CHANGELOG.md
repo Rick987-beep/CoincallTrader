@@ -5,6 +5,40 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.18.0] - 2026-04-30
+
+### Added — SuperTrend Indicator & Long Call Strategy
+
+- **`indicators/supertrend.py`** — SuperTrend indicator; faithful port of the 2-bar range ATR variant described in the backtester report; computes `supertrend()` DataFrame and `latest_signal()` helper for live strategies
+- **`strategies/supertrend_long_call.py`** — live strategy (Coincall): buys a 30-DTE, 0.50Δ call on every SuperTrend(7,3) flip-up on 1h BTC klines; exits when trend turns −1; uses `aggressive_2phase` execution profile
+
+### Added — Short Strangle Turbulence Dynamic Qty Strategy
+
+- **`strategies/short_str_turb_dyn.py`** — live strategy: short OTM strangle gated by the Turbulence indicator, with dynamic contract-quantity sizing from a USD premium target; uses the new `strangle_turb_best_effort` execution profile
+- **`backtester/strategies/short_str_turb_dyn.py`** — backtester counterpart for `short_str_turb_dyn`
+- **`backtester/strategies/short_generic_sl_usd.py`** — new backtester strategy: short option with stop-loss denominated in USD rather than a premium multiple
+
+### Added — Open Best-Effort Exhaustion
+
+- **`execution/profiles.py`** — new `open_best_effort_exhaustion` field on `ExecutionProfile`; when `True`, accepts a partial or asymmetric fill at open-phase exhaustion instead of unwinding (open-side counterpart of `close_best_effort`); defaults to `False`
+- **`execution_profiles.toml`** — new `strangle_turb_best_effort` profile: 2-phase open (3 min fair + 5 min aggressive), 2-phase close, `open_best_effort_exhaustion = true`, `rfq_mode = "never"`
+- **`lifecycle_engine.py`** — respects `open_best_effort_exhaustion`; transitions trade to `OPEN` on phase exhaustion when at least one leg filled; logs `TRADE_OPENED_PARTIAL` strategy event
+
+### Added — Dynamic Leg Factory
+
+- **`strategy.py`** — added `legs_factory` optional callable on `StrategyConfig`; signature `(market_data) -> List[TradeLeg]`; overrides static `legs` when set, enabling strategies to resolve legs dynamically at open time (used by `short_str_turb_dyn` for runtime quantity sizing)
+
+### Fixed — Exchange Quantity Normalisation
+
+- **`exchanges/deribit/executor.py`** — added `_snap_qty()`: rounds outbound qty to Deribit's 0.1-contract lot size, preventing IEEE 754 residuals (e.g. `0.5999…`) from failing exchange validation with "Invalid params"
+- **`exchanges/coincall/executor.py`** — added `_snap_qty()`: mirrors Deribit fix for Coincall's 0.01-contract lot size
+
+### Fixed
+
+- **`strategies/daily_put_sell.py`** — cast `leg.fill_price` to `float()` before arithmetic; was a `Price` dataclass, not a bare number
+- **`strategies/put_sell_80dte.py`** — same `float()` cast; also widened expiry search window from `dte_min=65` to `dte_min=59` to bridge the gap when the nearest monthly expiry drops below the original lower bound
+- **`dashboard.py`** — fixed `Price` dataclass serialisation in the orders endpoint; was raising `TypeError` on `json.dumps` for orders with a price set
+
 ## [1.17.0] - 2026-04-23
 
 ### Added — Backtester Indicators System

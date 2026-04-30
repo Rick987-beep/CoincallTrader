@@ -4,6 +4,20 @@ Translates string side ('buy'/'sell') to Coincall int side (1/2)
 at the API boundary.
 """
 
+
+def _snap_qty(qty: float) -> float:
+    """
+    Snap a contract quantity to Coincall's minimum lot size (0.01 contracts).
+
+    Coincall requires quantities to be a multiple of 0.01. When the order
+    manager computes a remaining qty after a partial fill, IEEE 754
+    arithmetic can produce values like 0.5999999999999996 instead of 0.6.
+    Rounding here at the outbound boundary, mirroring how the Deribit
+    adapter normalises prices via _snap_to_tick, ensures the exchange
+    always receives a clean value regardless of how the qty was derived.
+    """
+    return round(round(qty / 0.01) * 0.01, 2)
+
 from exchanges.base import ExchangeExecutor
 from trade_execution import TradeExecutor
 
@@ -23,7 +37,7 @@ class CoincallExecutorAdapter(ExchangeExecutor):
                     client_order_id=None, reduce_only=False):
         return self._inner.place_order(
             symbol=symbol,
-            qty=qty,
+            qty=_snap_qty(qty),
             side=_side_to_int(side),
             order_type=order_type,
             price=price,

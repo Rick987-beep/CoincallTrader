@@ -136,6 +136,55 @@ A correctly processed day has ≈ 86 000 records (288 boundaries × ~300 instrum
 
 ---
 
+## 7. Spot Track — Authoritative Source
+
+### 7.1 Why `underlying_price` from options ticks is not a reliable spot source
+
+Each Deribit options tick carries an `underlying_price` field. For short-dated
+options (DTE ≤ 3) this is very close to the spot index. For long-dated options
+it is the settlement price of the corresponding quarterly/yearly futures contract,
+which carries a significant basis premium above spot.
+
+When `stream_extract.py` processes all DTE up to 700, long-DTE options ticks
+dominate the spot OHLC accumulator, inflating the spot track by thousands of
+dollars around expiry windows. See `backtester/ingest/SPOT_DATA_ISSUE.md` for full
+details and measured examples.
+
+### 7.2 Correct source: `derivative_ticker/BTC-PERPETUAL index_price`
+
+The authoritative spot source for historical data is the Tardis
+`derivative_ticker` dataset for the `BTC-PERPETUAL` instrument:
+
+```
+GET https://datasets.tardis.dev/v1/deribit/derivative_ticker/{YYYY}/{MM}/{DD}/BTC-PERPETUAL.csv.gz
+Authorization: Bearer {TARDIS_API_KEY}
+```
+
+The `index_price` column in this dataset is the Deribit composite settlement
+index — a capped median of prices from 5+ constituent exchanges (Coinbase, Kraken,
+Bitstamp, Bitfinex, Gemini). It has no DTE, no futures basis, and records at
+~245 k ticks/day, giving clean and dense coverage for all 1440 minutes of each day.
+
+This is what all Deribit options actually settle against, and it is immune to the
+long-DTE futures basis problem.
+
+### 7.3 Tool: `rebuild_spot_parquets.py`
+
+`backtester/ingest/bulkdownloadTardis/rebuild_spot_parquets.py` builds
+`spot_YYYY-MM-DD.parquet` files from this source. It was used to rebuild all
+378 corrupted spot parquets in the dataset. Use it as the reference implementation
+whenever spot parquets need to be created or regenerated.
+
+### 7.4 Guard in `stream_extract.py`
+
+`stream_extract.py` now has `SPOT_MAX_DTE = 2`. The spot OHLC accumulator only
+accepts ticks from options with DTE ≤ 2, limiting contamination from long-DTE
+instruments. Future `bulk_fetch.py` runs will produce clean spot tracks without
+needing `rebuild_spot_parquets.py`, but the derivative_ticker approach remains
+cleaner for any spot-only rebuild.
+
+---
+
 ## Summary Table
 
 | Issue | Frequency | Action |

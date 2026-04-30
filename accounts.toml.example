@@ -1,0 +1,30 @@
+# ===========================================================================
+# CryoTrader — Named Accounts  (EXAMPLE — copy to accounts.toml and fill in)
+#
+# Maps friendly account names to the env-var names that hold the actual
+# API credentials (in .env).  No secrets here — just pointers.
+#
+# Used by slot_config.py when generating .env.slot-XX files.
+# ===========================================================================
+
+[exchange-main]
+exchange = "coincall"          # coincall | deribit
+environment = "production"     # production | testnet
+api_key_env = "EXCHANGE_API_KEY_PROD"       # name of env var holding key
+api_secret_env = "EXCHANGE_API_SECRET_PROD" # name of env var holding secret
+
+[exchange-sub]
+exchange = "coincall"
+environment = "production"
+api_key_env = "EXCHANGE_API_KEY_PRODSUB"
+api_secret_env = "EXCHANGE_API_SECRET_PRODSUB"
+
+[exchange-test]
+exchange = "coincall"
+environment = "testnet"
+api_key_env = "EXCHANGE_API_KEY_TEST"
+api_secret_env = "EXCHANGE_API_SECRET_TEST"
+
+# Add as many named accounts as you need.
+# The account name here is what you reference in slots/slot-XX.toml:
+#   account = "exchange-main"

@@ -9,8 +9,11 @@ Supports three leg configurations via the ``leg_type`` parameter:
     "call"     — sell only the call leg
     "put"      — sell only the put leg
 
-Based on short_generic.py but replaces the min_otm_pct filter with a
+Based on short_generic.py but combines the min_otm_pct filter with a
 turbulence gate:
+
+    min_otm_pct — after delta selection, push legs further OTM until they are
+                  at least min_otm_pct% away from spot.  0 disables the filter.
 
     turbulence_threshold — open only when the composite turbulence score (0–100) is
                            BELOW this value.  Default: 50.
@@ -53,6 +56,34 @@ from backtester.strategy_base import (
 _WATCH_HOURS = 4  # max hours to wait for turbulence to drop before skipping day
 
 
+def _apply_min_otm(chain, selected, spot, min_pct, is_call):
+    # type: (list, Any, float, float, bool) -> Optional[Any]
+    """If `selected` is within min_pct% of spot, push to the nearest strike
+    that satisfies the minimum OTM distance.  Returns None if none exists.
+
+    Call leg: strike must be >= spot * (1 + min_pct/100)
+    Put  leg: strike must be <= spot * (1 - min_pct/100)
+    """
+    factor = min_pct / 100.0
+    if is_call:
+        floor = spot * (1.0 + factor)
+        if selected.strike >= floor:
+            return selected  # already far enough out
+        candidates = sorted(
+            [q for q in chain if q.strike >= floor],
+            key=lambda q: q.strike,
+        )
+    else:
+        floor = spot * (1.0 - factor)
+        if selected.strike <= floor:
+            return selected  # already far enough out
+        candidates = sorted(
+            [q for q in chain if q.strike <= floor],
+            key=lambda q: q.strike, reverse=True,
+        )
+    return candidates[0] if candidates else None
+
+
 class ShortStrangleTurbulenceTp:
     """Sell N-DTE OTM strangle (delta-selected), gated by Turbulence indicator.
 
@@ -64,7 +95,7 @@ class ShortStrangleTurbulenceTp:
     """
 
     name = "short_strangle_turbulence_tp"
-    DATE_RANGE = ("2025-11-21", "2026-04-21")
+    DATE_RANGE = ("2025-12-21", "2026-04-21")
     DESCRIPTION = (
         "Sells a strangle, naked call, or naked put on a Deribit expiry N calendar "
         "days ahead (dte=1/2/3), with legs chosen by target delta. "
@@ -73,6 +104,8 @@ class ShortStrangleTurbulenceTp:
         "Entry is gated by the Turbulence indicator: opens only when the composite "
         "score (0–100) is below turbulence_threshold. Waits up to 3 hours from entry_hour; "
         "if the score stays above threshold, the day is skipped. NaN score → open freely. "
+        "min_otm_pct pushes delta-selected legs further OTM until they are at least that "
+        "percentage from spot (0 = disabled). "
         "TP uses raw ask prices. SL and max-hold exits unchanged."
     )
 
@@ -82,15 +115,16 @@ class ShortStrangleTurbulenceTp:
     ]
 
     PARAM_GRID = {
-        "leg_type":           ["strangle", "call", "put"],
-        "dte":                [1],
-        "delta":              [0.075, 0.10, 0.125, 0.15],
-        "entry_hour":         [16,17,18,19],
-        "stop_loss_pct":      [0, 4.0, 5.0],
-        "take_profit_pct":    [0],
-        "max_hold_hours":     [0],
-        "skip_weekends":      [1],
-        "turbulence_threshold": [35, 50, 65, 100],
+        "leg_type":             ["strangle"],
+        "dte":                  [1],
+        "delta":                [0.15],
+        "entry_hour":           [19],
+        "stop_loss_pct":        [4.0],
+        "take_profit_pct":      [0],
+        "max_hold_hours":       [0],
+        "skip_weekends":        [1],
+        "min_otm_pct":          [2.5],
+        "turbulence_threshold": [50],
     }
 
     def __init__(self):
@@ -105,6 +139,7 @@ class ShortStrangleTurbulenceTp:
         self._max_hold_hours = 0
         self._skip_weekends = 0
         self._turbulence_threshold = 50
+        self._min_otm_pct = 0
         self._last_trade_date = None  # type: Optional[Any]
         self._watch_start = None      # type: Optional[datetime]  # when watching began
         self._skipped_today = False   # day already skipped due to turbulence
@@ -136,6 +171,7 @@ class ShortStrangleTurbulenceTp:
         self._max_hold_hours = params.get("max_hold_hours", 0)
         self._skip_weekends = params.get("skip_weekends", 0)
         self._turbulence_threshold = params.get("turbulence_threshold", 50)
+        self._min_otm_pct = params.get("min_otm_pct", 0)
         self._max_concurrent = self._dte + 1
         self._positions = []
         self._last_trade_date = None
@@ -223,8 +259,9 @@ class ShortStrangleTurbulenceTp:
             "take_profit_pct":    self._tp_pct,
             "entry_hour":         self._entry_hour,
             "max_hold_hours":     self._max_hold_hours,
-            "skip_weekends":      self._skip_weekends,
-            "turbulence_threshold": self._turbulence_threshold,
+            "skip_weekends":        self._skip_weekends,
+            "min_otm_pct":          self._min_otm_pct,
+            "turbulence_threshold":  self._turbulence_threshold,
         }
 
     # ------------------------------------------------------------------
@@ -311,6 +348,11 @@ class ShortStrangleTurbulenceTp:
         put  = select_by_delta(puts,  -self._delta)
         if call is None or put is None:
             return
+        if self._min_otm_pct > 0:
+            call = _apply_min_otm(calls, call, state.spot, self._min_otm_pct, is_call=True)
+            put  = _apply_min_otm(puts,  put,  state.spot, self._min_otm_pct, is_call=False)
+            if call is None or put is None:
+                return  # no qualifying strike this tick — skip entry
         if call.bid <= 0 or put.bid <= 0:
             return
         call_usd  = call.bid_usd
@@ -350,6 +392,10 @@ class ShortStrangleTurbulenceTp:
         leg = select_by_delta(quotes, target_delta)
         if leg is None:
             return
+        if self._min_otm_pct > 0:
+            leg = _apply_min_otm(quotes, leg, state.spot, self._min_otm_pct, is_call=is_call)
+            if leg is None:
+                return  # no qualifying strike this tick — skip entry
         if leg.bid <= 0:
             return
         entry_usd = leg.bid_usd

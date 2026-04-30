@@ -240,7 +240,7 @@ def _on_trade_opened(trade, account) -> None:
         trade.metadata["entry_index_price"] = index_price
 
     leg = trade.open_legs[0] if trade.open_legs else None
-    premium = leg.fill_price if leg and leg.fill_price else 0
+    premium = float(leg.fill_price) if leg and leg.fill_price else 0.0
 
     fp = compute_fair_price(leg.symbol) if leg else None
     fair_at_open = None

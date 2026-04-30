@@ -129,6 +129,51 @@ reprice_interval = 60.0
 min_floor_price = 0.0001
 
 # ─────────────────────────────────────────────────────────────────────────────
+# supertrend_long_call — supertrend_long_call open/close
+#
+# Single long-call leg driven by a SuperTrend flip on 1h BTCUSDT bars.
+# Signal-driven (not time-driven), so both open and close must succeed
+# decisively — we don't want to miss an entry on a flip-up or fail to
+# close after a flip-down.
+#
+# Open (two phases, total ≤ 210s):
+#   Phase 1 — 30s at fair price (aggression 0.0): try the mid/mark.
+#   Phase 2 — 180s aggressive past ask with a 2% buffer: ensure we get filled.
+#
+# Close (two phases, total ≤ 210s):
+#   Phase 1 — 30s at fair price (aggression 0.0): try the mid/mark.
+#   Phase 2 — 180s aggressive past bid with a 2% buffer: ensure we close.
+# ─────────────────────────────────────────────────────────────────────────────
+[profile.supertrend_long_call]
+open_atomic = true
+close_best_effort = true
+rfq_mode = "never"
+
+[profile.supertrend_long_call.open_phase_1]
+pricing = "fair"
+fair_aggression = 0.0
+duration_seconds = 30.0
+reprice_interval = 30.0
+
+[profile.supertrend_long_call.open_phase_2]
+pricing = "aggressive"
+duration_seconds = 180.0
+buffer_pct = 2.0
+reprice_interval = 30.0
+
+[profile.supertrend_long_call.close_phase_1]
+pricing = "fair"
+fair_aggression = 0.0
+duration_seconds = 30.0
+reprice_interval = 30.0
+
+[profile.supertrend_long_call.close_phase_2]
+pricing = "aggressive"
+duration_seconds = 180.0
+buffer_pct = 2.0
+reprice_interval = 30.0
+
+# ─────────────────────────────────────────────────────────────────────────────
 # max_hold_close_1phase — short_strangle_delta_tp max-hold close override
 # ─────────────────────────────────────────────────────────────────────────────
 [profile.max_hold_close_1phase]
@@ -141,3 +186,53 @@ pricing = "fair"
 fair_aggression = 1.0
 duration_seconds = 30.0
 reprice_interval = 15.0
+
+# ─────────────────────────────────────────────────────────────────────────────
+# strangle_turb_best_effort — short_str_turb_dyn open/close
+#
+# Designed for strategies that tolerate an asymmetric (uneven) position after
+# open execution.  Rationale: when selling a short strangle near entry_hour,
+# it is more important to get into the trade than to guarantee symmetric fills.
+# If one leg only partially fills, we accept the resulting position and start
+# monitoring SL/TP immediately rather than unwinding and missing the trade.
+#
+# Open (two phases, total ≤ 8 min):
+#   Phase 1 — 3 min at fair price (aggression=0), reprice every 30 s.
+#             Goal: get filled passively at a good price.
+#   Phase 2 — 5 min at bid/ask aggressively (aggression=1.0), reprice every 30 s.
+#             Goal: sweep up any remaining unfilled qty.
+#   On exhaustion: accept whatever structure filled (open_best_effort_exhaustion=true).
+#   If nothing filled at all, the trade is still marked FAILED.
+#
+# Close: standard 2-phase (fair then aggressive), matching delta_strangle_2phase.
+# ─────────────────────────────────────────────────────────────────────────────
+[profile.strangle_turb_best_effort]
+open_atomic                 = false   # don't abort if a leg can't be priced at placement
+open_best_effort_exhaustion = true    # accept partial fills on phase exhaustion (not unwind)
+close_best_effort           = true
+rfq_mode                    = "never"
+
+[profile.strangle_turb_best_effort.open_phase_1]
+pricing          = "fair"
+fair_aggression  = 0.0
+duration_seconds = 180.0
+reprice_interval = 30.0
+
+[profile.strangle_turb_best_effort.open_phase_2]
+pricing          = "fair"
+fair_aggression  = 1.0    # price at bid (for sells) — aggressive
+duration_seconds = 300.0
+reprice_interval = 30.0
+
+[profile.strangle_turb_best_effort.close_phase_1]
+pricing          = "fair"
+fair_aggression  = 0.0
+duration_seconds = 30.0
+reprice_interval = 30.0
+
+[profile.strangle_turb_best_effort.close_phase_2]
+pricing          = "fair"
+fair_aggression  = 1.0
+duration_seconds = 60.0
+reprice_interval = 15.0
+min_floor_price  = 0.0001

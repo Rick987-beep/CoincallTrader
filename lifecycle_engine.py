@@ -353,7 +353,44 @@ class LifecycleEngine:
                     leg.order_id = ls.order_id
             mgr.cancel_all()
             filled_legs = [leg for leg in trade.open_legs if leg.filled_qty > 0]
-            if filled_legs:
+
+            # Check whether the profile opts into best-effort exhaustion.
+            # When open_best_effort_exhaustion=True, we accept whatever structure
+            # filled (potentially uneven across legs) and transition to OPEN rather
+            # than unwinding.  This mirrors close_best_effort but for the open side:
+            # the strategy has explicitly declared that a partial or asymmetric
+            # position is preferable to missing the trade entirely.
+            # If nothing filled at all, we still mark the trade FAILED regardless.
+            profile = self._router._resolve_profile(trade)
+            accept_partial = profile.open_best_effort_exhaustion if profile else False
+
+            if filled_legs and accept_partial:
+                trade.currency = _currency
+                if result.total_fees:
+                    trade.open_fees = result.total_fees
+                trade.state = TradeState.OPEN
+                trade.opened_at = time.time()
+                logger.warning(
+                    f"Trade {trade.id}: open phases exhausted — accepting partial fills "
+                    f"({len(filled_legs)}/{len(trade.open_legs)} legs filled) → OPEN"
+                )
+                _strategy_logger.info({
+                    "event": "TRADE_OPENED_PARTIAL",
+                    "trade_id": trade.id,
+                    "fill_status": "partial_exhaustion",
+                    "legs": [
+                        {
+                            "symbol": l.symbol,
+                            "fill_price": float(l.fill_price) if l.fill_price is not None else None,
+                            "filled_qty": l.filled_qty,
+                            "target_qty": l.qty,
+                        }
+                        for l in trade.open_legs
+                    ],
+                    "fee_total": float(result.total_fees) if result.total_fees else None,
+                    "denomination": trade.currency.value if trade.currency else None,
+                })
+            elif filled_legs:
                 logger.warning(
                     f"Trade {trade.id}: {len(filled_legs)} legs have partial fills "
                     f"— unwinding"

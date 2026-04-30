@@ -387,7 +387,7 @@ def _create_app(
                     "symbol": rec.symbol,
                     "side": rec.side,
                     "qty": rec.qty,
-                    "price": rec.price,
+                    "price": {"amount": rec.price.amount, "currency": rec.price.currency.value} if rec.price is not None else None,
                     "filled_qty": rec.filled_qty,
                     "status": rec.status.value if hasattr(rec.status, 'value') else str(rec.status),
                     "placed_at": rec.placed_at,

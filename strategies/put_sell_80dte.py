@@ -27,7 +27,7 @@ Stop Loss (mid-price based, 250% of premium):
 
 Expiry Selection:
   Target DTE is 80, but exact-day matching would miss most days since monthly
-  expirations are ~30 days apart.  A ±15-day window (dte_min=65, dte_max=95)
+  expirations are ~30 days apart.  A window of dte_min=59, dte_max=95
   is used so that exactly one monthly expiry is always in range, allowing a
   new entry every calendar day.  The nearest-expiry logic in option_selection
   picks whichever expiry timestamp is closest to 80 days from today.
@@ -251,7 +251,7 @@ def _on_trade_opened(trade, account) -> None:
         trade.metadata["entry_index_price"] = index_price
 
     leg     = trade.open_legs[0] if trade.open_legs else None
-    premium = leg.fill_price if leg and leg.fill_price else 0
+    premium = float(leg.fill_price) if leg and leg.fill_price else 0.0
 
     px = get_option_prices(leg.symbol) if leg else None
     mid_at_open = None
@@ -487,12 +487,10 @@ def put_sell_80dte() -> StrategyConfig:
                 side="sell",
                 qty=QTY,
                 strike_criteria={"type": "delta", "value": TARGET_DELTA},
-                # dte_min/dte_max: ±15 days around target DTE.
-                # Monthly expirations are ~30 days apart, so this window always
-                # captures exactly one expiry and allows a new entry every day.
-                # The nearest-DTE logic in option_selection.py then picks the
-                # expiry whose timestamp is closest to DTE days from today.
-                expiry_criteria={"dte": DTE, "dte_min": DTE - 15, "dte_max": DTE + 15},
+                # dte_min/dte_max: window around target DTE.
+                # dte_min=59 (was 65) to bridge the gap when the nearest monthly
+                # expiry crosses below the original lower bound.
+                expiry_criteria={"dte": DTE, "dte_min": 59, "dte_max": 95},
             ),
         ],
 

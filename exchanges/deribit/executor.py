@@ -41,6 +41,21 @@ def _snap_to_tick(price: float) -> float:
     return max(snapped, tick)  # never send 0.0 — clamp to minimum valid tick
 
 
+def _snap_qty(qty: float) -> float:
+    """
+    Snap a contract quantity to Deribit's minimum lot size (0.1 contracts).
+
+    Deribit requires quantities to be a multiple of 0.1. When the order
+    manager computes a remaining qty after a partial fill — e.g.
+    10.0 - 9.4 — IEEE 754 arithmetic produces 0.5999999999999996 instead
+    of 0.6. Sending that raw float fails Deribit validation with
+    'Invalid params'. Rounding here at the outbound boundary, mirroring
+    how _snap_to_tick normalises prices, ensures the exchange always
+    receives a clean value regardless of how the qty was derived.
+    """
+    return round(round(qty / 0.1) * 0.1, 1)
+
+
 class DeribitExecutorAdapter(ExchangeExecutor):
     """Order placement, cancellation, and status for Deribit."""
 
@@ -77,7 +92,7 @@ class DeribitExecutorAdapter(ExchangeExecutor):
 
         params = {
             "instrument_name": symbol,
-            "amount": qty,
+            "amount": _snap_qty(qty),
             "type": "market" if order_type == 2 else "limit",
         }
 

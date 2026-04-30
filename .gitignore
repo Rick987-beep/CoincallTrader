@@ -74,6 +74,15 @@ servers.toml
 # Slot & hub env files (per-slot API keys/config)
 .env.slot-*
 .env.hub
+.env.recorder
+
+# Operational config (account/exchange structure, slot params — not for public repo)
+accounts.toml
+slots/slot-*.toml
+
+# Private AI working notes and agent configs
+memory/
+.claude/
 
 # Project specific
 archive/
@@ -81,7 +90,7 @@ archive/
 *.sqlite3
 
 # Large data files (tardis.dev downloads, parquet extracts)
-analysis/tardis_options/data/
+
 
 # Backtester2 artifacts (snapshots, raw data, generated reports)
 backtester2/snapshots/
@@ -92,8 +101,7 @@ backtester2/*_report.html
 indicators/data/
 
 # Backtester artifacts (data, raw ingest, tardis downloads, reports)
-backtester/data/
-backtester/data_dte700/
+backtester/data*/
 backtester/ingest/raw/
 backtester/ingest/tardis/data/
 backtester/ingest/tickrecorder/data/

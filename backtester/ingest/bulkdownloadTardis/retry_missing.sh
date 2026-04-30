@@ -1,9 +1,16 @@
 #!/usr/bin/env bash
-# retry_missing.sh — Re-check and re-download the 20 dates that returned empty
-# gzip files from Tardis (HTTP 200, 20 bytes, no S3 redirect).
+# retry_missing.sh — One-time fix for a specific Tardis availability event.
+#
+# During the original bulk download, these 20 specific dates returned empty gzip
+# files from Tardis (HTTP 200, ~20 bytes, no S3 redirect). This was a transient
+# server-side issue — Tardis had not yet populated those dates' files. This script
+# was written to check back later and re-download only those dates once available.
+#
+# This is NOT a general-purpose retry utility. The 20 dates are hardcoded. If you
+# need to re-run a different set of dates, use bulk_fetch.py directly with --date.
 #
 # Strategy: probe each date with a cheap curl check first (takes ~1s).
-#   - HTTP 302 → Wasabi S3 = data is available → run full bulk_fetch download
+#   - HTTP 302 → Wasabi S3 = data is now available → run full bulk_fetch download
 #   - HTTP 200 + <=20 bytes = still missing on Tardis → log and skip immediately
 #
 # This avoids burning 4×retry cycles (~25s) on dates still missing at Tardis.
@@ -89,10 +96,12 @@ probe_date() {
 
     echo "[probe]  ${date} → HTTP ${http_code}, ${size} bytes received" | tee -a "${LOGFILE}"
 
-    if [[ "${http_code}" == "302" ]]; then
+    if [[ "${http_code}" == "200" ]] && [[ "${size}" -gt 1000 ]]; then
         return 0
     elif [[ "${http_code}" == "200" ]] && [[ "${size}" -le 20 ]]; then
         return 1
+    elif [[ "${http_code}" == "302" ]]; then
+        return 0
     else
         echo "[probe]  ${date} → unexpected response (HTTP ${http_code}, ${size} bytes)" | tee -a "${LOGFILE}"
         return 2

@@ -46,6 +46,14 @@ INTERVAL_US = INTERVAL_MIN * 60 * 1_000_000     # 5-min in microseconds
 SPOT_INTERVAL_US = 60 * 1_000_000                # 1-min in microseconds
 MAX_DTE_DEFAULT = 700
 
+# Only use near-expiry options to source the 1-min spot OHLC.
+# Long-DTE options (e.g. 358-DTE Dec contracts) have underlying_price equal
+# to the quarterly futures settlement price, not the spot index — causing
+# large corrupted spikes in the spot track.  DTE ≤ 2 ensures we only use
+# same-day and next-day options whose underlying_price ≈ actual spot.
+# See backtester/ingest/SPOT_DATA_ISSUE.md for root-cause details.
+SPOT_MAX_DTE = 2
+
 DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
 
 _MONTH = {
@@ -247,7 +255,10 @@ def stream_extract(
             ]
 
             # ── 1-min spot OHLC ──────────────────────────────────────────────
-            if not math.isnan(spot_val):
+            # Gate spot OHLC on SPOT_MAX_DTE: only near-expiry options have
+            # underlying_price ≈ actual spot index.  Long-DTE options use the
+            # quarterly futures settlement price, which corrupts the spot track.
+            if not math.isnan(spot_val) and dte is not None and dte <= SPOT_MAX_DTE:
                 bucket = (ts // SPOT_INTERVAL_US) * SPOT_INTERVAL_US
                 bar = spot_bars.get(bucket)
                 if bar is None:

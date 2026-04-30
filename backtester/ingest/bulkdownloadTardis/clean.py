@@ -79,6 +79,11 @@ class CleanReport:
     final_rows: int = 0
     suspect: bool = False               # True if final_rows < MIN_ROWS_PLAUSIBLE
 
+    # Step 7: spot validation (corruption signature check)
+    spot_corrupted: bool = False        # True if spot OHLC shows futures-price spike
+    spot_max_high_dev: float = 0.0      # max(high) / median(close) - 1
+    spot_max_close_dev: float = 0.0     # max(close) / median(close) - 1
+
     def summary(self):
         # type: () -> str
         parts = [f"[clean] {self.date_str}  final_rows={self.final_rows:,}"]
@@ -100,6 +105,12 @@ class CleanReport:
             parts.append(f"mark_clamped_high={self.mark_clamped_high:,}")
         if self.suspect:
             parts.append("SUSPECT=True")
+        if self.spot_corrupted:
+            parts.append(
+                f"SPOT_CORRUPTED=True"
+                f"(high_dev={self.spot_max_high_dev*100:.2f}%,"
+                f" close_dev={self.spot_max_close_dev*100:.2f}%)"
+            )
         return "  ".join(parts)
 
 
@@ -219,6 +230,24 @@ def clean_day(opts_df, spot_df, date_str="unknown"):
     report.final_rows = len(opts)
     if report.final_rows < MIN_ROWS_PLAUSIBLE:
         report.suspect = True
+
+    # ── Step 7: Spot corruption signature check ──────────────────────────────
+    # Detect the specific corruption pattern from SPOT_DATA_ISSUE.md:
+    # long-DTE options carry underlying_price = quarterly futures settlement
+    # price, causing artificial high spikes 4-5% above the true spot index.
+    # Thresholds from SPOT_DATA_ISSUE.md §9:
+    #   max_close_dev < 4%  (max close vs median close)
+    #   max_high_dev  < 6%  (max high  vs median close)
+    if len(spot) > 0 and "close" in spot.columns and "high" in spot.columns:
+        median_close = float(spot["close"].median())
+        if median_close > 0:
+            max_close = float(spot["close"].max())
+            max_high = float(spot["high"].max())
+            report.spot_max_close_dev = max_close / median_close - 1.0
+            report.spot_max_high_dev = max_high / median_close - 1.0
+            if report.spot_max_close_dev > 0.04 or report.spot_max_high_dev > 0.06:
+                report.spot_corrupted = True
+                report.suspect = True
 
     return opts, spot, report
 

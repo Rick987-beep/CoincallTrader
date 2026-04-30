@@ -555,6 +555,7 @@ class StrategyConfig:
     on_trade_closed: Optional[Callable] = None   # (TradeLifecycle, AccountSnapshot) -> None
     on_trade_opened: Optional[Callable] = None   # (TradeLifecycle, AccountSnapshot) -> None
     metadata: Dict[str, Any] = field(default_factory=dict)
+    legs_factory: Optional[Callable] = None      # callable(market_data) -> List[TradeLeg]; overrides legs when set
 
 
 # =============================================================================
@@ -748,7 +749,10 @@ class StrategyRunner:
     def _open_trade(self) -> None:
         """Resolve leg specs to concrete symbols and open a trade."""
         try:
-            legs = resolve_legs(self.config.legs, self.ctx.market_data)
+            if self.config.legs_factory is not None:
+                legs = self.config.legs_factory(self.ctx.market_data)
+            else:
+                legs = resolve_legs(self.config.legs, self.ctx.market_data)
             logger.info(
                 f"[{self._strategy_id}] resolved {len(legs)} legs: "
                 f"{[l.symbol for l in legs]}"

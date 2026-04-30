@@ -52,6 +52,14 @@ class ExecutionProfile:
     close_best_effort: bool = True
     rfq_mode: str = "never"        # "never", "hybrid", "always"
     max_open_retries: int = 3      # retries for skipped legs before unwind
+    # open_best_effort_exhaustion: when True, if all open phases are exhausted
+    # and at least one leg has a partial fill, accept the resulting (potentially
+    # uneven) structure and transition to OPEN instead of unwinding.
+    # This is the open-side counterpart of close_best_effort — same philosophy,
+    # applied at phase exhaustion rather than placement time (open_atomic).
+    # Intended for strategies that tolerate asymmetric positions, e.g. a strangle
+    # where one leg filled 10 contracts and the other filled 9 or 0.
+    open_best_effort_exhaustion: bool = False
 
     def apply_overrides(self, overrides: Dict[str, Any]) -> "ExecutionProfile":
         """Return a copy with field-level overrides applied.
@@ -130,6 +138,7 @@ def load_profiles(
             open_atomic=section.get("open_atomic", True),
             close_best_effort=section.get("close_best_effort", True),
             rfq_mode=section.get("rfq_mode", "never"),
+            open_best_effort_exhaustion=section.get("open_best_effort_exhaustion", False),
         )
     return profiles
 

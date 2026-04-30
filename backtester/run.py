@@ -32,6 +32,7 @@ from backtester.strategies.short_strangle_weekly_cap import ShortStrangleWeeklyC
 from backtester.strategies.short_strangle_weekend import ShortStrangleWeekend
 from backtester.strategies.batman_calendar import BatmanCalendar
 from backtester.strategies.short_strangle_turbulence_tp import ShortStrangleTurbulenceTp
+from backtester.strategies.short_str_turb_dyn import ShortStrTurbDyn
 from backtester.strategies.long_strangle_weekend import LongStrangleWeekend
 from backtester.config import cfg as _cfg
 
@@ -48,6 +49,7 @@ STRATEGIES = {
     "weekend_strangle": ShortStrangleWeekend,
     "batman_calendar": BatmanCalendar,
     "turbulence_strangle_tp": ShortStrangleTurbulenceTp,
+    "short_str_turb_dyn": ShortStrTurbDyn,
     "long_strangle_weekend": LongStrangleWeekend,
 }
 

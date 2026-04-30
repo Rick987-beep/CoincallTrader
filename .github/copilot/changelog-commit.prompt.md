@@ -79,14 +79,16 @@ Rules:
 
 ## Step 4 — Insert entry into CHANGELOG.md
 
+First, read `CHANGELOG.md` to get the **exact text** of the first `## [X.Y.Z]` header line (including the date if present). You need this literal string as the `replace_string_in_file` target — do not guess or hardcode it.
+
 Insert the new entry **immediately after** the header block (after the `and this project adheres to...` line and before the first `## [` entry).
 
-Use `replace_string_in_file` targeting the exact block:
+Use `replace_string_in_file` targeting the exact block you just read:
 
 ```
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.7.0]
+## [X.Y.Z] - YYYY-MM-DD   ← use the actual line from CHANGELOG.md
 ```
 
 Replace with the same text but with your new entry inserted between them.
@@ -102,11 +104,13 @@ Replace with the same text but with your new entry inserted between them.
    - Blank line
    - Bullet summary of changes (2-5 lines max)
 
-2. Stage the changelog and any modified source files:
+2. Stage everything, then unstage the private exclusions — run these two commands verbatim, in order, with no reasoning:
    ```
-   git add CHANGELOG.md
-   git add <other changed files — NOT analysis/, logs/, archive/, .env files>
+   git add -A
+   git restore --staged memory/ .claude/ accounts.toml slots/slot-*.toml
    ```
+   This is the **immutable exclusion list**. Do not modify it, do not reason about it, do not iterate over files.
+   Note: most private files are already covered by `.gitignore` (`.env*`, `logs/`, `archive/`, `servers.toml`, etc.) so `git add -A` will never stage them in the first place. The `git restore --staged` step catches anything that slipped through (e.g. files tracked before the gitignore rule was added).
 
 3. Commit using the file:
    ```
@@ -124,7 +128,7 @@ Replace with the same text but with your new entry inserted between them.
 
 ## Hard rules
 
-- Never stage or commit: `.env`, `.env.*`, `accounts.toml`, `logs/`, `analysis/`, `archive/`, `*.toml` with secrets
+- **Staging is non-negotiable:** always `git add -A` then `git restore --staged memory/ .claude/ accounts.toml slots/slot-*.toml` — never manually select files, never iterate, never reason about what to include
 - Never use `git commit -m "..."` with newlines — always use `/tmp/commit_msg.txt`
 - Do not ask for confirmation at any step — run to completion
 - If `git push` fails (e.g. non-fast-forward), run `git pull --rebase origin main` then push again

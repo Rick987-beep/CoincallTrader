@@ -25,12 +25,12 @@ dte                   = 1      # target expiry: 1 calendar day ahead
 delta                 = 0.15   # target absolute delta per leg (15Δ call + 15Δ put)
 entry_hour            = 19     # UTC hour to start watching for entry (watches until midnight)
 turbulence_threshold  = 60     # open only when composite turbulence < this value
-stop_loss_pct         = 5.0    # SL fires when combined fair ≥ premium × (1 + stop_loss_pct)
+stop_loss_pct         = 4.7    # SL fires when combined fair ≥ premium × (1 + stop_loss_pct)
 take_profit_pct       = 0.0    # TP disabled (0 = off)
 max_hold_hours        = 0      # max hold in hours; 0 = disabled (hold to 08:00 UTC expiry)
-min_otm_pct           = 2.4    # min OTM distance %; 0 = disabled
-dyn_target_premium    = 500    # USD target premium per trade; 0 = fixed qty=1
-max_quantity          = 10     # hard cap on contracts per leg
-min_qty_price_floor   = 0.0002 # min assumed price per leg (BTC) for qty sizing; matches execution profile floor
+min_otm_pct           = 2.5    # min OTM distance %; 0 = disabled
+dyn_target_premium    = 600    # USD target premium per trade; 0 = fixed qty=1
+max_quantity          = 13     # hard cap on contracts per leg
+min_qty_price_floor   = 0      # min assumed price per leg (BTC) for qty sizing; 0 = disabled (use mark directly)
 weekend_filter        = 1      # 1 = block new opens on Sat/Sun
 check_interval        = 15     # seconds between strategy ticks

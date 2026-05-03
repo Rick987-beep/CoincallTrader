@@ -33,6 +33,7 @@ min_otm_pct           = 2.5
 turbulence_threshold  = 60
 dyn_target_premium    = 500
 max_quantity          = 20.0
+leg_min_price         = 0     # 0 = disabled (matches pre-v1.19 behaviour)
 
 [sensitivity.deviation.leg_type]
 type = "fixed"
@@ -74,6 +75,9 @@ amount = 20        # ±20% → [400, 450, 500, 550, 600]
 [sensitivity.deviation.max_quantity]
 type   = "abs"
 amount = 5         # ±5 → [10, 15, 20, 25, 30]
+
+[sensitivity.deviation.leg_min_price]
+type = "fixed"     # 0 = disabled throughout sensitivity
 
 
 # ── Walk-forward validation ──────────────────────────────────────

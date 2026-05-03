@@ -127,9 +127,10 @@ def _compute_quantity(combined_premium_usd: float) -> float:
 _DERIBIT_MIN_TICK = 0.0001
 
 # Minimum assumed price per leg for quantity sizing (BTC).
-# Should match open_phase min_floor_price in the execution profile so that
-# _compute_quantity() never inflates qty based on a price the engine won't
-# actually accept.  Overridable via PARAM_MIN_QTY_PRICE_FLOOR.
+# When > 0: applied as a floor in _bid_price() fallbacks (bid=0 or both-zero).
+# When 0:   floor is disabled — mark is used directly; both-zero returns 0,
+#           which causes _compute_quantity() to return 1.0 (fixed-qty fallback).
+# Overridable via PARAM_MIN_QTY_PRICE_FLOOR; set to 0 to disable.
 MIN_QTY_PRICE_FLOOR = _p("MIN_QTY_PRICE_FLOOR", 0.0002)
 
 
@@ -139,14 +140,19 @@ def _bid_price(symbol: str) -> float:
 
     Used only for quantity sizing in _legs_factory — not for placing orders.
     Fallback ladder for low-liquidity / empty-book legs:
-      1. bid > 0              → use bid directly
-      2. bid = 0, mark > 0   → use max(mark, MIN_QTY_PRICE_FLOOR)
-      3. both zero            → use MIN_QTY_PRICE_FLOOR, log a warning
+      1. bid > 0                              → use bid directly
+      2. bid = 0, mark > 0, floor > 0         → use max(mark, MIN_QTY_PRICE_FLOOR)
+      3. bid = 0, mark > 0, floor = 0         → use mark directly
+      4. both zero, floor > 0                 → use MIN_QTY_PRICE_FLOOR, log warning
+      5. both zero, floor = 0                 → return 0 → _compute_quantity falls back to qty=1.0
     """
     fp = _fair(symbol)
     if fp is None:
-        logger.warning("[ShortStrTurbDyn] _bid_price: no data for %s — using floor %.4f", symbol, MIN_QTY_PRICE_FLOOR)
-        return MIN_QTY_PRICE_FLOOR
+        if MIN_QTY_PRICE_FLOOR > 0:
+            logger.warning("[ShortStrTurbDyn] _bid_price: no data for %s — using floor %.4f", symbol, MIN_QTY_PRICE_FLOOR)
+            return MIN_QTY_PRICE_FLOOR
+        logger.warning("[ShortStrTurbDyn] _bid_price: no data for %s — returning 0 (floor disabled)", symbol)
+        return 0.0
 
     bid  = fp.get("bid") or 0.0
     mark = fp.get("mark") or 0.0
@@ -154,18 +160,28 @@ def _bid_price(symbol: str) -> float:
     if bid > 0:
         return bid
     if mark > 0:
-        price = max(mark, MIN_QTY_PRICE_FLOOR)
+        if MIN_QTY_PRICE_FLOOR > 0:
+            price = max(mark, MIN_QTY_PRICE_FLOOR)
+            logger.debug(
+                "[ShortStrTurbDyn] _bid_price: %s bid=0, mark=%.4f → using %.4f (floor applied)",
+                symbol, mark, price,
+            )
+            return price
         logger.debug(
-            "[ShortStrTurbDyn] _bid_price: %s bid=0, mark=%.4f → using %.4f",
-            symbol, mark, price,
+            "[ShortStrTurbDyn] _bid_price: %s bid=0, mark=%.4f → using mark directly (floor disabled)",
+            symbol, mark,
         )
-        return price
+        return mark
 
-    logger.warning(
-        "[ShortStrTurbDyn] _bid_price: %s bid=0 mark=0 — using floor %.4f",
-        symbol, MIN_QTY_PRICE_FLOOR,
-    )
-    return MIN_QTY_PRICE_FLOOR
+    if MIN_QTY_PRICE_FLOOR > 0:
+        logger.warning(
+            "[ShortStrTurbDyn] _bid_price: %s bid=0 mark=0 — using floor %.4f",
+            symbol, MIN_QTY_PRICE_FLOOR,
+        )
+        return MIN_QTY_PRICE_FLOOR
+
+    logger.warning("[ShortStrTurbDyn] _bid_price: %s bid=0 mark=0 — returning 0 (floor disabled, qty→1.0)", symbol)
+    return 0.0
 
 
 def _legs_factory(market_data):

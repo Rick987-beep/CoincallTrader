@@ -2,7 +2,7 @@
 
 Automated BTC options trading system with multi-exchange support (Coincall, Deribit).
 
-**Version:** 1.14.0 | **Python:** 3.9+ | **VPS:** Hetzner CPX22, Ubuntu 24.04
+**Version:** 1.19.0 | **Python:** 3.12 | **VPS:** Hetzner CPX22, Ubuntu 24.04
 
 ---
 

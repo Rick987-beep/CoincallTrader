@@ -14,10 +14,7 @@ Usage::
 import os
 from dataclasses import dataclass
 
-try:
-    import tomllib  # Python 3.11+
-except ImportError:
-    import tomli as tomllib  # type: ignore[no-redef]  # Python <3.11
+import tomllib
 
 _CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.toml")
 

@@ -285,7 +285,7 @@ python -m pytest tests/live/ -m live -v   # live tests — Deribit testnet, neve
 
 ## Coding Conventions
 
-- Python 3.9+ — **no 3.10+ syntax** (`Optional[X]` not `X | None`)
+- Python 3.12 — `Optional[X]` / `Union[X, Y]` style is still used throughout; newer `X | None` syntax is permitted but not required for consistency with existing code
 - Venv: `.venv` — use `.venv/bin/python3` directly
 - Dataclasses everywhere; frozen for thread-safe snapshots
 - Factory functions for conditions — return callables, not classes

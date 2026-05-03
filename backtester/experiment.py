@@ -21,10 +21,7 @@ import os
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
-try:
-    import tomllib          # Python 3.11+
-except ImportError:
-    import tomli as tomllib  # type: ignore[no-redef]  # Python <3.11
+import tomllib
 
 EXPERIMENTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "experiments")
 

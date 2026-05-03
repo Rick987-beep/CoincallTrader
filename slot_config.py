@@ -13,10 +13,7 @@ Called automatically by deploy-slot.sh before rsync.
 import os
 import sys
 
-try:
-    import tomllib                     # Python 3.11+
-except ModuleNotFoundError:
-    import tomli as tomllib            # Python 3.9/3.10 fallback
+import tomllib
 
 from dotenv import dotenv_values
 

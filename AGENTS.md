@@ -45,6 +45,24 @@ Active areas of work — agents should be aware of these when the context is unc
 - **Indicators module** (`indicators/`) — Python ports of TradingView Pine indicators; `turbulence.py` is the reference implementation
 - **Backtester future** — possible separation into its own repo; rich GUI under consideration
 
+### ⚠️ Pending: Server Python upgrade (not yet done)
+
+The dev venv was upgraded to **Python 3.12** (May 2026) but the **VPS still runs Python 3.9** venvs.
+Before the next deploy to each slot/hub/recorder, the server-side venv must be recreated:
+
+```bash
+# On the VPS, for each service (slot-01, slot-02, hub, recorder):
+cd /opt/ct/<slot-dir>
+rm -rf .venv
+python3.12 -m venv .venv
+.venv/bin/pip install -r requirements.txt
+```
+
+Ubuntu 24.04 ships `python3.12` — no install needed on the server.
+Also: `deployment/deploy-slot.sh` and `deployment/ssh-server.sh` contain embedded Python
+snippets that run with the **system** `python3` (still 3.9); their `tomllib`/`tomli`
+try/except fallbacks must stay until those scripts are updated to call `python3.12` explicitly.
+
 ---
 
 ## What this repo is

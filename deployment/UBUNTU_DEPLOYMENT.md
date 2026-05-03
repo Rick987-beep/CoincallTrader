@@ -180,6 +180,16 @@ parquet files are written on the server. Additional `RECORDER_*` overrides are a
 5. **Copy `.env`** — `.env.slot-XX` → `/opt/ct/slot-XX/.env`
 6. **Patch `.env`** — `DEPLOYMENT_TARGET=production` via `sed` on server
 7. **Install deps** — `pip install -r requirements.txt` in server venv
+
+> ⚠️ **Pending one-time task (May 2026):** The dev environment was upgraded to Python 3.12 but
+> the server venvs still use Python 3.9. Before deploying to a slot for the first time after this
+> upgrade, SSH in and recreate the venv:
+> ```bash
+> cd /opt/ct/<slot-dir>  # e.g. /opt/ct/slot-01
+> rm -rf .venv && python3.12 -m venv .venv
+> .venv/bin/pip install -r requirements.txt
+> ```
+> Ubuntu 24.04 ships `python3.12` — no extra install needed. Repeat for hub and recorder.
 8. **Start service** — start + verify it's running
 9. **Show logs** — last 15 lines for verification
 

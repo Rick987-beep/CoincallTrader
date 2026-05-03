@@ -5,6 +5,35 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.19.0] - 2026-05-03
+
+### Changed — Execution: min_floor_price enforced as hard sell-side floor
+
+- **`execution/pricing.py`** — `min_floor_price` is now applied as a true floor on the *computed* sell price, not just a zero-price safeguard; if fair/mark/ask compute a price below `min_floor_price` for a sell order, the floor is used and the reason is logged; buy orders are unaffected (raising a buy price would mean overpaying to close)
+
+### Changed — `strangle_turb_best_effort` execution profile: patient open phases
+
+- **`execution_profiles.toml`** — `strangle_turb_best_effort` open phases extended: Phase 1 is now 60 min at fair price (aggression 0.0), repricing every 5 min with `min_floor_price = 0.0002`; Phase 2 is 15 min with gentle aggression (0.33), repricing every 2 min; total open window ≤ 75 min (was 8 min)
+
+### Changed — `short_str_turb_dyn`: leg min price gate + qty floor
+
+- **`strategies/short_str_turb_dyn.py`** — added `LEG_MIN_PRICE` entry gate: both legs must have a bid ≥ this value (BTC) before the trade opens; retries silently on each 5-min tick; falls back to zero-bid guard when `leg_min_price = 0`
+- **`strategies/short_str_turb_dyn.py`** — quantity sizing now uses `math.floor` (not `round`) to the nearest 0.1 contract, ensuring we never overshoot the USD premium target
+- **`strategies/short_str_turb_dyn.py`** — added `MIN_QTY_PRICE_FLOOR` param (default 0.0002 BTC); used in `_bid_price()` fallback when bid is 0 to prevent quantity inflation on illiquid legs; default `STOP_LOSS_PCT` raised from 4.5 to 5.0
+- **`backtester/strategies/short_str_turb_dyn.py`** — `leg_min_price` parameter added to backtester counterpart; same pre-open price gate logic
+
+### Changed — Hub dashboard: account name display
+
+- **`hub/hub_dashboard.py`** — reads `SLOT_ACCOUNT` from each slot's `.env` and includes it in slot metadata; `account_name` now available in hub templates
+- **`hub/templates/`** — slot cards and overview table show account name alongside exchange/environment; various layout improvements
+
+### Added
+
+- **`backtester/experiments/short_str_turb_dyn_v1.toml`** — first experiment file for `short_str_turb_dyn`; captures the v1 parameter grid and sensitivity ranges
+- **`backtester/ingest/check_data_completeness.py`** — utility to audit parquet data for gaps and completeness
+- **`backtester/strategies/bt_supertrend_lc.py`** — backtester counterpart for the `supertrend_long_call` live strategy
+- **`slots/slot-XX.toml.example`** — template example for new slot config files
+
 ## [1.18.0] - 2026-04-30
 
 ### Added — SuperTrend Indicator & Long Call Strategy

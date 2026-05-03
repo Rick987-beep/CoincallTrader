@@ -196,11 +196,14 @@ reprice_interval = 15.0
 # If one leg only partially fills, we accept the resulting position and start
 # monitoring SL/TP immediately rather than unwinding and missing the trade.
 #
-# Open (two phases, total ≤ 8 min):
-#   Phase 1 — 3 min at fair price (aggression=0), reprice every 30 s.
-#             Goal: get filled passively at a good price.
-#   Phase 2 — 5 min at bid/ask aggressively (aggression=1.0), reprice every 30 s.
-#             Goal: sweep up any remaining unfilled qty.
+# Open (two phases, total ≤ 75 min):
+#   Phase 1 — 60 min at fair price (aggression=0), reprice every 5 min.
+#             Goal: post at a sensible price (~mark or ~ask) and wait patiently
+#             for a buyer.  min_floor_price=0.0002 prevents fills below 2× min tick.
+#             When bid=0 and ask=0.0005 the pricing engine quotes at mark≈0.0003
+#             automatically — no special logic needed.
+#   Phase 2 — 15 min, gently nudge toward bid (aggression=0.33), reprice every 2 min.
+#             Goal: close any remaining gap without crossing below the price floor.
 #   On exhaustion: accept whatever structure filled (open_best_effort_exhaustion=true).
 #   If nothing filled at all, the trade is still marked FAILED.
 #
@@ -215,14 +218,16 @@ rfq_mode                    = "never"
 [profile.strangle_turb_best_effort.open_phase_1]
 pricing          = "fair"
 fair_aggression  = 0.0
-duration_seconds = 180.0
-reprice_interval = 30.0
+duration_seconds = 3600.0  # 60 min — wait patiently for a buyer at fair price
+reprice_interval = 300.0   # reprice every 5 min (no need to hammer)
+min_floor_price  = 0.0002  # never post below 2× min tick
 
 [profile.strangle_turb_best_effort.open_phase_2]
 pricing          = "fair"
-fair_aggression  = 1.0    # price at bid (for sells) — aggressive
-duration_seconds = 300.0
-reprice_interval = 30.0
+fair_aggression  = 0.33    # gentle nudge toward bid — not a full cross
+duration_seconds = 900.0   # 15 min
+reprice_interval = 120.0   # reprice every 2 min
+min_floor_price  = 0.0002  # hold the floor through phase 2 as well
 
 [profile.strangle_turb_best_effort.close_phase_1]
 pricing          = "fair"

@@ -1,36 +1,36 @@
 # ===========================================================================
-# Slot 02 — Short Strangle Delta TP (Deribit)
+# Slot 02 — Short Strangle Turbulence Dynamic Qty (Deribit)
 #
-# Sells an OTM strangle on the Deribit expiry N calendar days ahead (dte=1/2/3).
-# Legs selected by target delta rather than a fixed USD offset.
-# Extends short_strangle_delta with take-profit and min_otm_pct.
+# Sells a delta-selected OTM strangle, gated by the Turbulence indicator,
+# with dynamic contract-quantity sizing based on a USD premium target.
+# Watches from entry_hour until midnight — no hard watch-hours cutoff.
+# Fails open on turbulence data errors (treats missing data as calm).
 #
-# Backtester2 param grid:
-#   dte:             [1, 2, 3]
-#   delta:           [0.10, 0.15, 0.20, 0.30]
-#   entry_hour:      [8, 12, 16, 18, 22]
-#   stop_loss_pct:   [2.0, 3.0, 4.0, 5.0]
-#   take_profit_pct: [0, 0.4, 0.6, 0.8]
-#   max_hold_hours:  [0, 24, 36, 48]   (0 = hold to expiry / 08:00 UTC settlement)
-#   skip_weekends:   [0, 1]
-#   min_otm_pct:     [0, 3, 4]
+# Best combo (backtester discovery 2026-05-01):
+#   delta=0.15, dte=1, entry_hour=19, turbulence_threshold=60,
+#   stop_loss_pct=5.0, take_profit_pct=0, max_hold_hours=0,
+#   min_otm_pct=2.4, dyn_target_premium=500, max_quantity=10,
+#   skip_weekends=1
 #
 # Edit params below, then deploy:
 #   ./deployment/deploy-slot.sh 02
 # ===========================================================================
 
-name = "Short Strangle Delta TP"
-strategy = "short_strangle_delta_tp"
+name = "Short Strangle Turbulence Dyn"
+strategy = "short_str_turb_dyn"
 account = "deribit-big"
 
 [params]
-qty              = 5      # contracts per leg
-dte              = 1      # target expiry: 1, 2, or 3 calendar days ahead
-delta            = 0.125  # target absolute delta per leg (e.g. 0.25 → 25Δ call + 25Δ put)
-entry_hour       = 18     # UTC hour for entry window (4-hour: ENTRY_HOUR to ENTRY_HOUR+4)
-stop_loss_pct    = 5.0    # SL fires when combined fair ≥ premium × (1 + stop_loss_pct)
-take_profit_pct  = 0.0    # TP: close when profit ratio ≥ this (0 = disabled)
-max_hold_hours   = 0      # max hold in hours; 0 = disabled (hold to 08:00 UTC expiry)
-min_otm_pct      = 0      # min OTM distance %; 0 = disabled
-weekend_filter   = 1      # 1 = block new opens on Sat/Sun
-check_interval   = 15     # seconds between strategy ticks
+dte                   = 1      # target expiry: 1 calendar day ahead
+delta                 = 0.15   # target absolute delta per leg (15Δ call + 15Δ put)
+entry_hour            = 19     # UTC hour to start watching for entry (watches until midnight)
+turbulence_threshold  = 60     # open only when composite turbulence < this value
+stop_loss_pct         = 5.0    # SL fires when combined fair ≥ premium × (1 + stop_loss_pct)
+take_profit_pct       = 0.0    # TP disabled (0 = off)
+max_hold_hours        = 0      # max hold in hours; 0 = disabled (hold to 08:00 UTC expiry)
+min_otm_pct           = 2.4    # min OTM distance %; 0 = disabled
+dyn_target_premium    = 500    # USD target premium per trade; 0 = fixed qty=1
+max_quantity          = 10     # hard cap on contracts per leg
+min_qty_price_floor   = 0.0002 # min assumed price per leg (BTC) for qty sizing; matches execution profile floor
+weekend_filter        = 1      # 1 = block new opens on Sat/Sun
+check_interval        = 15     # seconds between strategy ticks

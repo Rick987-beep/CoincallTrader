@@ -228,9 +228,9 @@
     </div>
   </div>
 
-  <!-- ── Overview (auto-refreshing) ──────────────────────────────── -->
+  <!-- ── Overview (auto-refreshing + refreshed on any control action) ── -->
   <div id="overview"
-       hx-get="/api/overview" hx-trigger="load, every 5s" hx-swap="innerHTML">
+       hx-get="/api/overview" hx-trigger="load, every 5s, refreshOverview from:body" hx-swap="innerHTML">
     <p class="muted">Loading...</p>
   </div>
 

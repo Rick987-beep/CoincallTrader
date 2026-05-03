@@ -52,16 +52,28 @@
   {% for s in slots %}
   <div class="slot-card {{ '' if s.online else 'offline' }}">
 
-    <!-- Header -->
+    <!-- Header: title / slot# / account-name | uptime / snap-age / badges -->
     <div class="slot-header">
       <div>
         <span class="slot-title">{{ s.name }}</span>
         <span class="slot-id">#{{ s.id }}</span>
-        {% if s.account_id %}
+        {% if s.account_name %}
+          <span class="slot-acct-id">{{ s.account_name }}</span>
+        {% elif s.account_id %}
           <span class="slot-acct-id">{{ s.account_id }}</span>
         {% endif %}
       </div>
       <div class="slot-badges">
+        {% if s.health %}
+          <span style="color: #8b949e; font-size: 0.7rem; white-space: nowrap;">
+            ⏱ {{ s.health.uptime_secs // 3600 }}h {{ (s.health.uptime_secs % 3600) // 60 }}m
+          </span>
+          {% if s.health.last_snapshot_age_secs is not none %}
+            <span style="color: #8b949e; font-size: 0.7rem; white-space: nowrap;">
+              snap {{ "%.0f"|format(s.health.last_snapshot_age_secs) }}s
+            </span>
+          {% endif %}
+        {% endif %}
         {% if s.online %}
           <span class="badge badge-online">Online</span>
         {% else %}
@@ -97,41 +109,83 @@
         <label>Δ</label>
         <value>{{ "%+.4f"|format(s.account.net_delta) }}</value>
       </div>
-      <div class="metric">
-        <label>Pos</label>
-        <value>{{ s.positions|length }}</value>
-      </div>
-      <div class="metric">
-        <label>Orders</label>
-        <value>{{ s.open_orders|length }}</value>
-      </div>
     </div>
 
-    <!-- Health bar -->
-    {% if s.health %}
-    <div class="health-bar">
-      <span>⏱ {{ s.health.uptime_secs // 3600 }}h {{ (s.health.uptime_secs % 3600) // 60 }}m</span>
-      {% if s.health.last_snapshot_age_secs is not none %}
-        <span>Snap {{ "%.0f"|format(s.health.last_snapshot_age_secs) }}s ago</span>
+    <!-- Open Positions (up to 4) -->
+    {% if s.positions %}
+    <div style="margin: 0.4rem 0;">
+      <span style="color: #8b949e; font-size: 0.7rem; text-transform: uppercase;">
+        Positions ({{ s.positions|length }})
+      </span>
+      <table style="margin-top: 0.25rem; font-size: 0.72rem;">
+        <thead>
+          <tr>
+            <th>Symbol</th>
+            <th>S</th>
+            <th>Qty</th>
+            <th>Entry</th>
+            <th>Mark</th>
+            <th>UPnL</th>
+            <th>Δ</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for p in s.positions[:4] %}
+          <tr>
+            <td style="color:#79c0ff;">{{ p.symbol }}</td>
+            <td class="{{ 'positive' if p.side == 'long' else 'negative' }}" style="font-weight:600;">{{ p.side[:1]|upper }}</td>
+            <td>{{ p.qty }}</td>
+            <td>${{ "%.2f"|format(p.entry_price) }}</td>
+            <td>${{ "%.2f"|format(p.mark_price) }}</td>
+            <td class="{{ 'positive' if p.unrealized_pnl >= 0 else 'negative' }}">${{ "%+.2f"|format(p.unrealized_pnl) }}</td>
+            <td>{{ "%+.3f"|format(p.delta) }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      {% if s.positions|length > 4 %}
+      <div class="muted" style="font-size:0.7rem; padding: 0.15rem 0.5rem;">+{{ s.positions|length - 4 }} more</div>
       {% endif %}
     </div>
     {% endif %}
 
-    <!-- Compact positions list -->
-    {% if s.positions %}
-    <div class="compact-positions">
-      {% for p in s.positions[:4] %}
-      <div class="compact-pos-row">
-        <span class="pos-symbol">{{ p.symbol }}</span>
-        <span class="pos-side {{ 'positive' if p.side == 'long' else 'negative' }}">{{ p.side }}</span>
-        <span>{{ p.qty }}</span>
-        <span class="{{ 'positive' if p.unrealized_pnl >= 0 else 'negative' }}">
-          ${{ "%+.2f"|format(p.unrealized_pnl) }}
-        </span>
-      </div>
-      {% endfor %}
-      {% if s.positions|length > 4 %}
-      <div class="compact-pos-row muted">+{{ s.positions|length - 4 }} more</div>
+    <!-- Open Orders (up to 4) -->
+    {% if s.open_orders %}
+    <div style="margin: 0.4rem 0;">
+      <span style="color: #8b949e; font-size: 0.7rem; text-transform: uppercase;">
+        Orders ({{ s.open_orders|length }})
+      </span>
+      <table style="margin-top: 0.25rem; font-size: 0.72rem;">
+        <thead>
+          <tr>
+            <th>Symbol</th>
+            <th>Side</th>
+            <th>Qty</th>
+            <th>Price</th>
+            <th>Fill</th>
+            <th>Age</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for o in s.open_orders[:4] %}
+          <tr>
+            <td style="color:#79c0ff;">{{ o.symbol }}</td>
+            <td>{{ o.side|upper }}</td>
+            <td>{{ o.qty }}</td>
+            <td>
+              {% if o.price %}
+                {{ "%.4f"|format(o.price.amount) }}
+                <span class="muted">{{ o.price.currency }}</span>
+              {% else %}—{% endif %}
+            </td>
+            <td>{{ o.filled_qty }}/{{ o.qty }}</td>
+            <td>{{ ((now - o.placed_at)|int) if o.placed_at else '?' }}s</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      {% if s.open_orders|length > 4 %}
+      <div class="muted" style="font-size:0.7rem; padding: 0.15rem 0.5rem;">+{{ s.open_orders|length - 4 }} more</div>
       {% endif %}
     </div>
     {% endif %}

@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 from dotenv import load_dotenv
-from flask import Flask, Response, jsonify, redirect, render_template, request, session, url_for
+from flask import Flask, Response, jsonify, make_response, redirect, render_template, request, session, url_for
 
 import requests as http_requests
 
@@ -70,6 +70,7 @@ def discover_slots() -> List[Dict]:
 
         # Read basic info from .env
         slot_name = ""
+        account_name = ""
         exchange = ""
         environment = ""
         dashboard_port = slot_port(slot_id)
@@ -83,6 +84,8 @@ def discover_slots() -> List[Dict]:
                 val = val.strip().strip("'\"")
                 if key == "SLOT_NAME":
                     slot_name = val
+                elif key == "SLOT_ACCOUNT":
+                    account_name = val
                 elif key == "EXCHANGE":
                     exchange = val
                 elif key == "TRADING_ENVIRONMENT":
@@ -93,6 +96,7 @@ def discover_slots() -> List[Dict]:
         slots.append({
             "id": slot_id,
             "name": slot_name or f"Slot {slot_id}",
+            "account_name": account_name,
             "dir": str(d),
             "exchange": exchange,
             "environment": environment,
@@ -273,7 +277,7 @@ def api_overview():
         "deribit":  probe_exchange("deribit"),
     }
 
-    return render_template("_hub_overview.html", slots=slot_data, exchange_health=exchange_health)
+    return render_template("_hub_overview.html", slots=slot_data, exchange_health=exchange_health, now=time.time())
 
 
 @app.route("/api/recorder")
@@ -331,6 +335,13 @@ def api_slot_logs(slot_id: str):
 
 # ── Control endpoints (proxy to slots) ──────────────────────────────────
 
+def _control_response(result: Optional[Dict]) -> Response:
+    """Wrap a control JSON result with HX-Trigger so htmx refreshes the overview."""
+    resp = make_response(jsonify(result or {"ok": False, "reason": "offline"}))
+    resp.headers["HX-Trigger"] = "refreshOverview"
+    return resp
+
+
 @app.route("/api/slot/<slot_id>/pause", methods=["POST"])
 @login_required
 def slot_pause(slot_id: str):
@@ -339,7 +350,7 @@ def slot_pause(slot_id: str):
     if not slot:
         return jsonify({"ok": False, "reason": "not_found"})
     result = query_slot_control(slot["port"], "/control/pause", method="POST")
-    return jsonify(result or {"ok": False, "reason": "offline"})
+    return _control_response(result)
 
 
 @app.route("/api/slot/<slot_id>/resume", methods=["POST"])
@@ -350,7 +361,7 @@ def slot_resume(slot_id: str):
     if not slot:
         return jsonify({"ok": False, "reason": "not_found"})
     result = query_slot_control(slot["port"], "/control/resume", method="POST")
-    return jsonify(result or {"ok": False, "reason": "offline"})
+    return _control_response(result)
 
 
 @app.route("/api/slot/<slot_id>/stop", methods=["POST"])
@@ -361,7 +372,7 @@ def slot_stop(slot_id: str):
     if not slot:
         return jsonify({"ok": False, "reason": "not_found"})
     result = query_slot_control(slot["port"], "/control/stop", method="POST")
-    return jsonify(result or {"ok": False, "reason": "offline"})
+    return _control_response(result)
 
 
 @app.route("/api/slot/<slot_id>/kill", methods=["POST"])
@@ -372,7 +383,7 @@ def slot_kill(slot_id: str):
     if not slot:
         return jsonify({"ok": False, "reason": "not_found"})
     result = query_slot_control(slot["port"], "/control/kill", method="POST")
-    return jsonify(result or {"ok": False, "reason": "offline"})
+    return _control_response(result)
 
 
 # =============================================================================

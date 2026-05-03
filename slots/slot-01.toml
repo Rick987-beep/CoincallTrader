@@ -1,26 +1,30 @@
 # ===========================================================================
-# Slot 01 — Put Sell 80 DTE (Coincall)
+# Slot 01 — SuperTrend Long Call (Coincall)
 #
-# Sells one OTM BTC put per day near -0.15 delta, targeting the nearest
-# monthly expiry >=80 DTE (±15 day window).  TP at 95% captured, SL at
-# 250% loss.  EMA-20 filter blocks entry when BTC daily close < EMA-20.
-# Up to 90 concurrent open trades (monthly expiry clustering).
+# Buys a single ~30 DTE / ~0.50 delta BTC call when SuperTrend(7, 3) on 1h
+# BTCUSDT (Binance) flips from -1 to +1.  Closes when SuperTrend trend
+# turns -1 on the latest fully closed 1h bar (steady-state — never misses
+# a close signal after a restart).
+#
+# Indicator data: Binance public klines (cached).  No options stream needed.
+# Execution profile: supertrend_long_call (open: 30s fair → 180s aggressive;
+#                                          close: 30s fair → 180s aggressive).
+# Reference: docs/Backtest_Report_SuperTrend_DTE30_Delta05_EN.md
 #
 # Edit params below, then deploy:
 #   ./deployment/deploy-slot.sh 01
 # ===========================================================================
 
-name = "Put Sell 80 DTE"
-strategy = "put_sell_80dte"
+name = "SuperTrend Long Call"
+strategy = "supertrend_long_call"
 account = "coincall-main"
 
 [params]
-qty              = 0.1    # BTC per contract
-target_delta     = -0.15  # OTM put delta target
-dte              = 80     # target DTE; ±15 day window ensures daily entry
-entry_hour_start = 13     # entry window open (UTC)
-entry_hour_end   = 14     # entry window close (UTC)
-take_profit_pct  = 95     # close when 95% of premium captured
-stop_loss_pct    = 250    # close when option price = 3.5× fill (250% loss)
-check_interval   = 30     # seconds between ticks (safe up to ~90 concurrent)
-max_concurrent   = 90     # monthly expiry clustering — up to 90 open trades
+qty            = 0.1   # BTC per leg (~1 BTC notional, matches backtest)
+target_delta   = 0.50  # near-ATM call
+target_dte     = 30    # nearest expiry to this many days
+dte_min        = 7     # acceptable expiry window — min
+dte_max        = 60    # acceptable expiry window — max
+st_period      = 7     # SuperTrend ATR SMA window (per backtest)
+st_multiplier  = 3     # SuperTrend band multiplier (per backtest)
+check_interval = 15    # seconds between entry/exit evaluations (≤ bar-close detection latency)

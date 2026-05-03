@@ -34,6 +34,7 @@ from backtester.strategies.batman_calendar import BatmanCalendar
 from backtester.strategies.short_strangle_turbulence_tp import ShortStrangleTurbulenceTp
 from backtester.strategies.short_str_turb_dyn import ShortStrTurbDyn
 from backtester.strategies.long_strangle_weekend import LongStrangleWeekend
+from backtester.strategies.bt_supertrend_lc import BtSupertrendLc
 from backtester.config import cfg as _cfg
 
 # ── Strategy Registry ────────────────────────────────────────────
@@ -51,6 +52,7 @@ STRATEGIES = {
     "turbulence_strangle_tp": ShortStrangleTurbulenceTp,
     "short_str_turb_dyn": ShortStrTurbDyn,
     "long_strangle_weekend": LongStrangleWeekend,
+    "bt_supertrend_lc": BtSupertrendLc,
 }
 
 DEFAULT_OPTIONS = _cfg.data.options_parquet

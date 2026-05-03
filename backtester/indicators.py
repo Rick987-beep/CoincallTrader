@@ -47,6 +47,7 @@ from typing import Any, Callable, Dict, List, Optional
 import pandas as pd
 
 from indicators.hist_data import load_klines
+from indicators.supertrend import supertrend as _supertrend
 from indicators.turbulence import turbulence as _turbulence
 
 logger = logging.getLogger(__name__)
@@ -87,9 +88,14 @@ def _build_turbulence(df_raw: pd.DataFrame, **params) -> pd.DataFrame:
     return _turbulence(df_raw, **params)
 
 
+def _build_supertrend(df_raw: pd.DataFrame, **params) -> pd.DataFrame:
+    return _supertrend(df_raw, **params)
+
+
 # Registry: indicator name → builder function
 _BUILDERS: Dict[str, Callable[..., Any]] = {
     "turbulence": _build_turbulence,
+    "supertrend": _build_supertrend,
 }
 
 

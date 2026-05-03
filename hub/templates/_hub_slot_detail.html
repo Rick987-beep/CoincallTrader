@@ -185,7 +185,12 @@
           <td>{{ o.symbol }}</td>
           <td>{{ o.side }}</td>
           <td>{{ o.qty }}</td>
-          <td>${{ "%.2f"|format(o.price) }}</td>
+          <td>
+            {% if o.price %}
+              {{ "%.4f"|format(o.price.amount) }}
+              <span style="color:#8b949e;">{{ o.price.currency }}</span>
+            {% else %}—{% endif %}
+          </td>
           <td>{{ o.filled_qty }}/{{ o.qty }}</td>
           <td>{{ o.status }}</td>
           <td>{{ ((now - o.placed_at) // 60)|int if o.placed_at else '?' }}m</td>

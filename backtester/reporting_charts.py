@@ -19,7 +19,9 @@ import math
 
 def _fmt_val(v):
     if isinstance(v, float) and v != int(v):
-        return f"{v:.2f}"
+        # Use :g to preserve all significant digits (e.g. 0.0002 stays 0.0002,
+        # not 0.00 as with :.2f). Trailing zeros are stripped automatically.
+        return f"{v:g}"
     return str(int(v) if isinstance(v, float) else v)
 
 

@@ -484,7 +484,10 @@ class PositionMonitor:
             available_margin=acct.get('available_margin', 0.0),
             initial_margin=initial_margin,
             maintenance_margin=acct.get('maintenance_margin', 0.0),
-            unrealized_pnl=acct.get('unrealized_pnl', 0.0),
+            # Sum position-level UPnL (already USD-normalised by each exchange
+            # adapter) rather than the account-level field, which on Deribit is
+            # session_upl denominated in BTC and would display incorrectly.
+            unrealized_pnl=sum(ps.unrealized_pnl for ps in position_snapshots),
             margin_utilization=margin_util,
             positions=tuple(position_snapshots),
             net_delta=net_delta,

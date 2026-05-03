@@ -93,7 +93,7 @@ class ShortStrTurbDyn:
     """
 
     name = "short_str_turb_dyn"
-    DATE_RANGE = ("2025-12-21", "2026-04-22")
+    DATE_RANGE = ("2026-01-01", "2026-05-02")
     DESCRIPTION = (
         "Sells a strangle, naked call, or naked put on a Deribit expiry N calendar "
         "days ahead (dte=1/2/3), with legs chosen by target delta. "
@@ -116,15 +116,18 @@ class ShortStrTurbDyn:
         "leg_type":             ["strangle"],
         "dte":                  [1],
         "delta":                [0.15],
-        "entry_hour":           [18,19],
-        "stop_loss_pct":        [4.0,4.5],
+        "entry_hour":           [19],
+        "stop_loss_pct":        [4.5],
         "take_profit_pct":      [0],
         "max_hold_hours":       [0],
         "skip_weekends":        [1],
-        "min_otm_pct":          [2.1, 2.2, 2.4, 2.5],
-        "turbulence_threshold": [50,55,60],
-        "dyn_target_premium":   [150, 250, 500],   # USD; 0 = disabled (fixed qty=1)
-        "max_quantity":         [10.0],  # hard cap on contracts per trade
+        "min_otm_pct":          [2.2, 2.4, 2.5],
+        "turbulence_threshold": [60],
+        "dyn_target_premium":   [600],   # USD; 0 = disabled (fixed qty=1)
+        "max_quantity":         [20],  # hard cap on contracts per trade
+        # Minimum bid price per leg in BTC; 0 = disabled. Strategy waits (retries each
+        # 5-min tick) until ALL legs satisfy this price floor before opening.
+        "leg_min_price":        [0, 0.0001, 0.0002, 0.0003],
     }
 
     def __init__(self):
@@ -142,6 +145,7 @@ class ShortStrTurbDyn:
         self._min_otm_pct = 0
         self._dyn_target_premium = 0.0
         self._max_quantity = 10.0
+        self._leg_min_price = 0.0002   # BTC; 0 = disabled
         self._last_trade_date = None  # type: Optional[Any]
         self._watch_start = None      # type: Optional[datetime]  # when watching began
         self._exit_conditions = []
@@ -175,6 +179,7 @@ class ShortStrTurbDyn:
         self._min_otm_pct = params.get("min_otm_pct", 0)
         self._dyn_target_premium = params.get("dyn_target_premium", 0.0)
         self._max_quantity = params.get("max_quantity", 10.0)
+        self._leg_min_price = params.get("leg_min_price", 0.0002)  # BTC; 0 = disabled
         self._max_concurrent = self._dte + 1
         self._positions = []
         self._last_trade_date = None
@@ -261,6 +266,7 @@ class ShortStrTurbDyn:
             "turbulence_threshold":  self._turbulence_threshold,
             "dyn_target_premium":    self._dyn_target_premium,
             "max_quantity":          self._max_quantity,
+            "leg_min_price":         self._leg_min_price,
         }
 
     # ------------------------------------------------------------------
@@ -371,7 +377,14 @@ class ShortStrTurbDyn:
             put  = _apply_min_otm(puts,  put,  state.spot, self._min_otm_pct, is_call=False)
             if call is None or put is None:
                 return  # no qualifying strike this tick — skip entry
-        if call.bid <= 0 or put.bid <= 0:
+        # Price floor: both legs must meet leg_min_price (BTC) before we open.
+        # When leg_min_price == 0 the check is disabled; fall back to the
+        # standard zero-bid guard so we never trade on stale/bad quotes.
+        _min_p = self._leg_min_price
+        if _min_p > 0:
+            if call.bid < _min_p or put.bid < _min_p:
+                return  # retry next 5-min tick
+        elif call.bid <= 0 or put.bid <= 0:
             return
         call_usd  = call.bid_usd
         put_usd   = put.bid_usd
@@ -416,7 +429,13 @@ class ShortStrTurbDyn:
             leg = _apply_min_otm(quotes, leg, state.spot, self._min_otm_pct, is_call=is_call)
             if leg is None:
                 return  # no qualifying strike this tick — skip entry
-        if leg.bid <= 0:
+        # Price floor: the leg must meet leg_min_price (BTC) before we open.
+        # When leg_min_price == 0 the check is disabled; fall back to zero-bid guard.
+        _min_p = self._leg_min_price
+        if _min_p > 0:
+            if leg.bid < _min_p:
+                return  # retry next 5-min tick
+        elif leg.bid <= 0:
             return
         entry_usd = leg.bid_usd
         if entry_usd <= 0:

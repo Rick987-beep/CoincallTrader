@@ -174,6 +174,18 @@ class PricingEngine:
                 price_amount = fair
 
         if price_amount is not None and price_amount > 0:
+            # For sell orders: apply min_floor_price as a true floor on the computed
+            # price, not just a last resort.  This ensures e.g. min_floor_price=0.0002
+            # is respected even when fair/mark/ask are all 0.0001 (computed price is
+            # positive but below the desired minimum).
+            # Not applied to buy orders: lifting a buy price would mean overpaying to
+            # close — min_floor_price on close phases is only a zero-price safeguard.
+            if side == "sell" and min_floor_price is not None and price_amount < min_floor_price.amount:
+                return PricingResult(
+                    price=min_floor_price,
+                    fair_value=fair_price,
+                    reason=f"sell price {price_amount:.6f} below min_floor_price, using floor",
+                )
             return PricingResult(
                 price=Price(price_amount, cur),
                 fair_value=fair_price,

@@ -1,0 +1,29 @@
+# ===========================================================================
+# Slot XX — Strategy Name  (EXAMPLE — copy to slot-XX.toml and fill in)
+#
+# One file per running slot.  Each slot is an isolated copy of the codebase
+# with its own .env, venv, logs, and systemd unit (ct-slot@XX).
+#
+# Edit params below, then deploy:
+#   ./deployment/deploy-slot.sh XX
+# ===========================================================================
+
+name = "My Strategy Name"
+strategy = "strategy_module_name"   # filename in strategies/ without .py
+account = "exchange-main"           # must match a key in accounts.toml
+
+[params]
+# Strategy-specific parameters — these override the PARAM_* env var defaults
+# defined in the strategy file.  Key names must match _p("NAME", ...) calls.
+# Example:
+qty            = 0.1     # contracts per leg
+target_delta   = 0.15    # target absolute delta
+target_dte     = 1       # target days to expiry
+entry_hour     = 18      # UTC hour to open position
+stop_loss_pct  = 4.5     # SL: close when PnL loss exceeds this %
+take_profit_pct = 80.0   # TP: close when PnL gain reaches this %
+check_interval = 15      # seconds between strategy ticks
+
+# Dashboard / operational (optional — defaults applied if omitted)
+# dashboard_mode = "full"   # full | control | disabled
+# dashboard_port = 8081

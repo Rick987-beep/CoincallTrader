@@ -95,7 +95,7 @@ class ShortStrangleTurbulenceTp:
     """
 
     name = "short_strangle_turbulence_tp"
-    DATE_RANGE = ("2025-12-21", "2026-04-21")
+    DATE_RANGE = ("2026-01-01", "2026-05-02")
     DESCRIPTION = (
         "Sells a strangle, naked call, or naked put on a Deribit expiry N calendar "
         "days ahead (dte=1/2/3), with legs chosen by target delta. "
@@ -117,14 +117,14 @@ class ShortStrangleTurbulenceTp:
     PARAM_GRID = {
         "leg_type":             ["strangle"],
         "dte":                  [1],
-        "delta":                [0.15],
-        "entry_hour":           [19],
-        "stop_loss_pct":        [4.0],
+        "delta":                [0.1, 0.125, 0.15],
+        "entry_hour":           [17, 18, 19],
+        "stop_loss_pct":        [0, 4.0, 4.5, 5],
         "take_profit_pct":      [0],
         "max_hold_hours":       [0],
-        "skip_weekends":        [1],
-        "min_otm_pct":          [2.5],
-        "turbulence_threshold": [50],
+        "skip_weekends":        [0,1],
+        "min_otm_pct":          [2.2, 2.3, 2.4, 2.5],
+        "turbulence_threshold": [40,50,60],
     }
 
     def __init__(self):

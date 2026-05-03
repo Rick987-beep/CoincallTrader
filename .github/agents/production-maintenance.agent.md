@@ -107,7 +107,7 @@ The tick recorder writes market snapshots every 5 minutes at the boundaries :00,
 
 **Timing constraints:**
 - Snapshot writing completes at approximately **boundary + 10 seconds** (e.g., 09:45:10)
-- The system must be fully up and running at least **20 seconds before the next boundary** (e.g., 09:49:40)
+- Do **not** reboot within **1 minute before** the next boundary (e.g., not after 09:49:00)
 - A reboot typically takes **30 seconds** (conservative estimate)
 
 **Calculation — determine if it's safe to reboot NOW:**
@@ -122,17 +122,17 @@ The tick recorder writes market snapshots every 5 minutes at the boundaries :00,
    - `cycle_second` = `(M % 5) * 60 + S` — seconds elapsed since last 5-min boundary
    - `seconds_until_next_boundary` = `300 - cycle_second`
    - **Earliest safe start** = `cycle_second >= 10` (snapshot write is done)
-   - **Latest safe start** = `seconds_until_next_boundary > 50` (30s reboot + 20s headroom)
+   - **Latest safe start** = `seconds_until_next_boundary > 60` (1 minute clearance before next snapshot)
 
    This means the **safe reboot window** within each 5-minute cycle is:
-   - From **boundary + 10s** to **next_boundary − 50s**
-   - In cycle_second terms: `10 ≤ cycle_second ≤ 250`
-   - Example: at 09:45:10 through 09:49:10
+   - From **boundary + 10s** to **next_boundary − 60s**
+   - In cycle_second terms: `10 ≤ cycle_second ≤ 240`
+   - Example: at 09:45:10 through 09:49:00
 
 3. **Decision:**
-   - If `cycle_second` is between 10 and 250 (inclusive) → **reboot now**
+   - If `cycle_second` is between 10 and 240 (inclusive) → **reboot now**
    - If `cycle_second` < 10 → **wait until cycle_second reaches 10** (snapshot still writing)
-   - If `cycle_second` > 250 → **wait until next boundary + 10s** (not enough time)
+   - If `cycle_second` > 240 → **wait until next boundary + 10s** (too close to upcoming snapshot)
 
 4. If waiting is needed, calculate the wait in seconds and use `sleep`:
    ```bash

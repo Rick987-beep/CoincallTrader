@@ -79,7 +79,7 @@ WEEKEND_FILTER  = _p("WEEKEND_FILTER",  1, int)   # 1 = block new opens on Sat/S
 TURBULENCE_THRESHOLD = _p("TURBULENCE_THRESHOLD", 60.0)   # open only when composite < this
 
 # Risk
-STOP_LOSS_PCT    = _p("STOP_LOSS_PCT",    4.5)       # SL fires when combined fair ≥ premium × (1 + pct)
+STOP_LOSS_PCT    = _p("STOP_LOSS_PCT",    5.0)       # SL fires when combined fair ≥ premium × (1 + pct)
 TAKE_PROFIT_PCT  = _p("TAKE_PROFIT_PCT",  0.0)       # TP: close when profit ratio ≥ this (0 = disabled)
 MAX_HOLD_HOURS   = _p("MAX_HOLD_HOURS",   0, int)    # force close after N hours; 0 = disabled
 MIN_OTM_PCT      = _p("MIN_OTM_PCT",      2.4)       # min OTM distance %; 0 = disabled
@@ -111,26 +111,74 @@ def _compute_quantity(combined_premium_usd: float) -> float:
     Compute contracts-per-leg based on DYN_TARGET_PREMIUM.
 
     If DYN_TARGET_PREMIUM <= 0, returns 1.0 (fixed quantity mode).
-    Otherwise: qty = round(min(target / combined_premium_usd, MAX_QUANTITY), 1),
-    floored at 0.1 (Deribit minimum contract size).
+    Otherwise: qty = floor(target / combined_premium_usd, step=0.1),
+    capped at MAX_QUANTITY, floored at 0.1 (Deribit minimum contract size).
+    Uses floor (not round) so we never overshoot the USD target.
     """
     if DYN_TARGET_PREMIUM <= 0 or combined_premium_usd <= 0:
         return 1.0
     raw = DYN_TARGET_PREMIUM / combined_premium_usd
-    result = round(min(raw, MAX_QUANTITY), 1)
-    return max(result, 0.1)
+    # Floor to nearest 0.1 — never overshoot target premium
+    result = math.floor(raw * 10) / 10
+    return max(min(result, MAX_QUANTITY), 0.1)
+
+
+# Deribit minimum price increment in BTC
+_DERIBIT_MIN_TICK = 0.0001
+
+# Minimum assumed price per leg for quantity sizing (BTC).
+# Should match open_phase min_floor_price in the execution profile so that
+# _compute_quantity() never inflates qty based on a price the engine won't
+# actually accept.  Overridable via PARAM_MIN_QTY_PRICE_FLOOR.
+MIN_QTY_PRICE_FLOOR = _p("MIN_QTY_PRICE_FLOOR", 0.0002)
+
+
+def _bid_price(symbol: str) -> float:
+    """
+    Return the best executable (bid) price for an option, in BTC.
+
+    Used only for quantity sizing in _legs_factory — not for placing orders.
+    Fallback ladder for low-liquidity / empty-book legs:
+      1. bid > 0              → use bid directly
+      2. bid = 0, mark > 0   → use max(mark, MIN_QTY_PRICE_FLOOR)
+      3. both zero            → use MIN_QTY_PRICE_FLOOR, log a warning
+    """
+    fp = _fair(symbol)
+    if fp is None:
+        logger.warning("[ShortStrTurbDyn] _bid_price: no data for %s — using floor %.4f", symbol, MIN_QTY_PRICE_FLOOR)
+        return MIN_QTY_PRICE_FLOOR
+
+    bid  = fp.get("bid") or 0.0
+    mark = fp.get("mark") or 0.0
+
+    if bid > 0:
+        return bid
+    if mark > 0:
+        price = max(mark, MIN_QTY_PRICE_FLOOR)
+        logger.debug(
+            "[ShortStrTurbDyn] _bid_price: %s bid=0, mark=%.4f → using %.4f",
+            symbol, mark, price,
+        )
+        return price
+
+    logger.warning(
+        "[ShortStrTurbDyn] _bid_price: %s bid=0 mark=0 — using floor %.4f",
+        symbol, MIN_QTY_PRICE_FLOOR,
+    )
+    return MIN_QTY_PRICE_FLOOR
 
 
 def _legs_factory(market_data):
     """
-    Resolve option symbols and compute dynamic quantity from fair prices.
+    Resolve option symbols and compute dynamic quantity from bid prices.
     Called by StrategyRunner._open_trade() before any orders are placed.
 
     Steps:
       1. Resolve concrete option symbols via delta/DTE criteria.
-      2. Fetch fair prices for each resolved symbol.
-      3. Compute combined fair premium in USD.
-      4. Size quantity: round(min(DYN_TARGET_PREMIUM / premium_usd, MAX_QUANTITY), 1).
+      2. Fetch bid prices for each resolved symbol (see _bid_price fallback ladder).
+      3. Compute combined bid premium in USD.
+      4. Size quantity: floor(DYN_TARGET_PREMIUM / premium_usd, step=0.1),
+         capped at MAX_QUANTITY, minimum 0.1.
       5. Apply quantity to all legs and return.
     """
     # 1. Resolve symbols
@@ -144,22 +192,18 @@ def _legs_factory(market_data):
     )
     legs = resolve_legs(leg_specs, market_data)
 
-    # 2. Fetch fair prices
+    # 2. Fetch bid prices
     index_price = get_btc_index_price(use_cache=True) or 0.0
-    total_fair_btc = 0.0
-    for leg in legs:
-        fp = _fair(leg.symbol)
-        if fp and fp["fair"] > 0:
-            total_fair_btc += fp["fair"]
+    total_bid_btc = sum(_bid_price(leg.symbol) for leg in legs)
 
     # 3. Compute dynamic quantity
-    combined_premium_usd = total_fair_btc * index_price
+    combined_premium_usd = total_bid_btc * index_price
     qty = _compute_quantity(combined_premium_usd)
 
     logger.info(
-        "[ShortStrTurbDyn] legs_factory: qty=%sx "
-        "(combined_fair=%.4f BTC = $%.0f, target=$%.0f)",
-        qty, total_fair_btc, combined_premium_usd, DYN_TARGET_PREMIUM,
+        "[ShortStrTurbDyn] legs_factory: qty=%.1fx "
+        "(combined_bid=%.4f BTC = $%.0f, target=$%.0f, max=%.1f)",
+        qty, total_bid_btc, combined_premium_usd, DYN_TARGET_PREMIUM, MAX_QUANTITY,
     )
 
     # 4. Apply quantity to all legs
